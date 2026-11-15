@@ -1,0 +1,48 @@
+# Lint and test on every pull request (and on main after a merge). Read-only: no secrets, no
+# write permissions, no schedule, no deployment. The two job names, "lint" and "test", are the
+# status checks the owner makes required in the main ruleset (docs/owner-settings.md).
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Install the pinned lint tool (hashes checked)
+        run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Lint
+        run: python dev.py lint
+
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Test
+        run: python dev.py test

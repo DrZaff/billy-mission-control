@@ -1,0 +1,8 @@
+# Development tool for `python3 dev.py lint`. Install with hashes checked:
+#   python3 -m pip install --require-hashes -r requirements-dev.txt
+# The app itself has no dependencies. To upgrade ruff, take the new version's sha256 values
+# from https://pypi.org/project/ruff/#files and change this file in its own reviewed PR.
+ruff==0.17.5 \
+    --hash=sha256:40ca8afaac309b41a5b2e09e4e7beb1f824826b93c25697c4d74f573324fba4e \
+    --hash=sha256:6f6a7b138edf9cc402ca736a59d9525e6d766e5395760b72e7e146e6251ac963 \
+    --hash=sha256:625e57d80cd43352d12ea81690f3eac46cddc8c0f35026d137fb0f157f94592e

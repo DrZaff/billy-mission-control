@@ -1,0 +1,8 @@
+# Code owners: who must review changes. Every path belongs to the owner.
+#
+# On its own this file only requests a review. It becomes binding when the owner's `main`
+# ruleset turns on "Require review from Code Owners" (docs/owner-settings.md). GitHub then
+# blocks a merge until a code owner approves the exact latest commit (stale approvals are
+# dismissed). The owner enforces it; no agent or app can change the ruleset.
+
+*       @DrZaff

@@ -1,0 +1,22 @@
+[project]
+name = "billy-mission-control"
+version = "0.1.0"
+description = "Billy Mission Control: a private, read-only, phone-first cockpit (phase A1 skeleton)"
+requires-python = ">=3.12"
+# No runtime dependencies: the app uses the Python standard library only.
+dependencies = []
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, import order, bugbear, pyupgrade, and the security rules (bandit).
+select = ["E", "W", "F", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# The developer tools run fixed commands (git, ruff, unittest) without a shell.
+"dev.py" = ["S603"]
+"tools/*.py" = ["S603", "S607"]
+# The server tests pass all-interfaces addresses on purpose, to prove they are refused.
+"tests/*.py" = ["S603", "S607", "S104"]
