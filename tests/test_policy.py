@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -89,6 +90,47 @@ class App(unittest.TestCase):
     def test_no_runtime_dependencies(self):
         text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertRegex(text, r"(?m)^dependencies = \[\]$")
+
+
+# Shapes of the agent server's own details: home and install paths, its service accounts and
+# tools, and Tailscale machine names. This repository is public and holds none of them.
+MACHINE_DETAILS = re.compile(
+    r"/home/[a-z]|/opt/billy|/var/lib/billy|\.nvm/|\bbilly-pub\b|sudo -H -u|\.ts\.net\b"
+)
+
+
+def tracked_text_files() -> list[Path]:
+    out = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True
+    ).stdout.decode()
+    return [ROOT / name for name in out.split("\0") if name]
+
+
+class Machine(unittest.TestCase):
+    def test_no_details_of_the_server_are_committed(self):
+        # Codex's review of bb74c3c (blocking): the review command in the docs named the
+        # server's accounts and paths.
+        for path in tracked_text_files():
+            if path == Path(__file__).resolve():
+                continue  # this file holds the patterns themselves
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            for number, line in enumerate(text.splitlines(), 1):
+                self.assertIsNone(MACHINE_DETAILS.search(line), f"{path.name}:{number}")
+
+    def test_the_pattern_catches_each_shape(self):
+        for sample in (
+            "/home/" + "someone/x",
+            "/opt/" + "billy/x",
+            "/var/lib/" + "billy-x",
+            "~/." + "nvm/versions",
+            "billy" + "-pub",
+            "sudo " + "-H -u agent",
+            "box." + "tailnet-abc.ts" + ".net",
+        ):
+            self.assertIsNotNone(MACHINE_DETAILS.search(sample), sample)
 
 
 class Ownership(unittest.TestCase):

@@ -47,11 +47,8 @@ Least privilege, the same pattern as "Main - Owner Merge Only" on the main site'
 
 ## 6. Codex review
 
-Every commit here is reviewed by Codex at its exact SHA before the owner merges. The repository is public, so the review step on the agent server clones it without credentials, exactly as for the main site:
+Every commit here is reviewed by Codex at its exact SHA before the owner merges. The repository is public, so the review step on the agent server clones it without credentials, exactly as for the main site. Use the main site's review command, in [docs/agents/handoff.md](https://github.com/DrZaff/ai-medicine-collective/blob/main/docs/agents/handoff.md), with `--repo billy-mission-control` added. Claude gives it filled in with the branch and SHA for each commit.
 
-```sh
-N=/home/agent/.nvm/versions/node/v26.13.0/bin; cd /tmp && \
-sudo -H -u agent env PATH="$N:/usr/local/bin:/usr/bin:/bin" python3 /opt/billy/handoff.py review <branch> <sha> --repo billy-mission-control
-```
+The command itself isn't copied here: it names the server's accounts and paths, and this repository holds no details of that machine (AGENTS.md).
 
-This needs Billy's `handoff.py` to list `billy-mission-control` as public (a change in the main site's repository). The Billy publisher isn't installed here, so there is no publish step: after a passing review, Claude opens the PR, and its head must be the reviewed SHA.
+The Billy publisher isn't installed here, so there is no publish step. After a passing review, Claude opens the PR, and its head must be the reviewed SHA.
