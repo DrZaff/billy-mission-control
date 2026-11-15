@@ -4,6 +4,7 @@ provenance, clinical review, merges, and malformed or adversarial input. Synthet
 from __future__ import annotations
 
 import copy
+import itertools
 import json
 import unittest
 from pathlib import Path
@@ -661,6 +662,87 @@ class CodexReviewOf107bd35(unittest.TestCase):
                 self.assertIsInstance(s.state, State)
                 count += 1
         self.assertGreater(count, 500)
+
+
+class CodexReviewOfE7833bd(unittest.TestCase):
+    """Regressions for Codex's review of e7833bd (two blocking findings)."""
+
+    def test_findings_without_a_known_severity_are_refused(self):
+        for finding in (
+            {},
+            {"severity": None},
+            {"severity": "BLOCKING"},
+            {"severity": "high"},
+            {"severity": ["blocking"]},
+            "blocking",
+            None,
+        ):
+            review = run("review", A, 3, verdict="no_blocking_findings", findings=[finding])
+            for extra in ((), (published(),)):
+                s = derive(
+                    task(
+                        runs=[run("build"), review, *extra],
+                        pull_request=pr() if extra else None,
+                    )
+                )
+                self.assertEqual(s.state, State.UNKNOWN, finding)
+                self.assertIn(Flag.INVALID_INPUT, s.flags, finding)
+
+    def test_a_merge_with_a_malformed_finding_is_never_merged(self):
+        review = run("review", A, 3, verdict="no_blocking_findings", findings=[{}])
+        s = derive(
+            task(
+                runs=[run("build"), review, published()],
+                pull_request=pr(state="closed", merged=True, merged_by=OWNER),
+            )
+        )
+        self.assertEqual(s.state, State.UNKNOWN)
+
+    def test_known_nonblocking_severities_still_pass(self):
+        findings = [{"severity": "should_fix"}, {"severity": "note"}]
+        review = run("review", A, 3, verdict="no_blocking_findings", findings=findings)
+        self.assertEqual(derive(task(runs=[run("build"), review])).state, State.REVIEWED)
+
+    def test_later_work_does_not_answer_a_question(self):
+        runs = [
+            run("build"),
+            run("question", sha=None, minute=3),
+            run("build", minute=4),
+            passed(A, 5),
+        ]
+        s = derive(task(runs=runs))
+        self.assertEqual(s.state, State.BLOCKED)
+        s = derive(task(runs=runs, pull_request=pr()))
+        self.assertEqual(s.state, State.BLOCKED)
+
+    def test_only_an_owner_action_after_the_question_answers_it(self):
+        runs = [run("build"), run("question", sha=None, minute=3), passed(A, 5)]
+        for minute, expected in ((3, State.BLOCKED), (4, State.REVIEWED)):
+            timeline = [labeled(minute=0), labeled(kind="authorized", label=None, minute=minute)]
+            s = derive(task(issue={"number": 7, "state": "open", "timeline": timeline}, runs=runs))
+            self.assertEqual(s.state, expected, minute)
+        # Someone else's authorisation answers nothing.
+        timeline = [labeled(minute=0), labeled(STRANGER, kind="authorized", label=None, minute=4)]
+        s = derive(task(issue={"number": 7, "state": "open", "timeline": timeline}, runs=runs))
+        self.assertEqual(s.state, State.BLOCKED)
+
+    def test_same_instant_records_give_the_same_state_in_any_order(self):
+        cases = [
+            [run("build", minute=3), run("question", sha=None, minute=3)],
+            [passed(A, 3), run("failure", sha=None, minute=3)],
+            [passed(A, 3), run("question", sha=None, minute=3), run("failure", sha=None, minute=3)],
+        ]
+        for records in cases:
+            states = set()
+            for order in itertools.permutations(records):
+                states.add(derive(task(runs=[run("build"), *order])).state)
+            self.assertEqual(len(states), 1, [r["step"] for r in records])
+        self.assertEqual(
+            derive(
+                task(runs=[run("build"), passed(A, 3), run("failure", sha=None, minute=3)])
+            ).state,
+            State.FAILED,
+        )
 
 
 class Fixtures(unittest.TestCase):

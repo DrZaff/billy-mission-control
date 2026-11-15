@@ -291,6 +291,7 @@ class _Task:
     pr: _PR | None
 
 
+SEVERITIES = frozenset({"blocking", "should_fix", "note"})
 RUN_STEPS = frozenset({"build", "review", "publish", "question", "failure"})
 REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"})
 
@@ -305,7 +306,17 @@ def _parse_run(raw: Any, i: int) -> _Run:
     if step == "review" and status == "finished":
         verdict = _choice(verdict, ("no_blocking_findings", "changes_needed"), f"runs[{i}].verdict")
     findings = _list(r.get("findings", []), f"runs[{i}].findings")
-    blocking = any(_map(f, f"runs[{i}].findings[]").get("severity") == "blocking" for f in findings)
+    # Every finding must carry a known severity: a missing or unknown one is refused rather
+    # than read as harmless, so malformed review data can never produce a passing review.
+    severities = [
+        _choice(
+            _map(f, f"runs[{i}].findings[{j}]").get("severity"),
+            SEVERITIES,
+            f"runs[{i}].findings[{j}].severity",
+        )
+        for j, f in enumerate(findings)
+    ]
+    blocking = "blocking" in severities
     sha = r.get("sha")
     if step in ("build", "review", "publish") and not (step == "build" and status == "started"):
         sha = _sha(sha, f"runs[{i}].sha")
@@ -634,15 +645,21 @@ def derive(raw: Any) -> TaskStatus:
             )
         return status(State.PROPOSED, "Not authorised by the owner.", head)
 
-    latest = max(current, key=lambda r: r.at, default=None)
-    if latest and latest.step == "failure":
-        return status(State.FAILED, "The latest run failed.", head)
-    if (
-        latest
-        and latest.step == "question"
-        and not (last_owner_action and last_owner_action > latest.at)
-    ):
+    # An agent's question holds the task until the owner acts after it (authorises again).
+    # Later builds or reviews never clear it: only the owner can. An owner action at the same
+    # instant as the question doesn't count as an answer.
+    unanswered = [
+        r
+        for r in current
+        if r.step == "question" and not (last_owner_action and last_owner_action > r.at)
+    ]
+    if unanswered:
         return status(State.BLOCKED, "The agent asked a question; waiting for the owner.", head)
+    # A failure among the latest records (any of them, if several share the latest instant)
+    # means the task failed; a later record means the agent tried again.
+    latest_at = max((r.at for r in current), default=None)
+    if any(r.step == "failure" and r.at == latest_at for r in current):
+        return status(State.FAILED, "The latest run failed.", head)
 
     if head is None:
         if any(r.step == "build" for r in current):
