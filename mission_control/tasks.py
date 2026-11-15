@@ -71,9 +71,10 @@ from fnmatch import fnmatchcase
 from typing import Any
 
 READY_LABEL = "agent:ready"
-SHA = re.compile(r"^[0-9a-f]{40}$")
-REPO = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
-LOGIN = re.compile(r"^[A-Za-z0-9-]+(\[bot\])?$")
+# Matched with fullmatch: "$" would also accept a trailing newline.
+SHA = re.compile(r"[0-9a-f]{40}")
+REPO = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+")
+LOGIN = re.compile(r"[A-Za-z0-9-]+(\[bot\])?")
 
 
 class State(StrEnum):
@@ -181,12 +182,12 @@ def _text(value: Any, name: str) -> str:
 
 
 def _sha(value: Any, name: str) -> str:
-    _req(isinstance(value, str) and bool(SHA.match(value)), f"{name} must be a full 40-hex SHA")
+    _req(isinstance(value, str) and bool(SHA.fullmatch(value)), f"{name} must be a full 40-hex SHA")
     return value
 
 
 def _login(value: Any, name: str) -> str:
-    _req(isinstance(value, str) and bool(LOGIN.match(value)), f"{name} must be a GitHub login")
+    _req(isinstance(value, str) and bool(LOGIN.fullmatch(value)), f"{name} must be a GitHub login")
     return value
 
 
@@ -300,7 +301,7 @@ def _parse_run(raw: Any, i: int) -> _Run:
     r = _map(raw, f"runs[{i}]")
     step = _choice(r.get("step"), RUN_STEPS, f"runs[{i}].step")
     repo = _text(r.get("repo"), f"runs[{i}].repo")
-    _req(bool(REPO.match(repo)), f"runs[{i}].repo must be owner/name")
+    _req(bool(REPO.fullmatch(repo)), f"runs[{i}].repo must be owner/name")
     status = _choice(r.get("status", "finished"), ("started", "finished"), f"runs[{i}].status")
     verdict = r.get("verdict")
     if step == "review" and status == "finished":
@@ -411,7 +412,7 @@ def parse(raw: Any) -> _Task:
     """Validate one task's input; raises InvalidInput with the first problem found."""
     t = _map(raw, "task")
     repo = _text(t.get("repo"), "repo")
-    _req(bool(REPO.match(repo)), "repo must be owner/name")
+    _req(bool(REPO.fullmatch(repo)), "repo must be owner/name")
     issue = _map(t.get("issue"), "issue")
     number = issue.get("number")
     _req(isinstance(number, int) and not isinstance(number, bool), "issue.number must be a number")
@@ -678,6 +679,27 @@ def derive(raw: Any) -> TaskStatus:
                 head,
             )
 
+    # Fix rounds: commits that failed review since the owner's latest decision. Once they exceed
+    # the limit, the task waits for the owner whatever happens next: further builds or a later
+    # passing review don't clear it. Only the owner authorising again (after the review that
+    # used the last round) starts a new budget.
+    failed_rounds = {
+        r.sha
+        for r in current
+        if r.step == "review"
+        and r.status == "finished"
+        and verdicts.get(r.sha) == {"fail"}
+        and r.at >= last_owner_action
+    }
+    if len(failed_rounds) > task.max_fix_rounds:
+        flags.add(Flag.FIX_ROUNDS_EXHAUSTED)
+        return status(
+            State.AWAITING_OWNER,
+            f"{len(failed_rounds)} commits failed review, more than the "
+            f"{task.max_fix_rounds} fix round(s) allowed; the owner decides.",
+            head,
+        )
+
     head_verdict = verdicts.get(head)
     if verdicts and head_verdict is None:
         flags.add(Flag.STALE_REVIEW)
@@ -695,15 +717,6 @@ def derive(raw: Any) -> TaskStatus:
         return status(State.BUILDING, f"{head[:12]} hasn't been reported by the builder.", head)
 
     if head_verdict == {"fail"}:
-        rounds = len([sha for sha, v in verdicts.items() if v == {"fail"}])
-        if rounds > task.max_fix_rounds:
-            flags.add(Flag.FIX_ROUNDS_EXHAUSTED)
-            return status(
-                State.AWAITING_OWNER,
-                f"Review of {head[:12]} found blocking problems and the fix rounds are used "
-                "up; the owner decides.",
-                head,
-            )
         return status(State.CHANGES_NEEDED, f"Review of {head[:12]} found blocking problems.", head)
 
     # The head commit passed review.

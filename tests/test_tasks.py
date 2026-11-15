@@ -745,6 +745,72 @@ class CodexReviewOfE7833bd(unittest.TestCase):
         )
 
 
+class CodexReviewOfFfa417f(unittest.TestCase):
+    """Regressions for Codex's review of ffa417f (one blocking finding, one should-fix)."""
+
+    def exhausted_then(self, *later, timeline=None, **over):
+        # Commits A and B both fail review: two failed rounds with one allowed.
+        runs = [run("build"), failed(A, 3), run("build", B, 4), failed(B, 5), *later]
+        return derive(
+            task(
+                issue={"number": 7, "state": "open", "timeline": timeline or [labeled()]},
+                runs=runs,
+                **over,
+            )
+        )
+
+    def test_more_agent_work_does_not_clear_exhausted_fix_rounds(self):
+        later = [
+            (run("build", C, 6),),
+            (run("build", C, 6), passed(C, 7)),
+            (run("build", C, 6), passed(C, 7), dict(published(C, 8))),
+        ]
+        for records in later:
+            over = {"branch": {"name": "claude/x", "head": C}}
+            if len(records) == 3:
+                over["pull_request"] = pr(head=C)
+            s = self.exhausted_then(*records, **over)
+            self.assertEqual(s.state, State.AWAITING_OWNER, [r["step"] for r in records])
+            self.assertIn(Flag.FIX_ROUNDS_EXHAUSTED, s.flags)
+
+    def test_the_owner_authorising_again_starts_a_new_budget(self):
+        timeline = [labeled(minute=0), labeled(kind="authorized", label=None, minute=6)]
+        s = self.exhausted_then(
+            run("build", C, 7),
+            passed(C, 8),
+            timeline=timeline,
+            branch={"name": "claude/x", "head": C},
+        )
+        self.assertEqual(s.state, State.REVIEWED)
+        self.assertNotIn(Flag.FIX_ROUNDS_EXHAUSTED, s.flags)
+
+    def test_an_owner_action_before_the_last_failed_round_doesnt_reset_it(self):
+        timeline = [labeled(minute=0), labeled(kind="authorized", label=None, minute=4)]
+        s = self.exhausted_then(
+            run("build", C, 6),
+            failed(C, 7),
+            run("build", D, 8),
+            passed(D, 9),
+            timeline=timeline,
+            branch={"name": "claude/x", "head": D},
+        )
+        self.assertEqual(s.state, State.AWAITING_OWNER)
+
+    def test_identifiers_with_a_trailing_newline_are_refused(self):
+        bad = [
+            task(branch={"name": "claude/x", "head": A + "\n"}),
+            task(runs=[run("build", A + "\n")]),
+            task(repo=REPO + "\n"),
+            task(owner=OWNER + "\n"),
+            task(pull_request=pr(head=A + "\n")),
+            task(pull_request=pr(checks=[check("lint", A + "\n"), check("test")])),
+        ]
+        for value in bad:
+            s = derive(value)
+            self.assertEqual(s.state, State.UNKNOWN, value)
+            self.assertIn(Flag.INVALID_INPUT, s.flags)
+
+
 class Fixtures(unittest.TestCase):
     """Self-contained JSON examples, also meant for phase A3's screens."""
 
