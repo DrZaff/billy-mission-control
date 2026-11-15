@@ -92,10 +92,14 @@ class App(unittest.TestCase):
         self.assertRegex(text, r"(?m)^dependencies = \[\]$")
 
 
-# Shapes of the agent server's own details: home and install paths, its service accounts and
-# tools, and Tailscale machine names. This repository is public and holds none of them.
+# Generic shapes of a server's details: absolute system paths, privilege escalation, a Node
+# version manager folder, Tailscale machine names. Deliberately generic: the guard itself must
+# not name any account or path of the real server, because this repository is public.
 MACHINE_DETAILS = re.compile(
-    r"/home/[a-z]|/opt/billy|/var/lib/billy|\.nvm/|\bbilly-pub\b|sudo -H -u|\.ts\.net\b"
+    r"(?<![\w.])/(?:home|opt|srv|etc|var/lib)/[A-Za-z0-9_.-]"
+    r"|\bsudo\s"
+    r"|\.nvm[/\\]"
+    r"|\.ts\.net\b"
 )
 
 
@@ -108,11 +112,9 @@ def tracked_text_files() -> list[Path]:
 
 class Machine(unittest.TestCase):
     def test_no_details_of_the_server_are_committed(self):
-        # Codex's review of bb74c3c (blocking): the review command in the docs named the
-        # server's accounts and paths.
+        # Codex's reviews of bb74c3c and 09fd27d (blocking): the docs, then this guard's own
+        # pattern, named the server's accounts and paths. No file is exempt, this one included.
         for path in tracked_text_files():
-            if path == Path(__file__).resolve():
-                continue  # this file holds the patterns themselves
             try:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
@@ -121,16 +123,29 @@ class Machine(unittest.TestCase):
                 self.assertIsNone(MACHINE_DETAILS.search(line), f"{path.name}:{number}")
 
     def test_the_pattern_catches_each_shape(self):
+        # Samples are assembled at run time so this file contains none of the shapes.
         for sample in (
-            "/home/" + "someone/x",
-            "/opt/" + "billy/x",
-            "/var/lib/" + "billy-x",
+            "/" + "home/someone/x",
+            "/" + "opt/tool/x",
+            "/" + "var/lib/thing",
+            "/" + "etc/hosts",
+            "/" + "srv/www",
+            "su" + "do -u x id",
             "~/." + "nvm/versions",
-            "billy" + "-pub",
-            "sudo " + "-H -u agent",
-            "box." + "tailnet-abc.ts" + ".net",
+            "box.tail0." + "ts" + ".net",
         ):
             self.assertIsNotNone(MACHINE_DETAILS.search(sample), sample)
+
+    def test_ordinary_text_passes(self):
+        for sample in (
+            "docs/owner-settings.md",
+            "https://github.com/DrZaff/x",
+            "a/home/b",
+            "pseudo code",
+            "--repo billy-mission-control",
+            "127.0.0.1:8765",
+        ):
+            self.assertIsNone(MACHINE_DETAILS.search(sample), sample)
 
 
 class Ownership(unittest.TestCase):
