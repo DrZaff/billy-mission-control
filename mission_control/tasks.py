@@ -21,7 +21,7 @@ Input contract (all keys are checked; unknown keys are ignored):
       "max_fix_rounds": 1,                   # blocking reviews allowed before the owner decides
       "paused": false,                       # the stop switch
       "issue": {"number": 7, "state": "open" | "closed", "timeline": [event, ...]},
-      "branch": {"name": "claude/x", "head": "<40 hex>"} | null,
+      "branch": {"name": "claude/x", "head": "<40 hex>" | null} | null,  # the source branch
       "runs": [run, ...],                    # Billy's run records (build, review, publish, ...)
       "pull_request": pull_request | null,
     }
@@ -33,6 +33,9 @@ Input contract (all keys are checked; unknown keys are ignored):
                    including the label's mere presence and every comment body, is ignored.
     run           {"step": "build" | "review" | "publish" | "question" | "failure",
                    "repo": "owner/name", "branch": str, "sha": "<40 hex>", "at": ISO 8601,
+                   (build and review records must name the task's source branch; records for
+                    another repository or branch, or from before the owner's authorisation
+                    began, are ignored and flagged)
                    "status": "started" | "finished",          (build and review; default finished)
                    "verdict": "no_blocking_findings" | "changes_needed",   (finished review)
                    "findings": [{"severity": "blocking" | "should_fix" | "note"}],
@@ -107,6 +110,8 @@ class Flag(StrEnum):
     PR_BEFORE_REVIEW = "pr_before_review"  # a PR is open while its head has no passing review
     HEAD_MISMATCH = "head_mismatch"  # the PR head isn't the commit that was reviewed and published
     FIX_ROUNDS_EXHAUSTED = "fix_rounds_exhausted"
+    # a record from before the owner's current authorisation began (ignored)
+    RECORD_BEFORE_AUTHORIZATION = "record_before_authorization"
     CHECKS_PASSED = "checks_passed"
     CHECKS_PENDING = "checks_pending"
     CHECKS_MISSING = "checks_missing"  # a required check has no result for the head commit
@@ -136,6 +141,7 @@ ATTENTION_FLAGS = frozenset(
         Flag.LABEL_WITHOUT_OWNER,
         Flag.WRONG_REPO_RECORD,
         Flag.WRONG_BRANCH_RECORD,
+        Flag.RECORD_BEFORE_AUTHORIZATION,
         Flag.PR_BEFORE_REVIEW,
         Flag.CHECKS_FAILING,
         Flag.MERGED_WITH_CHECKS_NOT_PASSED,
@@ -192,6 +198,14 @@ def _time(value: Any, name: str) -> datetime:
         raise InvalidInput(f"{name} must be an ISO 8601 time") from None
     _req(parsed.tzinfo is not None, f"{name} must include a time zone")
     return parsed
+
+
+def _choice(value: Any, allowed, name: str) -> str:
+    _req(
+        isinstance(value, str) and value in allowed,
+        f"{name} must be one of {', '.join(sorted(allowed))}",
+    )
+    return value
 
 
 def _list(value: Any, name: str) -> list:
@@ -283,19 +297,14 @@ REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMIS
 
 def _parse_run(raw: Any, i: int) -> _Run:
     r = _map(raw, f"runs[{i}]")
-    step = r.get("step")
-    _req(step in RUN_STEPS, f"runs[{i}].step must be one of {sorted(RUN_STEPS)}")
+    step = _choice(r.get("step"), RUN_STEPS, f"runs[{i}].step")
     repo = _text(r.get("repo"), f"runs[{i}].repo")
     _req(bool(REPO.match(repo)), f"runs[{i}].repo must be owner/name")
-    status = r.get("status", "finished")
-    _req(status in ("started", "finished"), f"runs[{i}].status must be started or finished")
+    status = _choice(r.get("status", "finished"), ("started", "finished"), f"runs[{i}].status")
     verdict = r.get("verdict")
-    findings = _list(r.get("findings", []), f"runs[{i}].findings")
     if step == "review" and status == "finished":
-        _req(
-            verdict in ("no_blocking_findings", "changes_needed"),
-            f"runs[{i}].verdict must be no_blocking_findings or changes_needed",
-        )
+        verdict = _choice(verdict, ("no_blocking_findings", "changes_needed"), f"runs[{i}].verdict")
+    findings = _list(r.get("findings", []), f"runs[{i}].findings")
     blocking = any(_map(f, f"runs[{i}].findings[]").get("severity") == "blocking" for f in findings)
     sha = r.get("sha")
     if step in ("build", "review", "publish") and not (step == "build" and status == "started"):
@@ -306,7 +315,8 @@ def _parse_run(raw: Any, i: int) -> _Run:
     if step == "publish":
         _req(isinstance(pr, int) and not isinstance(pr, bool), f"runs[{i}].pr must be a number")
     branch = r.get("branch")
-    if branch is not None:
+    if step in ("build", "review") or branch is not None:
+        # A build or review is bound to its source branch, so it must name one.
         branch = _text(branch, f"runs[{i}].branch")
     return _Run(
         step=step,
@@ -326,8 +336,9 @@ def _parse_pr(raw: Any) -> _PR:
     p = _map(raw, "pull_request")
     number = p.get("number")
     _req(isinstance(number, int) and not isinstance(number, bool), "pull_request.number")
-    state = p.get("state")
-    _req(state in ("open", "closed"), "pull_request.state must be open or closed")
+    state = _choice(p.get("state"), ("open", "closed"), "pull_request.state")
+    draft = p.get("draft", False)
+    _req(isinstance(draft, bool), "pull_request.draft must be true or false")
     merged = p.get("merged", False)
     _req(isinstance(merged, bool), "pull_request.merged must be true or false")
     _req(not (merged and state == "open"), "pull_request can't be open and merged")
@@ -337,14 +348,16 @@ def _parse_pr(raw: Any) -> _PR:
     reviews = []
     for i, raw_review in enumerate(_list(p.get("reviews", []), "pull_request.reviews")):
         rv = _map(raw_review, f"pull_request.reviews[{i}]")
-        _req(rv.get("state") in REVIEW_STATES, f"pull_request.reviews[{i}].state")
-        _req(rv.get("user_type", "User") in ("User", "Bot"), f"pull_request.reviews[{i}].user_type")
+        review_state = _choice(rv.get("state"), REVIEW_STATES, f"pull_request.reviews[{i}].state")
+        user_type = _choice(
+            rv.get("user_type", "User"), ("User", "Bot"), f"pull_request.reviews[{i}].user_type"
+        )
         user = _login(rv.get("user"), f"pull_request.reviews[{i}].user")
         reviews.append(
             _Review(
                 user=user,
-                is_bot=rv.get("user_type", "User") == "Bot" or user.endswith("[bot]"),
-                state=rv["state"],
+                is_bot=user_type == "Bot" or user.endswith("[bot]"),
+                state=review_state,
                 commit=_sha(rv.get("commit_id"), f"pull_request.reviews[{i}].commit_id"),
                 at=_time(rv.get("at"), f"pull_request.reviews[{i}].at"),
             )
@@ -352,8 +365,11 @@ def _parse_pr(raw: Any) -> _PR:
     checks = []
     for i, raw_check in enumerate(_list(p.get("checks", []), "pull_request.checks")):
         c = _map(raw_check, f"pull_request.checks[{i}]")
-        status = c.get("status")
-        _req(status in ("queued", "in_progress", "completed"), f"pull_request.checks[{i}].status")
+        status = _choice(
+            c.get("status"),
+            ("queued", "in_progress", "completed"),
+            f"pull_request.checks[{i}].status",
+        )
         conclusion = c.get("conclusion")
         _req(
             conclusion is None or isinstance(conclusion, str),
@@ -370,7 +386,7 @@ def _parse_pr(raw: Any) -> _PR:
     return _PR(
         number=number,
         open=state == "open",
-        draft=bool(p.get("draft", False)),
+        draft=draft,
         merged=merged,
         merged_by=merged_by,
         head=_sha(p.get("head_sha"), "pull_request.head_sha"),
@@ -386,8 +402,9 @@ def parse(raw: Any) -> _Task:
     repo = _text(t.get("repo"), "repo")
     _req(bool(REPO.match(repo)), "repo must be owner/name")
     issue = _map(t.get("issue"), "issue")
-    _req(isinstance(issue.get("number"), int), "issue.number must be a number")
-    _req(issue.get("state") in ("open", "closed"), "issue.state must be open or closed")
+    number = issue.get("number")
+    _req(isinstance(number, int) and not isinstance(number, bool), "issue.number must be a number")
+    _choice(issue.get("state"), ("open", "closed"), "issue.state")
     timeline = []
     for i, raw_event in enumerate(_list(issue.get("timeline", []), "issue.timeline")):
         e = _map(raw_event, f"issue.timeline[{i}]")
@@ -405,7 +422,8 @@ def parse(raw: Any) -> _Task:
     if branch is not None:
         b = _map(branch, "branch")
         branch_name = _text(b.get("name"), "branch.name")
-        branch_head = _sha(b.get("head"), "branch.head")
+        if b.get("head") is not None:
+            branch_head = _sha(b.get("head"), "branch.head")
     max_rounds = t.get("max_fix_rounds", 1)
     _req(
         isinstance(max_rounds, int) and not isinstance(max_rounds, bool) and max_rounds >= 0,
@@ -436,23 +454,27 @@ def parse(raw: Any) -> _Task:
 # ---------------------------------------------------------------- derivation
 
 
-def _authorization(task: _Task, flags: set[Flag]) -> datetime | None:
-    """When the owner last authorised the work, or None. Only the owner's own "labeled
-    agent:ready" or "authorized" event counts. Removing the label (by anyone) withdraws it, and
-    an add and a removal at the same instant count as withdrawn: when in doubt, not authorised."""
-    current: datetime | None = None
+def _authorization(task: _Task, flags: set[Flag]) -> tuple[datetime | None, datetime | None]:
+    """(since, last): when the owner's current authorisation began, and the owner's latest
+    authorising action, or (None, None) if the work is not authorised now.
+
+    Only the owner's own "labeled agent:ready" or "authorized" event counts. Authorising again
+    while already authorised keeps the start (so earlier work in the same authorisation still
+    counts) and moves `last` (which answers an agent's question). Removing the label, by anyone,
+    withdraws it; an add and a removal at the same instant count as withdrawn."""
+    since: datetime | None = None
+    last: datetime | None = None
     # At the same instant a removal sorts last, so it wins over an add or an authorisation.
     for e in sorted(task.timeline, key=lambda e: (e.at, e.kind == "unlabeled")):
-        if e.kind == "labeled" and e.label == READY_LABEL:
-            if e.actor == task.owner:
-                current = e.at
-            else:
-                flags.add(Flag.LABEL_WITHOUT_OWNER)
-        elif e.kind == "unlabeled" and e.label == READY_LABEL:
-            current = None
-        elif e.kind == "authorized" and e.actor == task.owner:
-            current = e.at
-    return current
+        ready = e.label == READY_LABEL
+        if e.kind == "labeled" and ready and e.actor != task.owner:
+            flags.add(Flag.LABEL_WITHOUT_OWNER)
+        elif (e.kind == "labeled" and ready) or (e.kind == "authorized" and e.actor == task.owner):
+            since = e.at if since is None else since
+            last = e.at
+        elif e.kind == "unlabeled" and ready:
+            since = last = None
+    return since, last
 
 
 def _checks(task: _Task, head: str, flags: set[Flag]) -> bool:
@@ -477,15 +499,23 @@ def _checks(task: _Task, head: str, flags: set[Flag]) -> bool:
 
 
 def _clinician_approved(task: _Task, head: str) -> bool:
-    """A clinician's own GitHub approval of exactly this commit, not later withdrawn. Bots never
-    count, and neither does any review report outside GitHub's reviews (such as Codex's)."""
-    latest: dict[str, _Review] = {}
-    for rv in sorted(task.pr.reviews, key=lambda r: r.at):
+    """A clinician's own GitHub approval of exactly this commit, not later withdrawn, with no
+    clinician asking for changes to it. Bots never count, and neither does any review report
+    outside GitHub's reviews (such as Codex's). Each clinician's latest decisive review counts;
+    two different decisions at the same instant are ambiguous and block, whatever the input
+    order."""
+    by_user: dict[str, list[_Review]] = {}
+    for rv in task.pr.reviews:
         if rv.is_bot or rv.user not in task.clinicians or rv.commit != head:
             continue
         if rv.state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
-            latest[rv.user] = rv
-    return any(rv.state == "APPROVED" for rv in latest.values())
+            by_user.setdefault(rv.user, []).append(rv)
+    decisions = set()
+    for reviews in by_user.values():
+        at = max(rv.at for rv in reviews)
+        states = {rv.state for rv in reviews if rv.at == at}
+        decisions.add(states.pop() if len(states) == 1 else "AMBIGUOUS")
+    return "APPROVED" in decisions and not decisions & {"CHANGES_REQUESTED", "AMBIGUOUS"}
 
 
 def derive(raw: Any) -> TaskStatus:
@@ -494,6 +524,13 @@ def derive(raw: Any) -> TaskStatus:
         task = parse(raw)
     except InvalidInput as error:
         return TaskStatus(State.UNKNOWN, frozenset({Flag.INVALID_INPUT}), (str(error),))
+    except (TypeError, ValueError, KeyError, AttributeError, OverflowError) as error:
+        # A shape parse() doesn't anticipate. Still never raise: the input can't be trusted.
+        return TaskStatus(
+            State.UNKNOWN,
+            frozenset({Flag.INVALID_INPUT}),
+            (f"Unreadable input ({type(error).__name__}).",),
+        )
     flags: set[Flag] = set()
     reasons: list[str] = []
     pr = task.pr
@@ -512,19 +549,31 @@ def derive(raw: Any) -> TaskStatus:
             pr.number if pr else None,
         )
 
-    # Records for another repository or branch never count, and are reported.
+    # Records for another repository or branch never count, and are reported. A build or review
+    # must name exactly the task's source branch (parse() requires one); with no source branch
+    # known, none can be matched. Publish records are bound by PR number and commit instead.
     runs = []
     for r in task.runs:
         if r.repo != task.repo:
             flags.add(Flag.WRONG_REPO_RECORD)
-        elif task.branch and r.branch and r.branch != task.branch and r.step != "publish":
+        elif r.step in ("build", "review") and (task.branch is None or r.branch != task.branch):
+            flags.add(Flag.WRONG_BRANCH_RECORD)
+        elif r.branch is not None and r.step != "publish" and r.branch != task.branch:
             flags.add(Flag.WRONG_BRANCH_RECORD)
         else:
             runs.append(r)
 
+    since, last_owner_action = _authorization(task, flags)
+
+    # Only records from within the owner's current authorisation are this task's work. Earlier
+    # records (before it began, or from a withdrawn one) never count, and are reported.
+    current = [r for r in runs if since is not None and r.at >= since]
+    if since is not None and len(current) < len(runs):
+        flags.add(Flag.RECORD_BEFORE_AUTHORIZATION)
+
     # Two finished reviews of the same commit that disagree: nothing about it can be trusted.
     verdicts: dict[str, set[str]] = {}
-    for r in runs:
+    for r in current:
         if r.step == "review" and r.status == "finished":
             passed = r.verdict == "no_blocking_findings" and not r.blocking
             verdicts.setdefault(r.sha, set()).add("pass" if passed else "fail")
@@ -536,8 +585,9 @@ def derive(raw: Any) -> TaskStatus:
             ("Two reviews of the same commit disagree; check the run records.",),
         )
 
-    authorized_at = _authorization(task, flags)
     head = pr.head if pr else task.branch_head
+    # Clinical gating looks at every file any record touched, authorised or not: when in
+    # doubt, clinical.
     files = set(pr.files if pr else ())
     for r in runs:
         files.update(r.files)
@@ -558,7 +608,7 @@ def derive(raw: Any) -> TaskStatus:
         if Flag.CLINICAL in flags and not _clinician_approved(task, pr.head):
             flags.add(Flag.MERGED_WITHOUT_CLINICIAN)
             problems.append("clinical files merged without a clinician's approval of that commit")
-        if authorized_at is None:
+        if since is None:
             flags.add(Flag.UNAUTHORIZED_WORK)
             problems.append("the work was never authorised by the owner")
         checks_ok = _checks(task, pr.head, flags)
@@ -576,7 +626,7 @@ def derive(raw: Any) -> TaskStatus:
     if (pr and not pr.open) or not task.issue_open:
         return status(State.CLOSED, "Closed without merging.", head)
 
-    if authorized_at is None:
+    if since is None:
         if runs or pr:
             flags.add(Flag.UNAUTHORIZED_WORK)
             return status(
@@ -584,12 +634,14 @@ def derive(raw: Any) -> TaskStatus:
             )
         return status(State.PROPOSED, "Not authorised by the owner.", head)
 
-    # Only what happened after the latest authorisation counts as this round of work.
-    current = [r for r in runs if r.at >= authorized_at]
     latest = max(current, key=lambda r: r.at, default=None)
     if latest and latest.step == "failure":
         return status(State.FAILED, "The latest run failed.", head)
-    if latest and latest.step == "question":
+    if (
+        latest
+        and latest.step == "question"
+        and not (last_owner_action and last_owner_action > latest.at)
+    ):
         return status(State.BLOCKED, "The agent asked a question; waiting for the owner.", head)
 
     if head is None:

@@ -172,7 +172,12 @@ class Authorisation(unittest.TestCase):
 
 class BuildAndReview(unittest.TestCase):
     def test_work_started_without_a_commit_is_building(self):
-        s = derive(task(branch=None, runs=[run("build", sha=None, status="started")]))
+        s = derive(
+            task(
+                branch={"name": "claude/x", "head": None},
+                runs=[run("build", sha=None, status="started")],
+            )
+        )
         self.assertEqual(s.state, State.BUILDING)
 
     def test_unreported_commit_is_building(self):
@@ -484,6 +489,178 @@ class UntrustedAndBrokenInput(unittest.TestCase):
         first, second = derive(value), derive(value)
         self.assertEqual(first, second)
         self.assertEqual(value, before)
+
+
+class CodexReviewOf107bd35(unittest.TestCase):
+    """Regressions for Codex's review of 107bd35 (three blocking findings, one should-fix)."""
+
+    def test_a_review_that_names_no_branch_never_counts(self):
+        for branch in (None, "missing"):
+            review = passed()
+            if branch is None:
+                review["branch"] = None
+            else:
+                del review["branch"]
+            s = derive(task(runs=[run("build"), review]))
+            self.assertEqual(s.state, State.UNKNOWN, branch)
+            self.assertIn(Flag.INVALID_INPUT, s.flags)
+
+    def test_with_no_source_branch_no_review_counts(self):
+        s = derive(task(branch=None, runs=[run("build"), passed(), published()], pull_request=pr()))
+        self.assertNotEqual(s.state, State.AWAITING_OWNER)
+        self.assertIn(Flag.WRONG_BRANCH_RECORD, s.flags)
+        self.assertIn(Flag.REVIEW_MISSING, s.flags)
+
+    def test_a_question_for_another_branch_is_ignored(self):
+        question = run("question", sha=None, minute=3, branch="claude/other")
+        s = derive(task(runs=[run("build"), passed(minute=2), question]))
+        self.assertEqual(s.state, State.REVIEWED)
+        self.assertIn(Flag.WRONG_BRANCH_RECORD, s.flags)
+
+    def test_a_review_before_authorisation_never_counts(self):
+        timeline = [labeled(minute=5)]
+        s = derive(
+            task(
+                issue={"number": 7, "state": "open", "timeline": timeline},
+                runs=[run("build", minute=1), passed(minute=2), run("build", minute=6)],
+            )
+        )
+        self.assertEqual(s.state, State.BUILT)
+        self.assertIn(Flag.RECORD_BEFORE_AUTHORIZATION, s.flags)
+        self.assertIn(Flag.REVIEW_MISSING, s.flags)
+        self.assertTrue(s.needs_attention)
+
+    def test_a_failed_review_before_authorisation_neither_conflicts_nor_uses_a_round(self):
+        timeline = [labeled(minute=4)]
+        s = derive(
+            task(
+                issue={"number": 7, "state": "open", "timeline": timeline},
+                runs=[failed(minute=1), failed(B, minute=2), run("build", minute=5), passed(A, 6)],
+            )
+        )
+        self.assertEqual(s.state, State.REVIEWED)
+        s = derive(
+            task(
+                issue={"number": 7, "state": "open", "timeline": timeline},
+                runs=[failed(minute=1), run("build", minute=5), passed(A, 6)],
+            )
+        )
+        self.assertEqual(s.state, State.REVIEWED)
+
+    def test_merge_reviewed_only_before_authorisation_is_unsafe(self):
+        timeline = [labeled(minute=5)]
+        s = derive(
+            task(
+                issue={"number": 7, "state": "open", "timeline": timeline},
+                runs=[run("build", minute=1), passed(minute=2), published(minute=6)],
+                pull_request=pr(state="closed", merged=True, merged_by=OWNER),
+            )
+        )
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.MERGED_UNREVIEWED, s.flags)
+
+    def test_reauthorising_after_a_question_keeps_the_earlier_work(self):
+        timeline = [labeled(minute=0), labeled(kind="authorized", label=None, minute=5)]
+        s = derive(
+            task(
+                issue={"number": 7, "state": "open", "timeline": timeline},
+                runs=[run("build"), passed(minute=3), run("question", sha=None, minute=4)],
+            )
+        )
+        self.assertEqual(s.state, State.REVIEWED)
+        self.assertNotIn(Flag.RECORD_BEFORE_AUTHORIZATION, s.flags)
+
+    def test_withdrawn_authorisation_restarts_the_clock(self):
+        timeline = [labeled(minute=0), labeled(kind="unlabeled", minute=4), labeled(minute=5)]
+        s = derive(
+            task(
+                issue={"number": 7, "state": "open", "timeline": timeline},
+                runs=[run("build"), passed(minute=3), run("build", minute=6)],
+            )
+        )
+        self.assertEqual(s.state, State.BUILT)
+        self.assertIn(Flag.RECORD_BEFORE_AUTHORIZATION, s.flags)
+
+    def clinical(self, reviews):
+        return derive(
+            task(
+                runs=[run("build", files=["evidence/x.json"]), passed(), published()],
+                pull_request=pr(files=["evidence/x.json"], reviews=reviews),
+            )
+        )
+
+    def test_simultaneous_approve_and_withdraw_is_not_approved_in_either_order(self):
+        approve = approval(minute=6)
+        withdraw = approval(minute=6, state="DISMISSED")
+        for reviews in ([approve, withdraw], [withdraw, approve]):
+            s = self.clinical(reviews)
+            self.assertEqual(s.state, State.CLINICAL_REVIEW, [r["state"] for r in reviews])
+
+    def test_another_clinicians_changes_requested_blocks(self):
+        other = "example-clinician-2"
+        reviews = [approval(minute=6), approval(user=other, minute=7, state="CHANGES_REQUESTED")]
+        s = derive(
+            task(
+                clinicians=[CLINICIAN, other],
+                runs=[run("build", files=["evidence/x.json"]), passed(), published()],
+                pull_request=pr(files=["evidence/x.json"], reviews=reviews),
+            )
+        )
+        self.assertEqual(s.state, State.CLINICAL_REVIEW)
+
+    def test_a_later_approval_still_replaces_an_earlier_withdrawal(self):
+        s = self.clinical([approval(minute=6, state="DISMISSED"), approval(minute=7)])
+        self.assertEqual(s.state, State.AWAITING_OWNER)
+
+    def test_unhashable_or_wrongly_typed_choices_are_unknown(self):
+        bad = [
+            task(runs=[dict(run("build"), step=["build"])]),
+            task(runs=[dict(run("build"), step={"build": 1})]),
+            task(runs=[dict(run("build"), status=["finished"])]),
+            task(runs=[dict(passed(), verdict={"x": 1})]),
+            task(issue={"number": 7, "state": ["open"], "timeline": []}),
+            task(issue={"number": True, "state": "open", "timeline": []}),
+            task(pull_request=pr(state={"open": 1})),
+            task(pull_request=pr(draft=[])),
+            task(pull_request=pr(reviews=[approval(state=["APPROVED"])])),
+            task(pull_request=pr(reviews=[approval(user_type={"a": 1})])),
+            task(pull_request=pr(checks=[check("lint", status=["completed"])])),
+        ]
+        for value in bad:
+            s = derive(value)
+            self.assertEqual(s.state, State.UNKNOWN, value)
+            self.assertIn(Flag.INVALID_INPUT, s.flags, value)
+
+    def test_junk_in_any_field_never_raises(self):
+        junk = (None, True, 0, -1, 1.5, "", "x", [], [None], {}, {"a": []}, ["a" * 40])
+        base = task(
+            runs=[run("build", files=["evidence/x.json"]), passed(), published()],
+            pull_request=pr(reviews=[approval()]),
+        )
+
+        def paths(value, prefix=()):
+            yield prefix
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    yield from paths(item, (*prefix, key))
+            elif isinstance(value, list):
+                for index, item in enumerate(value):
+                    yield from paths(item, (*prefix, index))
+
+        count = 0
+        for path in list(paths(base)):
+            if not path:
+                continue
+            for value in junk:
+                broken = copy.deepcopy(base)
+                parent = broken
+                for key in path[:-1]:
+                    parent = parent[key]
+                parent[path[-1]] = value
+                s = derive(broken)  # must not raise
+                self.assertIsInstance(s.state, State)
+                count += 1
+        self.assertGreater(count, 500)
 
 
 class Fixtures(unittest.TestCase):
