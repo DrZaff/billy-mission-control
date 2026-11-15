@@ -1,0 +1,96 @@
+{
+  "about": "Clinical files changed: waiting for a clinician's GitHub approval of this commit. Synthetic data.",
+  "task": {
+    "repo": "example-org/example-repo",
+    "owner": "example-owner",
+    "clinicians": [
+      "example-clinician"
+    ],
+    "clinical_paths": [
+      "evidence/*",
+      "course-*.html"
+    ],
+    "required_checks": [
+      "lint",
+      "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+      "number": 7,
+      "state": "open",
+      "timeline": [
+        {
+          "event": "labeled",
+          "label": "agent:ready",
+          "actor": "example-owner",
+          "at": "2026-01-01T10:00:00+00:00"
+        }
+      ]
+    },
+    "branch": {
+      "name": "claude/x",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "runs": [
+      {
+        "step": "build",
+        "repo": "example-org/example-repo",
+        "branch": "claude/x",
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-01-01T10:02:00+00:00"
+      },
+      {
+        "step": "review",
+        "repo": "example-org/example-repo",
+        "branch": "claude/x",
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-01-01T10:03:00+00:00",
+        "verdict": "no_blocking_findings",
+        "findings": []
+      },
+      {
+        "step": "publish",
+        "repo": "example-org/example-repo",
+        "branch": "agent/x-aaaaaaa",
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-01-01T10:04:00+00:00",
+        "pr": 12
+      }
+    ],
+    "pull_request": {
+      "number": 12,
+      "state": "open",
+      "draft": true,
+      "merged": false,
+      "merged_by": null,
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "files": [
+        "evidence/x.json"
+      ],
+      "reviews": [],
+      "checks": [
+        {
+          "name": "lint",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "test",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    }
+  },
+  "expected": {
+    "state": "clinical_review",
+    "flags": [
+      "checks_passed",
+      "clinical",
+      "clinical_approval_missing"
+    ]
+  }
+}

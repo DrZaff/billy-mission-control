@@ -148,6 +148,43 @@ class Machine(unittest.TestCase):
             self.assertIsNone(MACHINE_DETAILS.search(sample), sample)
 
 
+# The task-state model (phase A2) is pure: only these modules, and no I/O, clock or code
+# execution, so the same input always gives the same answer with no side effects.
+TASKS_ALLOWED_IMPORTS = {
+    "__future__",
+    "re",
+    "collections.abc",
+    "dataclasses",
+    "datetime",
+    "enum",
+    "fnmatch",
+    "typing",
+}
+TASKS_FORBIDDEN_CALLS = {"open", "print", "input", "eval", "exec", "compile", "__import__"}
+TASKS_FORBIDDEN_ATTRIBUTES = {"now", "today", "utcnow", "time", "sleep", "environ", "getenv"}
+
+
+class PureTaskModel(unittest.TestCase):
+    def setUp(self):
+        self.path = ROOT / "mission_control" / "tasks.py"
+        self.tree = ast.parse(self.path.read_text(encoding="utf-8"))
+
+    def test_imports_only_pure_standard_modules(self):
+        self.assertLessEqual(imported_modules(self.path), TASKS_ALLOWED_IMPORTS)
+
+    def test_no_io_clock_or_code_execution(self):
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                self.assertNotIn(node.func.id, TASKS_FORBIDDEN_CALLS, node.lineno)
+            if isinstance(node, ast.Attribute):
+                self.assertNotIn(node.attr, TASKS_FORBIDDEN_ATTRIBUTES, node.lineno)
+
+    def test_no_module_level_mutable_state(self):
+        for node in self.tree.body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                self.assertNotIsInstance(node.value, (ast.List, ast.Dict, ast.Set), node.lineno)
+
+
 class Ownership(unittest.TestCase):
     def test_codeowners_covers_every_path(self):
         lines = [

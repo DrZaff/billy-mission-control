@@ -1,0 +1,69 @@
+{
+  "about": "A new commit after a passing review: the review no longer applies. Synthetic data.",
+  "task": {
+    "repo": "example-org/example-repo",
+    "owner": "example-owner",
+    "clinicians": [
+      "example-clinician"
+    ],
+    "clinical_paths": [
+      "evidence/*",
+      "course-*.html"
+    ],
+    "required_checks": [
+      "lint",
+      "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+      "number": 7,
+      "state": "open",
+      "timeline": [
+        {
+          "event": "labeled",
+          "label": "agent:ready",
+          "actor": "example-owner",
+          "at": "2026-01-01T10:00:00+00:00"
+        }
+      ]
+    },
+    "branch": {
+      "name": "claude/x",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "runs": [
+      {
+        "step": "build",
+        "repo": "example-org/example-repo",
+        "branch": "claude/x",
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-01-01T10:02:00+00:00"
+      },
+      {
+        "step": "review",
+        "repo": "example-org/example-repo",
+        "branch": "claude/x",
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-01-01T10:03:00+00:00",
+        "verdict": "no_blocking_findings",
+        "findings": []
+      },
+      {
+        "step": "build",
+        "repo": "example-org/example-repo",
+        "branch": "claude/x",
+        "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "at": "2026-01-01T10:05:00+00:00"
+      }
+    ],
+    "pull_request": null
+  },
+  "expected": {
+    "state": "built",
+    "flags": [
+      "review_missing",
+      "stale_review"
+    ]
+  }
+}

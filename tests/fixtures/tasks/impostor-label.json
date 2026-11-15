@@ -1,0 +1,41 @@
+{
+  "about": "Someone other than the owner applied agent:ready: nothing is authorised. Synthetic data.",
+  "task": {
+    "repo": "example-org/example-repo",
+    "owner": "example-owner",
+    "clinicians": [
+      "example-clinician"
+    ],
+    "clinical_paths": [
+      "evidence/*",
+      "course-*.html"
+    ],
+    "required_checks": [
+      "lint",
+      "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+      "number": 7,
+      "state": "open",
+      "timeline": [
+        {
+          "event": "labeled",
+          "label": "agent:ready",
+          "actor": "someone-else",
+          "at": "2026-01-01T10:00:00+00:00"
+        }
+      ]
+    },
+    "branch": null,
+    "runs": [],
+    "pull_request": null
+  },
+  "expected": {
+    "state": "proposed",
+    "flags": [
+      "label_without_owner"
+    ]
+  }
+}
