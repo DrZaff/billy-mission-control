@@ -38,7 +38,8 @@
         "repo": "example-org/example-repo",
         "branch": "claude/x",
         "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "at": "2026-01-01T10:02:00+00:00"
+        "at": "2026-01-01T10:02:00+00:00",
+        "status": "finished"
       },
       {
         "step": "review",
@@ -47,14 +48,16 @@
         "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "at": "2026-01-01T10:03:00+00:00",
         "verdict": "no_blocking_findings",
-        "findings": []
+        "findings": [],
+        "status": "finished"
       },
       {
         "step": "build",
         "repo": "example-org/example-repo",
         "branch": "claude/x",
         "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "at": "2026-01-01T10:05:00+00:00"
+        "at": "2026-01-01T10:05:00+00:00",
+        "status": "finished"
       }
     ],
     "pull_request": null

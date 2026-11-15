@@ -29,6 +29,8 @@ def labeled(actor=OWNER, minute=0, label="agent:ready", kind="labeled"):
 
 def run(step, sha=A, minute=2, **extra):
     record = {"step": step, "repo": REPO, "branch": "claude/x", "sha": sha, "at": t(minute)}
+    if step in ("build", "review"):
+        record["status"] = "finished"
     record.update(extra)
     return record
 
@@ -847,6 +849,74 @@ class CodexReviewOfBc6fe45(unittest.TestCase):
             )
         )
         self.assertEqual(s.state, State.PROPOSED)
+
+
+class CodexReviewOf014006c(unittest.TestCase):
+    """Regression for Codex's review of 014006c (blocking): a missing field must never weaken
+    a gate. Every field the model decides with is required; only a run's files are optional."""
+
+    def clinical_pr(self):
+        return task(
+            runs=[run("build"), passed(), published()],  # the run records name no files
+            pull_request=pr(files=["evidence/x.json"]),
+        )
+
+    def test_missing_pr_files_cannot_skip_clinical_approval(self):
+        self.assertEqual(derive(self.clinical_pr()).state, State.CLINICAL_REVIEW)
+        value = self.clinical_pr()
+        del value["pull_request"]["files"]
+        s = derive(value)
+        self.assertEqual(s.state, State.UNKNOWN)
+        self.assertIn(Flag.INVALID_INPUT, s.flags)
+
+    def test_every_deciding_field_is_required(self):
+        def without(path):
+            value = reviewed_and_published(reviews=[approval()])
+            value["runs"].append(passed(A, 3))
+            parent = value
+            for key in path[:-1]:
+                parent = parent[key]
+            del parent[path[-1]]
+            return value
+
+        paths = [
+            ("runs",),
+            ("issue", "timeline"),
+            ("runs", 0, "status"),  # a build
+            ("runs", 1, "status"),  # a review
+            ("runs", 1, "findings"),
+            ("pull_request", "files"),
+            ("pull_request", "merged"),
+            ("pull_request", "draft"),
+            ("pull_request", "reviews"),
+            ("pull_request", "checks"),
+            ("pull_request", "reviews", 0, "user_type"),
+        ]
+        for path in paths:
+            s = derive(without(path))
+            self.assertEqual(s.state, State.UNKNOWN, path)
+            self.assertIn(Flag.INVALID_INPUT, s.flags, path)
+
+    def test_a_merged_pr_reported_without_merged_is_not_closed(self):
+        value = task(
+            runs=[run("build")],
+            pull_request=pr(state="closed", merged=True, merged_by=STRANGER),
+        )
+        self.assertEqual(derive(value).state, State.UNSAFE)
+        del value["pull_request"]["merged"]
+        self.assertEqual(derive(value).state, State.UNKNOWN)
+
+    def test_a_bot_review_without_user_type_never_counts_as_a_clinician(self):
+        value = self.clinical_pr()
+        value["pull_request"]["reviews"] = [approval()]
+        self.assertEqual(derive(value).state, State.AWAITING_OWNER)
+        del value["pull_request"]["reviews"][0]["user_type"]
+        self.assertEqual(derive(value).state, State.UNKNOWN)
+
+    def test_a_runs_own_files_stay_optional(self):
+        record = run("build")
+        self.assertNotIn("files", record)
+        self.assertEqual(derive(task(runs=[record])).state, State.BUILT)
 
 
 class Fixtures(unittest.TestCase):

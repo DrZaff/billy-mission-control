@@ -10,10 +10,10 @@ States follow the design's task state machine (mission-control.md §6 in
 DrZaff/ai-medicine-collective), plus two safety states this model adds: UNSAFE (an invariant is
 broken, for example a merged commit nobody reviewed) and UNKNOWN (the input can't be trusted).
 
-Input contract (all keys are checked; unknown keys are ignored). The five safety settings
-(clinicians to paused) are required, with no defaults: a missing one is UNKNOWN, never a
-silently weaker gate. required_checks must name at least one check; clinical_paths may be an
-explicit empty list.
+Input contract (all keys are checked; unknown keys are ignored). Every field shown is required,
+with no defaults, unless marked optional or limited to some steps: a missing one makes the
+input UNKNOWN, never a silently weaker gate. required_checks must name at least one check;
+clinical_paths may be an explicit empty list.
 
     {
       "repo": "owner/name",                  # the repository this task belongs to
@@ -39,9 +39,10 @@ explicit empty list.
                    (build and review records must name the task's source branch; records for
                     another repository or branch, or from before the owner's authorisation
                     began, are ignored and flagged)
-                   "status": "started" | "finished",          (build and review; default finished)
+                   "status": "started" | "finished",          (build and review)
                    "verdict": "no_blocking_findings" | "changes_needed",   (finished review)
-                   "findings": [{"severity": "blocking" | "should_fix" | "note"}],
+                   "findings": [{"severity": "blocking" | "should_fix" | "note"}],  (finished
+                                                               review; [] when there are none)
                    "pr": int,                                  (publish)
                    "files": [path]}                            (optional, any step)
     pull_request  {"number": int, "state": "open" | "closed", "draft": bool, "merged": bool,
@@ -222,6 +223,12 @@ def _map(value: Any, name: str) -> Mapping:
     return value
 
 
+def _need(m: dict, key: str, name: str) -> Any:
+    """A field that must be present. No default: a missing field must never weaken a gate."""
+    _req(key in m, f"{name} is required")
+    return m[key]
+
+
 def _strings(value: Any, name: str) -> tuple[str, ...]:
     return tuple(_text(v, f"{name}[]") for v in _list(value, name))
 
@@ -305,11 +312,18 @@ def _parse_run(raw: Any, i: int) -> _Run:
     step = _choice(r.get("step"), RUN_STEPS, f"runs[{i}].step")
     repo = _text(r.get("repo"), f"runs[{i}].repo")
     _req(bool(REPO.fullmatch(repo)), f"runs[{i}].repo must be owner/name")
-    status = _choice(r.get("status", "finished"), ("started", "finished"), f"runs[{i}].status")
+    status = _choice(
+        _need(r, "status", f"runs[{i}].status") if step in ("build", "review") else "finished",
+        ("started", "finished"),
+        f"runs[{i}].status",
+    )
     verdict = r.get("verdict")
     if step == "review" and status == "finished":
         verdict = _choice(verdict, ("no_blocking_findings", "changes_needed"), f"runs[{i}].verdict")
-    findings = _list(r.get("findings", []), f"runs[{i}].findings")
+    if step == "review" and status == "finished":
+        findings = _list(_need(r, "findings", f"runs[{i}].findings"), f"runs[{i}].findings")
+    else:
+        findings = _list(r.get("findings", []), f"runs[{i}].findings")
     # Every finding must carry a known severity: a missing or unknown one is refused rather
     # than read as harmless, so malformed review data can never produce a passing review.
     severities = [
@@ -352,20 +366,24 @@ def _parse_pr(raw: Any) -> _PR:
     number = p.get("number")
     _req(isinstance(number, int) and not isinstance(number, bool), "pull_request.number")
     state = _choice(p.get("state"), ("open", "closed"), "pull_request.state")
-    draft = p.get("draft", False)
+    draft = _need(p, "draft", "pull_request.draft")
     _req(isinstance(draft, bool), "pull_request.draft must be true or false")
-    merged = p.get("merged", False)
+    merged = _need(p, "merged", "pull_request.merged")
     _req(isinstance(merged, bool), "pull_request.merged must be true or false")
     _req(not (merged and state == "open"), "pull_request can't be open and merged")
     merged_by = p.get("merged_by")
     if merged:
         merged_by = _login(merged_by, "pull_request.merged_by")
     reviews = []
-    for i, raw_review in enumerate(_list(p.get("reviews", []), "pull_request.reviews")):
+    for i, raw_review in enumerate(
+        _list(_need(p, "reviews", "pull_request.reviews"), "pull_request.reviews")
+    ):
         rv = _map(raw_review, f"pull_request.reviews[{i}]")
         review_state = _choice(rv.get("state"), REVIEW_STATES, f"pull_request.reviews[{i}].state")
         user_type = _choice(
-            rv.get("user_type", "User"), ("User", "Bot"), f"pull_request.reviews[{i}].user_type"
+            _need(rv, "user_type", f"pull_request.reviews[{i}].user_type"),
+            ("User", "Bot"),
+            f"pull_request.reviews[{i}].user_type",
         )
         user = _login(rv.get("user"), f"pull_request.reviews[{i}].user")
         reviews.append(
@@ -378,7 +396,9 @@ def _parse_pr(raw: Any) -> _PR:
             )
         )
     checks = []
-    for i, raw_check in enumerate(_list(p.get("checks", []), "pull_request.checks")):
+    for i, raw_check in enumerate(
+        _list(_need(p, "checks", "pull_request.checks"), "pull_request.checks")
+    ):
         c = _map(raw_check, f"pull_request.checks[{i}]")
         status = _choice(
             c.get("status"),
@@ -405,7 +425,7 @@ def _parse_pr(raw: Any) -> _PR:
         merged=merged,
         merged_by=merged_by,
         head=_sha(p.get("head_sha"), "pull_request.head_sha"),
-        files=_strings(p.get("files", []), "pull_request.files"),
+        files=_strings(_need(p, "files", "pull_request.files"), "pull_request.files"),
         reviews=tuple(reviews),
         checks=tuple(checks),
     )
@@ -421,7 +441,9 @@ def parse(raw: Any) -> _Task:
     _req(isinstance(number, int) and not isinstance(number, bool), "issue.number must be a number")
     _choice(issue.get("state"), ("open", "closed"), "issue.state")
     timeline = []
-    for i, raw_event in enumerate(_list(issue.get("timeline", []), "issue.timeline")):
+    for i, raw_event in enumerate(
+        _list(_need(issue, "timeline", "issue.timeline"), "issue.timeline")
+    ):
         e = _map(raw_event, f"issue.timeline[{i}]")
         label = e.get("label")
         timeline.append(
@@ -466,7 +488,7 @@ def parse(raw: Any) -> _Task:
         timeline=tuple(timeline),
         branch=branch_name,
         branch_head=branch_head,
-        runs=tuple(_parse_run(r, i) for i, r in enumerate(_list(t.get("runs", []), "runs"))),
+        runs=tuple(_parse_run(r, i) for i, r in enumerate(_list(_need(t, "runs", "runs"), "runs"))),
         pr=None if pr_raw is None else _parse_pr(pr_raw),
     )
 
