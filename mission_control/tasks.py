@@ -10,7 +10,10 @@ States follow the design's task state machine (mission-control.md §6 in
 DrZaff/ai-medicine-collective), plus two safety states this model adds: UNSAFE (an invariant is
 broken, for example a merged commit nobody reviewed) and UNKNOWN (the input can't be trusted).
 
-Input contract (all keys are checked; unknown keys are ignored):
+Input contract (all keys are checked; unknown keys are ignored). The five safety settings
+(clinicians to paused) are required, with no defaults: a missing one is UNKNOWN, never a
+silently weaker gate. required_checks must name at least one check; clinical_paths may be an
+explicit empty list.
 
     {
       "repo": "owner/name",                  # the repository this task belongs to
@@ -436,22 +439,27 @@ def parse(raw: Any) -> _Task:
         branch_name = _text(b.get("name"), "branch.name")
         if b.get("head") is not None:
             branch_head = _sha(b.get("head"), "branch.head")
-    max_rounds = t.get("max_fix_rounds", 1)
+    # Safety settings have no defaults: a missing one must never quietly switch a gate off.
+    for key in ("clinicians", "clinical_paths", "required_checks", "max_fix_rounds", "paused"):
+        _req(key in t, f"{key} is required")
+    required_checks = _strings(t["required_checks"], "required_checks")
+    _req(bool(required_checks), "required_checks must name at least one check")
+    max_rounds = t["max_fix_rounds"]
     _req(
         isinstance(max_rounds, int) and not isinstance(max_rounds, bool) and max_rounds >= 0,
         "max_fix_rounds must be a whole number",
     )
-    paused = t.get("paused", False)
+    paused = t["paused"]
     _req(isinstance(paused, bool), "paused must be true or false")
     pr_raw = t.get("pull_request")
     return _Task(
         repo=repo,
         owner=_login(t.get("owner"), "owner"),
         clinicians=frozenset(
-            _login(c, "clinicians[]") for c in _list(t.get("clinicians", []), "clinicians")
+            _login(c, "clinicians[]") for c in _list(t["clinicians"], "clinicians")
         ),
-        clinical_paths=_strings(t.get("clinical_paths", []), "clinical_paths"),
-        required_checks=_strings(t.get("required_checks", []), "required_checks"),
+        clinical_paths=_strings(t["clinical_paths"], "clinical_paths"),
+        required_checks=required_checks,
         max_fix_rounds=max_rounds,
         paused=paused,
         issue_open=issue["state"] == "open",
@@ -639,7 +647,8 @@ def derive(raw: Any) -> TaskStatus:
         return status(State.CLOSED, "Closed without merging.", head)
 
     if since is None:
-        if runs or pr:
+        # Any sign of work counts: run records, a PR, or a commit on the source branch.
+        if runs or pr or head is not None:
             flags.add(Flag.UNAUTHORIZED_WORK)
             return status(
                 State.UNSAFE, "Work exists, but the owner never authorised this task.", head

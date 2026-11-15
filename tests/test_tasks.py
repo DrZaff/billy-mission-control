@@ -811,6 +811,44 @@ class CodexReviewOfFfa417f(unittest.TestCase):
             self.assertIn(Flag.INVALID_INPUT, s.flags)
 
 
+class CodexReviewOfBc6fe45(unittest.TestCase):
+    """Regressions for Codex's review of bc6fe45 (one blocking finding, one should-fix)."""
+
+    SAFETY = ("clinicians", "clinical_paths", "required_checks", "max_fix_rounds", "paused")
+
+    def test_a_missing_safety_setting_is_unknown_never_a_weaker_gate(self):
+        for key in self.SAFETY:
+            value = reviewed_and_published()
+            del value[key]
+            s = derive(value)
+            self.assertEqual(s.state, State.UNKNOWN, key)
+            self.assertIn(Flag.INVALID_INPUT, s.flags, key)
+
+    def test_required_checks_must_name_at_least_one(self):
+        s = derive(reviewed_and_published() | {"required_checks": []})
+        self.assertEqual(s.state, State.UNKNOWN)
+
+    def test_explicit_empty_clinical_paths_are_allowed(self):
+        s = derive(reviewed_and_published() | {"clinical_paths": []})
+        self.assertEqual(s.state, State.AWAITING_OWNER)
+
+    def test_a_commit_on_the_branch_without_authorisation_is_unsafe(self):
+        s = derive(task(issue={"number": 7, "state": "open", "timeline": []}, runs=[]))
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.UNAUTHORIZED_WORK, s.flags)
+        self.assertTrue(s.needs_attention)
+
+    def test_an_empty_branch_without_authorisation_is_still_proposed(self):
+        s = derive(
+            task(
+                issue={"number": 7, "state": "open", "timeline": []},
+                branch={"name": "claude/x", "head": None},
+                runs=[],
+            )
+        )
+        self.assertEqual(s.state, State.PROPOSED)
+
+
 class Fixtures(unittest.TestCase):
     """Self-contained JSON examples, also meant for phase A3's screens."""
 
