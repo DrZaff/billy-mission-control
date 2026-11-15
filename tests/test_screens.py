@@ -273,6 +273,103 @@ class CommandHelper(unittest.TestCase):
         self.assertEqual(demo_module.PLACEHOLDERS, ("{repo}", "{repo_name}", "{branch}", "{sha}"))
 
 
+def path_row(body: str, step: str) -> str | None:
+    found = re.search(r'\[([^\]]*)\]</span> <span class="step">' + step + "</span>", body)
+    return found.group(1) if found else None
+
+
+def detail(raw: dict) -> tuple[State, str]:
+    demo = load(json.dumps(with_tasks(raw)))
+    e = demo.entries[0]
+    return e.status.state, views.task_detail(demo, e)
+
+
+class CodexReviewOfCaa5552(unittest.TestCase):
+    """Codex's review of caa5552 (blocking): the path showed a clinician's approval whenever the
+    warning flags were absent, though the model checks approval only after the earlier gates."""
+
+    def clinical(self) -> dict:
+        raw = entry("example-site-902")
+        self.assertEqual(detail(raw)[0], State.CLINICAL_REVIEW)
+        return raw
+
+    def test_a_clinical_task_before_the_final_gate_is_not_shown_approved(self):
+        built = self.clinical()
+        built["task"]["runs"] = built["task"]["runs"][:1]
+        built["task"]["pull_request"] = None
+        reviewed = self.clinical()
+        reviewed["task"]["runs"] = reviewed["task"]["runs"][:2]
+        reviewed["task"]["pull_request"] = None
+        pending = self.clinical()
+        pending["task"]["pull_request"]["checks"][1].update(status="in_progress", conclusion=None)
+        changes = self.clinical()
+        changes["task"]["runs"][1].update(
+            verdict="changes_needed", findings=[{"severity": "blocking"}]
+        )
+        changes["task"]["runs"] = changes["task"]["runs"][:2]
+        changes["task"]["pull_request"] = None
+        paused = self.clinical()
+        paused["task"]["paused"] = True
+        for raw, expected in (
+            (built, State.BUILT),
+            (reviewed, State.REVIEWED),
+            (pending, State.PUBLISHED),
+            (changes, State.CHANGES_NEEDED),
+            (paused, State.PAUSED),
+        ):
+            state, body = detail(raw)
+            self.assertEqual(state, expected)
+            self.assertIn("Clinical files", body, expected)
+            self.assertNotEqual(path_row(body, "Clinician"), "done", expected)
+            self.assertNotIn(
+                '<span class="step">Clinician</span> <span>approved this commit', body, expected
+            )
+
+    def test_a_clinicians_approval_of_the_head_is_shown_approved(self):
+        raw = self.clinical()
+        head = raw["task"]["pull_request"]["head_sha"]
+        raw["task"]["pull_request"]["reviews"] = [
+            {
+                "user": "example-clinician",
+                "user_type": "User",
+                "state": "APPROVED",
+                "commit_id": head,
+                "at": "2026-11-14T10:00:00+00:00",
+            }
+        ]
+        state, body = detail(raw)
+        self.assertEqual(state, State.AWAITING_OWNER)
+        self.assertEqual(path_row(body, "Clinician"), "done")
+
+    def test_authorised_is_not_claimed_where_the_model_never_checked(self):
+        paused_proposal = entry("example-site-918")
+        paused_proposal["task"]["paused"] = True
+        closed_unauthorised = entry("example-site-923")
+        closed_unauthorised["task"]["issue"]["timeline"] = []
+        for raw, expected in ((paused_proposal, State.PAUSED), (closed_unauthorised, State.CLOSED)):
+            state, body = detail(raw)
+            self.assertEqual(state, expected)
+            self.assertNotEqual(path_row(body, "Authorised"), "done", expected)
+
+    def test_an_unreviewed_merge_says_so(self):
+        e = DEMO.entry("example-tools-57")
+        body = views.task_detail(DEMO, e)
+        self.assertEqual(path_row(body, "Review"), "!")
+        self.assertIn("never passed review", body)
+
+    def test_no_demo_task_shows_a_step_done_that_its_state_does_not_establish(self):
+        for e in DEMO.entries:
+            body = views.task_detail(DEMO, e)
+            if path_row(body, "Clinician") == "done":
+                self.assertIn(e.status.state, (State.AWAITING_OWNER, State.MERGED), e.id)
+            if path_row(body, "Authorised") == "done":
+                self.assertIn(e.status.state, views.AUTHORISED_STATES, e.id)
+            if path_row(body, "Review") == "done":
+                self.assertIsNotNone(e.status.reviewed_sha, e.id)
+            if path_row(body, "Owner") == "done":
+                self.assertEqual(e.status.state, State.MERGED, e.id)
+
+
 HOSTILE = "<script>alert(1)</script>\"'&"
 
 

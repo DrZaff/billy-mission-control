@@ -70,6 +70,25 @@ NAV = (("/", "Home"), ("/tasks", "Tasks"), ("/usage", "Usage"), ("/settings", "S
 
 GITHUB = "https://github.com"
 
+# States the model reaches only after confirming the owner's current authorisation. (PAUSED and
+# CLOSED can also come before that check, and UNSAFE and UNKNOWN can mean anything.)
+AUTHORISED_STATES = frozenset(
+    {
+        State.READY,
+        State.BUILDING,
+        State.BUILT,
+        State.REVIEWING,
+        State.CHANGES_NEEDED,
+        State.REVIEWED,
+        State.PUBLISHED,
+        State.CLINICAL_REVIEW,
+        State.AWAITING_OWNER,
+        State.MERGED,
+        State.BLOCKED,
+        State.FAILED,
+    }
+)
+
 
 def section(status: TaskStatus) -> str:
     """Where a task belongs on Home. UNSAFE, UNKNOWN and FAILED tasks, and any attention flag,
@@ -220,12 +239,16 @@ def _path(entry: Entry) -> str:
     st, flags = entry.status, entry.status.flags
     rows: list[tuple[str, str, str]] = []  # (marker, step, detail)
 
-    if st.state is State.UNKNOWN:
-        authorised = ("?", "unknown")
-    elif st.state is State.PROPOSED or Flag.UNAUTHORIZED_WORK in flags:
-        authorised = ("!", "no") if Flag.UNAUTHORIZED_WORK in flags else ("-", "not yet")
-    else:
+    # Each row claims only what the model established. A "done" mark needs a state the model
+    # reaches only after that gate passed; anything else says "not shown" rather than guess.
+    if Flag.UNAUTHORIZED_WORK in flags:
+        authorised = ("!", "no")
+    elif st.state is State.PROPOSED:
+        authorised = ("-", "not yet")
+    elif st.state in AUTHORISED_STATES:
         authorised = ("done", "yes, by the owner")
+    else:
+        authorised = ("?", "not shown in this state")
     rows.append((authorised[0], "Authorised", authorised[1]))
     rows.append(
         (
@@ -239,6 +262,8 @@ def _path(entry: Entry) -> str:
         review = ("done", f"passed for {_short(st.reviewed_sha)}")
     elif st.state is State.CHANGES_NEEDED or Flag.FIX_ROUNDS_EXHAUSTED in flags:
         review = ("!", "blocking problems found")
+    elif Flag.MERGED_UNREVIEWED in flags:
+        review = ("!", "the merged commit never passed review")
     elif Flag.STALE_REVIEW in flags:
         review = ("!", "only for an older commit")
     elif st.state is State.REVIEWING:
@@ -268,10 +293,14 @@ def _path(entry: Entry) -> str:
         rows.append(("-", "Checks", "not yet"))
 
     if Flag.CLINICAL in flags:
+        # The model checks a clinician's approval only once review and checks have passed, so
+        # approval is established only by reaching the owner's decision, or a safe merge.
         if Flag.CLINICAL_APPROVAL_MISSING in flags or Flag.MERGED_WITHOUT_CLINICIAN in flags:
             rows.append(("!", "Clinician", "approval of this commit needed"))
-        else:
+        elif st.state in (State.AWAITING_OWNER, State.MERGED):
             rows.append(("done", "Clinician", "approved this commit"))
+        else:
+            rows.append(("-", "Clinician", "approval of the final commit needed, later"))
 
     if st.state is State.MERGED:
         rows.append(("done", "Owner", "merged"))
