@@ -104,6 +104,23 @@ def section(status: TaskStatus) -> str:
     return "active"
 
 
+def clinician_approved(status: TaskStatus) -> bool:
+    """Whether the model established a clinician's approval of the head. It checks approval only
+    on a safe merge, or as the last gate before the owner's decision, after review and checks
+    pass. AWAITING_OWNER from exhausted fix rounds is decided earlier, so it proves nothing."""
+    if Flag.CLINICAL not in status.flags or Flag.MERGED_WITHOUT_CLINICIAN in status.flags:
+        return False
+    if status.state is State.MERGED:
+        return True
+    return (
+        status.state is State.AWAITING_OWNER
+        and Flag.FIX_ROUNDS_EXHAUSTED not in status.flags
+        and Flag.CHECKS_PASSED in status.flags
+        and status.reviewed_sha is not None
+        and status.reviewed_sha == status.head_sha
+    )
+
+
 def needs_you(status: TaskStatus) -> bool:
     return section(status) in ("alerts", "waiting")
 
@@ -260,7 +277,9 @@ def _path(entry: Entry) -> str:
 
     if st.reviewed_sha:
         review = ("done", f"passed for {_short(st.reviewed_sha)}")
-    elif st.state is State.CHANGES_NEEDED or Flag.FIX_ROUNDS_EXHAUSTED in flags:
+    elif Flag.FIX_ROUNDS_EXHAUSTED in flags:
+        review = ("!", "fix rounds used up; your decision")
+    elif st.state is State.CHANGES_NEEDED:
         review = ("!", "blocking problems found")
     elif Flag.MERGED_UNREVIEWED in flags:
         review = ("!", "the merged commit never passed review")
@@ -293,11 +312,9 @@ def _path(entry: Entry) -> str:
         rows.append(("-", "Checks", "not yet"))
 
     if Flag.CLINICAL in flags:
-        # The model checks a clinician's approval only once review and checks have passed, so
-        # approval is established only by reaching the owner's decision, or a safe merge.
         if Flag.CLINICAL_APPROVAL_MISSING in flags or Flag.MERGED_WITHOUT_CLINICIAN in flags:
             rows.append(("!", "Clinician", "approval of this commit needed"))
-        elif st.state in (State.AWAITING_OWNER, State.MERGED):
+        elif clinician_approved(st):
             rows.append(("done", "Clinician", "approved this commit"))
         else:
             rows.append(("-", "Clinician", "approval of the final commit needed, later"))

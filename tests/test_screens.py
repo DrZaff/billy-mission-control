@@ -284,6 +284,50 @@ def detail(raw: dict) -> tuple[State, str]:
     return e.status.state, views.task_detail(demo, e)
 
 
+class CodexReviewOfDc58125(unittest.TestCase):
+    """Codex's review of dc58125 (blocking): AWAITING_OWNER from exhausted fix rounds is decided
+    before review, checks or the clinician, so it never shows a clinician's approval."""
+
+    def exhausted_clinical(self) -> dict:
+        raw = entry("example-site-908")
+        for run in raw["task"]["runs"]:
+            run["files"] = ["evidence/ai-vs-human.json"]
+        return raw
+
+    def test_exhausted_fix_rounds_on_clinical_files_show_no_approval(self):
+        state, body = detail(self.exhausted_clinical())
+        self.assertEqual(state, State.AWAITING_OWNER)
+        self.assertIn("Clinical files", body)
+        self.assertNotEqual(path_row(body, "Clinician"), "done")
+        self.assertIn("fix rounds used up", body)
+
+    def test_even_a_later_passing_review_and_green_pr_show_no_approval(self):
+        raw = self.exhausted_clinical()
+        task = raw["task"]
+        head = task["branch"]["head"]
+        task["runs"].append(
+            {
+                "step": "review",
+                "repo": task["repo"],
+                "branch": task["branch"]["name"],
+                "sha": head,
+                "at": "2026-11-14T12:00:00+00:00",
+                "status": "finished",
+                "verdict": "no_blocking_findings",
+                "findings": [],
+            }
+        )
+        state, body = detail(raw)
+        self.assertEqual(state, State.UNKNOWN)  # the head's reviews now disagree
+        self.assertNotEqual(path_row(body, "Clinician"), "done")
+
+    def test_clinician_approved_needs_the_normal_path(self):
+        for e in DEMO.entries:
+            if views.clinician_approved(e.status):
+                self.assertIn(Flag.CLINICAL, e.status.flags, e.id)
+                self.assertNotIn(Flag.FIX_ROUNDS_EXHAUSTED, e.status.flags, e.id)
+
+
 class CodexReviewOfCaa5552(unittest.TestCase):
     """Codex's review of caa5552 (blocking): the path showed a clinician's approval whenever the
     warning flags were absent, though the model checks approval only after the earlier gates."""
@@ -362,6 +406,7 @@ class CodexReviewOfCaa5552(unittest.TestCase):
             body = views.task_detail(DEMO, e)
             if path_row(body, "Clinician") == "done":
                 self.assertIn(e.status.state, (State.AWAITING_OWNER, State.MERGED), e.id)
+                self.assertNotIn(Flag.FIX_ROUNDS_EXHAUSTED, e.status.flags, e.id)
             if path_row(body, "Authorised") == "done":
                 self.assertIn(e.status.state, views.AUTHORISED_STATES, e.id)
             if path_row(body, "Review") == "done":
