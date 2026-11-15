@@ -1,0 +1,2228 @@
+{
+ "about": "Demo 0: synthetic projects, tasks, commits and runs for the A3 screens. Every name, number and SHA is made up.",
+ "refreshed_at": "2026-11-15T09:00:00+00:00",
+ "stop_switch": {
+  "on": false,
+  "changed_at": "2026-11-10T08:00:00+00:00"
+ },
+ "commands": {
+  "review": "billy review {branch} {sha} --repo {repo_name}",
+  "publish": "billy publish {branch} {sha} --repo {repo_name}"
+ },
+ "tasks": [
+  {
+   "id": "example-site-901",
+   "title": "Footer link to the Games page",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 901,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/footer-games-link",
+     "head": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/footer-games-link",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T09:10:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/footer-games-link",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T09:20:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-a1b2c3d",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T09:25:00+00:00",
+      "pr": 906
+     }
+    ],
+    "pull_request": {
+     "number": 906,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "example-site-902",
+   "title": "FAQ: update screening numbers",
+   "risk": "medium",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 902,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/faq-masai-numbers",
+     "head": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/faq-masai-numbers",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T09:30:00+00:00",
+      "status": "finished",
+      "files": [
+       "faq/faq.json"
+      ]
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/faq-masai-numbers",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T09:40:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-b5e6f7a",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T09:45:00+00:00",
+      "pr": 907
+     }
+    ],
+    "pull_request": {
+     "number": 907,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+     "files": [
+      "faq/faq.json"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "example-site-903",
+   "title": "Which FAQ answer to write first?",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 903,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/faq-order",
+     "head": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/faq-order",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T09:50:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "question",
+      "repo": "example-org/example-site",
+      "branch": "claude/faq-order",
+      "at": "2026-11-14T09:55:00+00:00"
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-site-904",
+   "title": "Blog archive: tidy the grid",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 904,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/blog-archive-grid",
+     "head": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/blog-archive-grid",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T10:00:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/blog-archive-grid",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T10:10:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/blog-archive-grid",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T10:20:00+00:00",
+      "status": "finished"
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-site-905",
+   "title": "Chat: relative timestamps",
+   "risk": "medium",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 905,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/chat-timestamps",
+     "head": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/chat-timestamps",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T10:30:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/chat-timestamps",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T10:40:00+00:00",
+      "status": "finished",
+      "verdict": "changes_needed",
+      "findings": [
+       {
+        "severity": "blocking"
+       },
+       {
+        "severity": "should_fix"
+       }
+      ]
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-site-908",
+   "title": "Course quiz: scoring edge cases",
+   "risk": "medium",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 908,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/course-quiz-scoring",
+     "head": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/course-quiz-scoring",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T10:50:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/course-quiz-scoring",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T11:00:00+00:00",
+      "status": "finished",
+      "verdict": "changes_needed",
+      "findings": [
+       {
+        "severity": "blocking"
+       },
+       {
+        "severity": "should_fix"
+       }
+      ]
+     },
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/course-quiz-scoring",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T11:10:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/course-quiz-scoring",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T11:20:00+00:00",
+      "status": "finished",
+      "verdict": "changes_needed",
+      "findings": [
+       {
+        "severity": "blocking"
+       },
+       {
+        "severity": "should_fix"
+       }
+      ]
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-site-910",
+   "title": "Sitemap: add last-modified dates",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 910,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/sitemap-dates",
+     "head": null
+    },
+    "runs": [],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-site-911",
+   "title": "Robots: welcome a new crawler",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 911,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/robots-crawler",
+     "head": null
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/robots-crawler",
+      "at": "2026-11-14T11:30:00+00:00",
+      "status": "started"
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-site-912",
+   "title": "Print styles for the paper",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 912,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/print-styles",
+     "head": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/print-styles",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T11:40:00+00:00",
+      "status": "finished"
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-site-913",
+   "title": "Inbox badge count",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 913,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/inbox-badge",
+     "head": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/inbox-badge",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T11:50:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/inbox-badge",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T11:55:00+00:00",
+      "status": "started"
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-site-914",
+   "title": "Tool icons: two new pictures",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 914,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/tool-icons",
+     "head": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/tool-icons",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T12:00:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/tool-icons",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T12:10:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-site-915",
+   "title": "Meeting poll: clearer wording",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 915,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/meeting-poll-copy",
+     "head": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/meeting-poll-copy",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T12:20:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/meeting-poll-copy",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T12:30:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-d00d1e5",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T12:35:00+00:00",
+      "pr": 916
+     }
+    ],
+    "pull_request": {
+     "number": 916,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+       "status": "in_progress",
+       "conclusion": null
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "example-site-917",
+   "title": "Newsletter: paragraph spacing",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": true,
+    "issue": {
+     "number": 917,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/newsletter-spacing",
+     "head": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/newsletter-spacing",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T12:40:00+00:00",
+      "status": "finished"
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-site-918",
+   "title": "Dark mode for the join page",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 918,
+     "state": "open",
+     "timeline": []
+    },
+    "branch": null,
+    "runs": [],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-tools-41",
+   "title": "QTc calculator: unit labels",
+   "risk": "medium",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 41,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/qtc-calculator-units",
+     "head": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/qtc-calculator-units",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T12:50:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-tools",
+      "branch": "claude/qtc-calculator-units",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T13:00:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-tools",
+      "branch": "agent/pub-a1b2c3d",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T13:05:00+00:00",
+      "pr": 44
+     }
+    ],
+    "pull_request": {
+     "number": 44,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+     "files": [
+      "qtc/index.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "example-tools-42",
+   "title": "Dose table: rounding",
+   "risk": "high",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 42,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/dose-table",
+     "head": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/dose-table",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T13:10:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-tools",
+      "branch": "claude/dose-table",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T13:20:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-tools",
+      "branch": "agent/pub-c0ffee1",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T13:25:00+00:00",
+      "pr": 45
+     }
+    ],
+    "pull_request": {
+     "number": 45,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "status": "completed",
+       "conclusion": "failure"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "example-tools-43",
+   "title": "Flashcards: export to CSV",
+   "risk": "medium",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 43,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/flashcards-export",
+     "head": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/flashcards-export",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T13:30:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-tools",
+      "branch": "claude/flashcards-export",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T13:40:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "failure",
+      "repo": "example-org/example-tools",
+      "branch": "claude/flashcards-export",
+      "at": "2026-11-14T13:50:00+00:00"
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-tools-46",
+   "title": "Score calculator: input checks",
+   "risk": "medium",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 46,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/score-calculator",
+     "head": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/score-calculator",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T14:00:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-tools",
+      "branch": "claude/score-calculator",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T14:10:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-tools",
+      "branch": "claude/score-calculator",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T14:15:00+00:00",
+      "status": "finished",
+      "verdict": "changes_needed",
+      "findings": [
+       {
+        "severity": "blocking"
+       },
+       {
+        "severity": "should_fix"
+       }
+      ]
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-tools-47",
+   "title": "Unit converter: tests",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 47,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/unit-converter",
+     "head": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/unit-converter",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T14:20:00+00:00",
+      "status": "finished"
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-tools-48",
+   "title": "Anyone may start this (label added by someone else)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 48,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "someone-else",
+       "at": "2026-11-14T14:30:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": null,
+    "runs": [],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-tools-49",
+   "title": "Glossary of abbreviations",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 49,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/abbrev-glossary",
+     "head": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/abbrev-glossary",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T14:40:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "build",
+      "repo": "example-org/elsewhere",
+      "branch": "claude/abbrev-glossary",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T14:45:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/someone-elses-branch",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T14:46:00+00:00",
+      "status": "finished"
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-tools-50",
+   "title": "Drug lookup: faster search",
+   "risk": "medium",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 50,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T15:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/drug-lookup",
+     "head": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/drug-lookup",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T14:50:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/drug-lookup",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T15:10:00+00:00",
+      "status": "finished"
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-tools-51",
+   "title": "Pager message template",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 51,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/pager-template",
+     "head": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/pager-template",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T15:20:00+00:00",
+      "status": "finished"
+     }
+    ],
+    "pull_request": {
+     "number": 52,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": []
+    }
+   }
+  },
+  {
+   "id": "example-tools-53",
+   "title": "Triage notes: merged by someone else",
+   "risk": "medium",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 53,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/triage-notes",
+     "head": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/triage-notes",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T15:30:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-tools",
+      "branch": "claude/triage-notes",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T15:40:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-tools",
+      "branch": "agent/pub-b5e6f7a",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T15:45:00+00:00",
+      "pr": 54
+     }
+    ],
+    "pull_request": {
+     "number": 54,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "someone-else",
+     "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "example-site-919",
+   "title": "Evidence table: new study row",
+   "risk": "high",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 919,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/evidence-table",
+     "head": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/evidence-table",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T15:50:00+00:00",
+      "status": "finished",
+      "files": [
+       "evidence/ai-vs-human.json"
+      ]
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/evidence-table",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T16:00:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-c0ffee1",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T16:05:00+00:00",
+      "pr": 920
+     }
+    ],
+    "pull_request": {
+     "number": 920,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+     "files": [
+      "evidence/ai-vs-human.json"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "example-tools-57",
+   "title": "Link checker: merged without review",
+   "risk": "medium",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 57,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/link-checker",
+     "head": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/link-checker",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T17:00:00+00:00",
+      "status": "finished"
+     }
+    ],
+    "pull_request": {
+     "number": 58,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "example-tools-59",
+   "title": "Case generator: work nobody authorised",
+   "risk": "medium",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 59,
+     "state": "open",
+     "timeline": []
+    },
+    "branch": {
+     "name": "claude/case-generator",
+     "head": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/case-generator",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T17:10:00+00:00",
+      "status": "finished"
+     }
+    ],
+    "pull_request": null
+   }
+  },
+  {
+   "id": "example-site-925",
+   "title": "Calendar export: timezone",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 925,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/calendar-export",
+     "head": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/calendar-export",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T17:20:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/calendar-export",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T17:30:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-a1b2c3d",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T17:35:00+00:00",
+      "pr": 926
+     }
+    ],
+    "pull_request": {
+     "number": 926,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "example-site-921",
+   "title": "About page forwards home",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 921,
+     "state": "closed",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/about-forward",
+     "head": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/about-forward",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T16:10:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/about-forward",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T16:20:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-d00d1e5",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T16:25:00+00:00",
+      "pr": 922
+     }
+    ],
+    "pull_request": {
+     "number": 922,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "example-site-923",
+   "title": "Old banner (dropped)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 923,
+     "state": "closed",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/old-banner",
+     "head": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/old-banner",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T16:30:00+00:00",
+      "status": "finished"
+     }
+    ],
+    "pull_request": {
+     "number": 924,
+     "state": "closed",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "example-tools-55",
+   "title": "Footer year (merged, checks never finished)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 55,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/footer-year",
+     "head": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/footer-year",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T16:40:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-tools",
+      "branch": "claude/footer-year",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T16:50:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-tools",
+      "branch": "agent/pub-b5e6f7a",
+      "sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+      "at": "2026-11-14T16:55:00+00:00",
+      "pr": 56
+     }
+    ],
+    "pull_request": {
+     "number": 56,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ]
+    }
+   }
+  }
+ ]
+}

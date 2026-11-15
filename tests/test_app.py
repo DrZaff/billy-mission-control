@@ -29,8 +29,9 @@ class Pages(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
         text = body.decode()
         self.assertIn('name="viewport"', text)
-        self.assertIn("Read-only", text)
+        self.assertIn("read-only", text)
         self.assertIn(f"Phase {PHASE}", text)
+        self.assertIn('href="/static/app.css"', text)
         self.assertEqual(int(headers["Content-Length"]), len(body))
 
     def test_health_reports_version_and_phase(self):
@@ -54,7 +55,7 @@ class Pages(unittest.TestCase):
 class ReadOnly(unittest.TestCase):
     def test_every_write_method_is_refused(self):
         for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"):
-            for path in ("/", "/healthz", "/nope"):
+            for path in ("/", "/healthz", "/nope", "/tasks", "/static/app.css"):
                 status, headers, _ = call(path, method)
                 self.assertEqual(status, "405 Method Not Allowed", (method, path))
                 self.assertEqual(headers["Allow"], ", ".join(READ_METHODS))
@@ -71,8 +72,18 @@ class SecurityHeaders(unittest.TestCase):
             for name, value in SECURITY_HEADERS:
                 self.assertEqual(headers.get(name), value, (path, method, name))
 
-    def test_policy_allows_nothing_to_load(self):
+    def test_policy_allows_only_the_apps_own_stylesheet(self):
         csp = dict(SECURITY_HEADERS)["Content-Security-Policy"]
+        directives = {d.split()[0]: d.split()[1:] for d in csp.split("; ")}
+        self.assertEqual(directives["default-src"], ["'none'"])
+        self.assertEqual(directives["style-src"], ["'self'"])
+        self.assertEqual(directives["form-action"], ["'none'"])
+        self.assertEqual(
+            set(directives),
+            {"default-src", "style-src", "base-uri", "form-action", "frame-ancestors"},
+        )
+        self.assertNotIn("script-src", csp)
+        self.assertNotIn("unsafe-inline", csp)
         self.assertIn("default-src 'none'", csp)
         self.assertIn("frame-ancestors 'none'", csp)
         self.assertEqual(dict(SECURITY_HEADERS)["Cache-Control"], "no-store")

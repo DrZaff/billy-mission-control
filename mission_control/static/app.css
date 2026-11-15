@@ -1,0 +1,256 @@
+/* Billy Mission Control: phone first, one column, light and dark. No outside resources. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f6;
+  --card: #ffffff;
+  --text: #17201a;
+  --muted: #4f5d54;
+  --line: #cfd8d2;
+  --link: #0b5d3b;
+  --alert: #a3121b;
+  --alert-bg: #fdeceb;
+  --focus: #0b5d3b;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 100%;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1411;
+    --card: #17201b;
+    --text: #e8efe9;
+    --muted: #a9b8ae;
+    --line: #2f3d35;
+    --link: #7fe0ae;
+    --alert: #ff9b93;
+    --alert-bg: #3a1717;
+    --focus: #7fe0ae;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+header,
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+header {
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  margin: 12px 0 4px;
+  font-weight: 700;
+}
+
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+a {
+  color: var(--link);
+}
+
+nav.summary {
+  margin: 8px 0;
+}
+
+nav.summary a {
+  border: 1px solid var(--line);
+  background: var(--card);
+}
+
+nav a,
+.brand a,
+.title a,
+details summary,
+a.button,
+main > p > a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+
+nav a {
+  padding: 0 10px;
+  text-decoration: none;
+  border-radius: 6px;
+}
+
+nav a[aria-current="page"] {
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+a:focus-visible,
+summary:focus-visible,
+pre:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+h1 {
+  font-size: 1.5rem;
+  line-height: 1.25;
+  margin: 16px 0 8px;
+}
+
+h2 {
+  font-size: 1.125rem;
+  margin: 24px 0 8px;
+}
+
+.count,
+.meta,
+.reason,
+.banner,
+.note,
+time {
+  color: var(--muted);
+}
+
+.banner {
+  margin: 12px 0 0;
+}
+
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.card,
+.empty {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  min-width: 0;
+}
+
+.card p {
+  margin: 0 0 4px;
+}
+
+.title {
+  font-weight: 700;
+}
+
+.state {
+  font-weight: 600;
+}
+
+.attention,
+.state-unsafe,
+.state-unknown,
+.state-failed {
+  color: var(--alert);
+}
+
+.flags {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+a.button {
+  margin-top: 4px;
+  padding: 0 14px;
+  border: 1px solid var(--link);
+  border-radius: 999px;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.stop {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.path {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.path li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.mark {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.step {
+  font-weight: 600;
+}
+
+code,
+pre {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 1rem;
+}
+
+.sha {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+/* One tap selects the whole command; the phone's own Copy does the rest. No script needed. */
+pre.command {
+  margin: 8px 0;
+  padding: 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  -webkit-user-select: all;
+  user-select: all;
+}
+
+details.events {
+  margin: 24px 0 32px;
+}
+
+details.events ol {
+  padding-left: 20px;
+}
+
+@media (min-width: 600px) {
+  .cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto;
+  }
+}

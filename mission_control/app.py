@@ -1,24 +1,28 @@
 """The Mission Control web application (WSGI, standard library only).
 
-Read-only by design: it answers GET and HEAD and refuses every other method. In phase A1 it
-serves a placeholder page and a health check, with no data, no credentials and no outbound
-calls. Later phases add screens over synthetic fixtures (A3), then read-only GitHub data (A5).
+Read-only by design: it answers GET and HEAD and refuses every other method. Phase A3 serves the
+screens over synthetic demo data (Demo 0), with no credentials and no outbound calls. Later
+phases add sign-in and the stop switch (A4), then read-only GitHub data (A5).
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable
-from html import escape
+from pathlib import Path
 
-from . import PHASE, __version__
+from . import PHASE, __version__, views
+from .demo import Demo, DemoError, load_file
 
-# Sent on every response. No scripts, styles, frames, forms or outside resources are allowed
-# until a later phase needs one and adds it deliberately (with a test).
+# Sent on every response. Nothing may load but the app's own stylesheet: no scripts, images,
+# fonts, frames, forms or outside resources, until a later phase adds one deliberately (with a
+# test).
 SECURITY_HEADERS: list[tuple[str, str]] = [
     (
         "Content-Security-Policy",
-        "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'; "
+        "frame-ancestors 'none'",
     ),
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
@@ -28,28 +32,20 @@ SECURITY_HEADERS: list[tuple[str, str]] = [
 ]
 
 READ_METHODS = ("GET", "HEAD")
+TASK_PATH = re.compile(r"/tasks/([a-z0-9][a-z0-9-]{0,63})")
+STYLESHEET = (Path(__file__).with_name("static") / "app.css").read_bytes()
 
 StartResponse = Callable[..., object]
 Response = tuple[str, str, bytes]
+HTML = "text/html; charset=utf-8"
 
 
-def index_page() -> Response:
-    title = "Billy Mission Control"
-    body = (
-        "<!doctype html>\n"
-        '<html lang="en">\n'
-        "<head>\n"
-        '<meta charset="utf-8">\n'
-        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        f"<title>{escape(title)}</title>\n"
-        "</head>\n"
-        "<body>\n"
-        f"<h1>{escape(title)}</h1>\n"
-        f"<p>Phase {escape(PHASE)} skeleton. Read-only. No data is connected yet.</p>\n"
-        "</body>\n"
-        "</html>\n"
-    )
-    return "200 OK", "text/html; charset=utf-8", body.encode("utf-8")
+def _html(status: str, text: str) -> Response:
+    return status, HTML, text.encode("utf-8")
+
+
+def _text(status: str, message: str) -> Response:
+    return status, "text/plain; charset=utf-8", (message + "\n").encode("utf-8")
 
 
 def health() -> Response:
@@ -57,35 +53,65 @@ def health() -> Response:
     return "200 OK", "application/json", json.dumps(payload).encode("utf-8")
 
 
-ROUTES: dict[str, Callable[[], Response]] = {
-    "/": index_page,
+def stylesheet() -> Response:
+    return "200 OK", "text/css; charset=utf-8", STYLESHEET
+
+
+PAGES: dict[str, Callable[[Demo], str]] = {
+    "/": views.home,
+    "/tasks": views.task_list,
+    "/usage": views.usage,
+    "/settings": views.settings,
+}
+STATIC: dict[str, Callable[[], Response]] = {
     "/healthz": health,
+    "/static/app.css": stylesheet,
 }
 
 
-def _text(status: str, message: str) -> Response:
-    return status, "text/plain; charset=utf-8", (message + "\n").encode("utf-8")
+def route(path: str, load: Callable[[], Demo]) -> Response:
+    if path in STATIC:
+        return STATIC[path]()
+    task = TASK_PATH.fullmatch(path)
+    if path not in PAGES and not task:
+        return _html("404 Not Found", views.not_found())
+    try:
+        demo = load()
+    except (DemoError, OSError):
+        # Never a guess: without readable data, show that it is unavailable.
+        return _html("503 Service Unavailable", views.unavailable())
+    if task:
+        entry = demo.entry(task.group(1))
+        if entry is None:
+            return _html("404 Not Found", views.not_found())
+        return _html("200 OK", views.task_detail(demo, entry))
+    return _html("200 OK", PAGES[path](demo))
 
 
-def application(environ: dict, start_response: StartResponse) -> Iterable[bytes]:
-    """The WSGI entry point."""
-    method = environ.get("REQUEST_METHOD", "GET").upper()
-    path = environ.get("PATH_INFO") or "/"
-    extra: list[tuple[str, str]] = []
+def make_app(load: Callable[[], Demo] = load_file) -> Callable[..., Iterable[bytes]]:
+    """A WSGI app over the data that `load` returns (the demo file by default)."""
 
-    if method not in READ_METHODS:
-        status, content_type, body = _text("405 Method Not Allowed", "Read-only.")
-        extra.append(("Allow", ", ".join(READ_METHODS)))
-    elif path in ROUTES:
-        status, content_type, body = ROUTES[path]()
-    else:
-        status, content_type, body = _text("404 Not Found", "Not found.")
+    def application(environ: dict, start_response: StartResponse) -> Iterable[bytes]:
+        method = environ.get("REQUEST_METHOD", "GET").upper()
+        path = environ.get("PATH_INFO") or "/"
+        extra: list[tuple[str, str]] = []
 
-    headers = [
-        ("Content-Type", content_type),
-        ("Content-Length", str(len(body))),
-        *SECURITY_HEADERS,
-        *extra,
-    ]
-    start_response(status, headers)
-    return [b"" if method == "HEAD" else body]
+        if method not in READ_METHODS:
+            status, content_type, body = _text("405 Method Not Allowed", "Read-only.")
+            extra.append(("Allow", ", ".join(READ_METHODS)))
+        else:
+            status, content_type, body = route(path, load)
+
+        headers = [
+            ("Content-Type", content_type),
+            ("Content-Length", str(len(body))),
+            *SECURITY_HEADERS,
+            *extra,
+        ]
+        start_response(status, headers)
+        return [b"" if method == "HEAD" else body]
+
+    return application
+
+
+application = make_app()

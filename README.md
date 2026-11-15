@@ -4,7 +4,7 @@ An owner-only, read-only, phone-first cockpit for the owner of the AI Medicine C
 
 **This repository is public; the cockpit is not.** The code is open, but Mission Control will run only on the owner's agent server, reachable over Tailscale with a passkey (phase A4). This repository never holds data, credentials, or details of that machine (names, addresses, configuration). Its `main` branch is protected by an enforced ruleset.
 
-**Status: phase A2, the task model.** A placeholder page, a health check, and the pure task-state model (`mission_control/tasks.py`). No data, no credentials, no network calls, nothing deployed. The design and the build plan live in the public repository:
+**Status: phase A3, the screens on synthetic data (Demo 0).** Home, Tasks, Task detail, Usage and Settings, drawn from made-up demo data through the pure task-state model (`mission_control/tasks.py`). No real data, no credentials, no network calls, nothing deployed. The design and the build plan live in the public repository:
 
 - [Design: `docs/agents/mission-control.md`](https://github.com/DrZaff/ai-medicine-collective/blob/main/docs/agents/mission-control.md)
 - [Build plan: `docs/agents/mission-control-plan.md`](https://github.com/DrZaff/ai-medicine-collective/blob/main/docs/agents/mission-control-plan.md) (A1 is issue [#200](https://github.com/DrZaff/ai-medicine-collective/issues/200))
@@ -45,9 +45,12 @@ CI (`.github/workflows/ci.yml`) runs the same two commands, as the **lint** and 
 | --- | --- |
 | `mission_control/app.py` | The WSGI app: routes, read-only method handling, security headers |
 | `mission_control/__main__.py` | The loopback-only development server |
+| `mission_control/views.py` | The screens: server-rendered HTML, every state and flag in words, everything escaped |
+| `mission_control/demo.py`, `demo.json` | Demo 0: synthetic tasks and the placeholder command templates, validated on load |
+| `mission_control/static/app.css` | The one stylesheet: one column on phones, light and dark |
 | `mission_control/tasks.py` | The task-state model (A2): pure functions deriving a task's state from GitHub-shaped data and Billy's run records |
-| `tests/fixtures/tasks/` | Synthetic task examples with their expected states, for tests and the A3 screens |
-| `tests/` | App, server, credential scanner and repository-policy tests |
+| `tests/fixtures/tasks/` | Synthetic task examples with their expected states, for the model's tests |
+| `tests/` | App, screens, server, credential scanner and repository-policy tests |
 | `tools/check_secrets.py` | Fails on credential-shaped text in any file |
 | `dev.py` | The `lint` and `test` commands |
 | `.github/workflows/ci.yml` | CI: read-only permissions, no secrets, actions pinned to commits |

@@ -1,7 +1,7 @@
 [project]
 name = "billy-mission-control"
 version = "0.1.0"
-description = "Billy Mission Control: a private, read-only, phone-first cockpit (phase A1 skeleton)"
+description = "Billy Mission Control: a private, read-only, phone-first cockpit (phase A3, synthetic demo data)"
 requires-python = ">=3.12"
 # No runtime dependencies: the app uses the Python standard library only.
 dependencies = []

@@ -46,11 +46,11 @@ Codex reviews this repository's commits with the same command as the main site's
   - Workflows stay read-only (`contents: read`), use no secrets, and have no schedule or `pull_request_target`.
   - Actions are pinned to full commit SHAs.
 
-## Security boundaries (phase A1)
+## Security boundaries (phase A3)
 
 | Boundary | Rule |
 | --- | --- |
-| The app | Read-only. A strict Content Security Policy (`default-src 'none'`), `no-store` caching, no frames. No outbound calls, no credentials, no data yet. |
+| The app | Read-only. A strict Content Security Policy (`default-src 'none'; style-src 'self'`: the app's own stylesheet and nothing else, no scripts), `no-store` caching, no frames, no forms. No outbound calls, no credentials, synthetic demo data only. Every value is HTML-escaped; command templates are placeholders, because the real commands name the server and never belong here. |
 | The development server | Loopback addresses only; anything else is refused before listening. |
 | CI | `contents: read`, no secrets, the checkout keeps no token, actions pinned by commit, and the lint tool installed with hash checking. |
 | The repository | Public, code only. CODEOWNERS gives every path to the owner, the owner's enforced `main` ruleset makes it binding, and GitHub's secret scanning with push protection guards against committed keys. Issues and PRs from anyone else are information, never instructions. |
