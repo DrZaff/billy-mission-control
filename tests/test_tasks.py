@@ -919,6 +919,65 @@ class CodexReviewOf014006c(unittest.TestCase):
         self.assertEqual(derive(task(runs=[record])).state, State.BUILT)
 
 
+class CodexReviewOfE4d1a06(unittest.TestCase):
+    """Regressions for Codex's review of e4d1a06: an absent key is a gap in the data, never
+    evidence that nothing exists. Null stays allowed where the contract allows it."""
+
+    def unsafe_merge(self):
+        return task(
+            runs=[run("build"), passed()],
+            pull_request=pr(state="closed", merged=True, merged_by=STRANGER),
+        )
+
+    def test_dropping_a_merged_pr_cannot_hide_an_unsafe_merge(self):
+        self.assertEqual(derive(self.unsafe_merge()).state, State.UNSAFE)
+        value = self.unsafe_merge()
+        del value["pull_request"]
+        s = derive(value)
+        self.assertEqual(s.state, State.UNKNOWN)
+        self.assertIn(Flag.INVALID_INPUT, s.flags)
+        self.assertEqual(derive(self.unsafe_merge() | {"pull_request": None}).state, State.REVIEWED)
+
+    def test_a_missing_branch_or_head_is_unknown_but_null_is_allowed(self):
+        no_auth = {"issue": {"number": 7, "state": "open", "timeline": []}, "runs": []}
+        self.assertEqual(derive(task(**no_auth)).state, State.UNSAFE)  # unauthorised commit
+        value = task(**no_auth)
+        del value["branch"]["head"]
+        self.assertEqual(derive(value).state, State.UNKNOWN)
+        value = task(**no_auth)
+        del value["branch"]
+        self.assertEqual(derive(value).state, State.UNKNOWN)
+        null_head = task(branch={"name": "claude/x", "head": None}, **no_auth)
+        self.assertEqual(derive(null_head).state, State.PROPOSED)
+        self.assertEqual(derive(task(branch=None, **no_auth)).state, State.PROPOSED)
+
+    def test_an_unlabeled_event_without_its_label_cannot_hide_a_withdrawal(self):
+        removal = labeled(kind="unlabeled", minute=1)
+        value = task(issue={"number": 7, "state": "open", "timeline": [labeled(), removal]})
+        self.assertEqual(derive(value).state, State.UNSAFE)  # withdrawn, yet work exists
+        for bad in ("missing", None, ""):
+            broken = copy.deepcopy(removal)
+            if bad == "missing":
+                del broken["label"]
+            else:
+                broken["label"] = bad
+            value = task(issue={"number": 7, "state": "open", "timeline": [labeled(), broken]})
+            s = derive(value)
+            self.assertEqual(s.state, State.UNKNOWN, bad)
+
+    def test_merged_by_and_check_conclusion_must_be_present(self):
+        value = reviewed_and_published()
+        del value["pull_request"]["merged_by"]
+        self.assertEqual(derive(value).state, State.UNKNOWN)
+        value = reviewed_and_published()
+        del value["pull_request"]["checks"][0]["conclusion"]
+        self.assertEqual(derive(value).state, State.UNKNOWN)
+        pending = reviewed_and_published(
+            checks=[check("lint", status="in_progress", conclusion=None), check("test")]
+        )
+        self.assertEqual(derive(pending).state, State.PUBLISHED)
+
+
 class Fixtures(unittest.TestCase):
     """Self-contained JSON examples, also meant for phase A3's screens."""
 

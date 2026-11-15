@@ -34,6 +34,7 @@ clinical_paths may be an explicit empty list.
                    Only "labeled agent:ready" or "authorized" (an approved-action record, such as
                    the owner's direct instruction) by the owner authorise work. Anything else,
                    including the label's mere presence and every comment body, is ignored.
+                   A labeled or unlabeled event must name its label.
     run           {"step": "build" | "review" | "publish" | "question" | "failure",
                    "repo": "owner/name", "branch": str, "sha": "<40 hex>", "at": ISO 8601,
                    (build and review records must name the task's source branch; records for
@@ -371,7 +372,7 @@ def _parse_pr(raw: Any) -> _PR:
     merged = _need(p, "merged", "pull_request.merged")
     _req(isinstance(merged, bool), "pull_request.merged must be true or false")
     _req(not (merged and state == "open"), "pull_request can't be open and merged")
-    merged_by = p.get("merged_by")
+    merged_by = _need(p, "merged_by", "pull_request.merged_by")
     if merged:
         merged_by = _login(merged_by, "pull_request.merged_by")
     reviews = []
@@ -405,7 +406,7 @@ def _parse_pr(raw: Any) -> _PR:
             ("queued", "in_progress", "completed"),
             f"pull_request.checks[{i}].status",
         )
-        conclusion = c.get("conclusion")
+        conclusion = _need(c, "conclusion", f"pull_request.checks[{i}].conclusion")
         _req(
             conclusion is None or isinstance(conclusion, str),
             f"pull_request.checks[{i}].conclusion",
@@ -445,22 +446,32 @@ def parse(raw: Any) -> _Task:
         _list(_need(issue, "timeline", "issue.timeline"), "issue.timeline")
     ):
         e = _map(raw_event, f"issue.timeline[{i}]")
+        kind = _text(e.get("event"), f"issue.timeline[{i}].event")
         label = e.get("label")
+        if kind in ("labeled", "unlabeled"):
+            # A label event must say which label: a removal with no label must never be read
+            # as "some other label" and so hide a withdrawn authorisation.
+            label = _text(
+                _need(e, "label", f"issue.timeline[{i}].label"), f"issue.timeline[{i}].label"
+            )
         timeline.append(
             _Event(
-                kind=_text(e.get("event"), f"issue.timeline[{i}].event"),
+                kind=kind,
                 label=label if isinstance(label, str) else None,
                 actor=_login(e.get("actor"), f"issue.timeline[{i}].actor"),
                 at=_time(e.get("at"), f"issue.timeline[{i}].at"),
             )
         )
-    branch = t.get("branch")
+    # "branch", "branch.head" and "pull_request" may be null (none yet), but must be present:
+    # an absent key is a gap in the data, not evidence that nothing exists.
+    branch = _need(t, "branch", "branch")
     branch_name = branch_head = None
     if branch is not None:
         b = _map(branch, "branch")
         branch_name = _text(b.get("name"), "branch.name")
-        if b.get("head") is not None:
-            branch_head = _sha(b.get("head"), "branch.head")
+        head_raw = _need(b, "head", "branch.head")
+        if head_raw is not None:
+            branch_head = _sha(head_raw, "branch.head")
     # Safety settings have no defaults: a missing one must never quietly switch a gate off.
     for key in ("clinicians", "clinical_paths", "required_checks", "max_fix_rounds", "paused"):
         _req(key in t, f"{key} is required")
@@ -473,7 +484,7 @@ def parse(raw: Any) -> _Task:
     )
     paused = t["paused"]
     _req(isinstance(paused, bool), "paused must be true or false")
-    pr_raw = t.get("pull_request")
+    pr_raw = _need(t, "pull_request", "pull_request")
     return _Task(
         repo=repo,
         owner=_login(t.get("owner"), "owner"),
