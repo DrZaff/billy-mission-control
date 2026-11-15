@@ -1,0 +1,384 @@
+"""Server-rendered HTML for the A3 screens: Home, Tasks, Task detail, Usage and Settings.
+
+Every value from the data is HTML-escaped where it is written into the page. States and flags
+are shown in words (never colour alone), and anything the A2 model says needs attention is
+marked as such in text. Links go only to GitHub pages built from validated values.
+"""
+
+from __future__ import annotations
+
+from html import escape
+
+from . import PHASE
+from .demo import Demo, Entry, utc
+from .tasks import ATTENTION_FLAGS, Flag, State, TaskStatus
+
+STATE_WORDS = {
+    State.PROPOSED: "Proposed: not authorised",
+    State.READY: "Ready: authorised, no work yet",
+    State.BUILDING: "Building",
+    State.BUILT: "Built: waiting for review",
+    State.REVIEWING: "Review under way",
+    State.CHANGES_NEEDED: "Changes needed",
+    State.REVIEWED: "Reviewed: not published yet",
+    State.PUBLISHED: "Published: checks not all passed",
+    State.CLINICAL_REVIEW: "Waiting for a clinician's approval",
+    State.AWAITING_OWNER: "Waiting for you",
+    State.MERGED: "Merged",
+    State.BLOCKED: "Blocked: a question for you",
+    State.FAILED: "Failed",
+    State.PAUSED: "Paused by the stop switch",
+    State.CLOSED: "Closed without merging",
+    State.UNSAFE: "UNSAFE: do not approve",
+    State.UNKNOWN: "Unknown: the data can't be trusted",
+}
+
+FLAG_WORDS = {
+    Flag.INVALID_INPUT: "The task's data is invalid",
+    Flag.CONFLICTING_RECORDS: "Two reviews of the same commit disagree",
+    Flag.LABEL_WITHOUT_OWNER: "agent:ready was added by someone other than you",
+    Flag.UNAUTHORIZED_WORK: "Work exists that you never authorised",
+    Flag.WRONG_REPO_RECORD: "A record for another repository was ignored",
+    Flag.WRONG_BRANCH_RECORD: "A record for another branch was ignored",
+    Flag.RECORD_BEFORE_AUTHORIZATION: "A record from before your authorisation was ignored",
+    Flag.STALE_REVIEW: "The review is for an older commit",
+    Flag.REVIEW_MISSING: "The current commit has no review",
+    Flag.PR_BEFORE_REVIEW: "A pull request is open before any passing review",
+    Flag.HEAD_MISMATCH: "The PR head is not the reviewed commit",
+    Flag.FIX_ROUNDS_EXHAUSTED: "The fix rounds are used up",
+    Flag.CHECKS_PASSED: "Required checks passed",
+    Flag.CHECKS_PENDING: "Required checks still running",
+    Flag.CHECKS_MISSING: "A required check has no result",
+    Flag.CHECKS_STALE: "Check results are for another commit",
+    Flag.CHECKS_FAILING: "A required check failed",
+    Flag.CLINICAL: "Clinical files",
+    Flag.CLINICAL_APPROVAL_MISSING: "No clinician has approved this commit",
+    Flag.UNAUTHORIZED_MERGE: "Merged by someone other than you",
+    Flag.MERGED_UNREVIEWED: "The merged commit never passed review",
+    Flag.MERGED_WITHOUT_CLINICIAN: "Clinical files merged without a clinician's approval",
+    Flag.MERGED_WITH_CHECKS_NOT_PASSED: "Merged before the required checks passed",
+}
+
+SECTIONS = (
+    ("waiting", "Waiting for you"),
+    ("active", "Running / queued"),
+    ("alerts", "Alerts"),
+    ("done", "Done"),
+)
+
+NAV = (("/", "Home"), ("/tasks", "Tasks"), ("/usage", "Usage"), ("/settings", "Settings"))
+
+GITHUB = "https://github.com"
+
+
+def section(status: TaskStatus) -> str:
+    """Where a task belongs on Home. UNSAFE, UNKNOWN and FAILED tasks, and any attention flag,
+    are always alerts; every other task that needs the owner is under "Waiting for you"."""
+    if status.state in (State.UNSAFE, State.UNKNOWN, State.FAILED) or (
+        status.flags & ATTENTION_FLAGS
+    ):
+        return "alerts"
+    if status.needs_attention or Flag.STALE_REVIEW in status.flags:
+        return "waiting"
+    if status.state in (State.MERGED, State.CLOSED):
+        return "done"
+    return "active"
+
+
+def needs_you(status: TaskStatus) -> bool:
+    return section(status) in ("alerts", "waiting")
+
+
+def github_link(entry: Entry) -> tuple[str, str] | None:
+    """(url, label) for the task's PR, else its issue. Built only from validated values."""
+    if entry.repo is None:
+        return None
+    if entry.status.pr is not None:
+        return f"{GITHUB}/{entry.repo}/pull/{entry.status.pr}", f"Open PR #{entry.status.pr}"
+    if entry.issue is not None:
+        return f"{GITHUB}/{entry.repo}/issues/{entry.issue}", f"Open issue #{entry.issue}"
+    return None
+
+
+def _e(value: object) -> str:
+    return escape(str(value), quote=True)
+
+
+def _link(url: str, label: str) -> str:
+    return f'<a class="button" href="{_e(url)}" rel="noreferrer">{_e(label)}</a>'
+
+
+def _short(sha: str | None) -> str:
+    return sha[:12] if sha else "none"
+
+
+def page(title: str, current: str, demo: Demo | None, body: str) -> str:
+    nav = "".join(
+        f'<a href="{href}"{' aria-current="page"' if href == current else ""}>{label}</a>'
+        for href, label in NAV
+    )
+    banner = (
+        f'<p class="banner">Demo data (synthetic) · as of {_e(utc(demo.refreshed_at))} · '
+        f"Phase {_e(PHASE)}, read-only</p>"
+        if demo
+        else f'<p class="banner">Phase {_e(PHASE)}, read-only</p>'
+    )
+    return (
+        "<!doctype html>\n"
+        '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<meta name="color-scheme" content="light dark">\n'
+        f"<title>{_e(title)} · Billy Mission Control</title>\n"
+        '<link rel="stylesheet" href="/static/app.css">\n'
+        "</head>\n<body>\n"
+        '<header><p class="brand"><a href="/">[+] Billy Mission Control</a></p>'
+        f'<nav aria-label="Main">{nav}</nav></header>\n'
+        f"<main>\n{banner}\n{body}\n</main>\n</body>\n</html>\n"
+    )
+
+
+def _state_line(status: TaskStatus) -> str:
+    marker = '<strong class="attention">Needs you: </strong>' if needs_you(status) else ""
+    words = _e(STATE_WORDS[status.state])
+    return f'<p class="state state-{_e(status.state.value)}">{marker}{words}</p>'
+
+
+def _card(entry: Entry, with_github: bool) -> str:
+    st = entry.status
+    where = f"{entry.repo} #{entry.issue}" if entry.repo else "Unreadable task data"
+    reason = st.reasons[0] if st.reasons else ""
+    alerts = [FLAG_WORDS[f] for f in sorted(st.flags & ATTENTION_FLAGS)]
+    extra = "".join(f"<li>{_e(a)}</li>" for a in alerts)
+    gh = github_link(entry) if with_github else None
+    return (
+        '<li class="card">'
+        f'<p class="title"><a href="/tasks/{_e(entry.id)}">{_e(entry.title)}</a></p>'
+        f'<p class="meta">{_e(where)} · risk: {_e(entry.risk)}</p>'
+        f"{_state_line(st)}"
+        f'<p class="reason">{_e(reason)}</p>'
+        + (f'<ul class="flags">{extra}</ul>' if extra else "")
+        + (_link(*gh) if gh else "")
+        + "</li>"
+    )
+
+
+def _section(anchor: str, heading: str, cards: str, count: int) -> str:
+    return (
+        f'<section aria-labelledby="{anchor}"><h2 id="{anchor}">{_e(heading)} '
+        f'<span class="count">({count})</span></h2><ul class="cards">{cards}</ul></section>'
+    )
+
+
+def _group(demo: Demo) -> dict[str, list[Entry]]:
+    groups: dict[str, list[Entry]] = {key: [] for key, _ in SECTIONS}
+    for entry in demo.entries:
+        groups[section(entry.status)].append(entry)
+    return groups
+
+
+def _stop_line(demo: Demo) -> str:
+    if demo.stop_switch_on:
+        state = "ON: no new runs start"
+    else:
+        state = "off: runs may start"
+    return (
+        f'<p class="stop">Stop switch: <strong>{_e(state)}</strong> '
+        f"(since {_e(utc(demo.stop_switch_changed_at))})</p>"
+    )
+
+
+def home(demo: Demo) -> str:
+    groups = _group(demo)
+    summary = " ".join(
+        f'<a href="#h-{key}">{_e(heading)}: {len(groups[key])}</a>' for key, heading in SECTIONS[:3]
+    )
+    parts = [f'<nav class="summary" aria-label="Sections">{summary}</nav>']
+    for key, heading in SECTIONS[:3]:
+        items = groups[key]
+        cards = "".join(_card(e, key != "active") for e in items) or (
+            '<li class="empty">Nothing here.</li>'
+        )
+        parts.append(_section(f"h-{key}", heading, cards, len(items)))
+    done = len(groups["done"])
+    parts.append(f'<p><a href="/tasks#done">{done} merged or closed: see Tasks</a></p>')
+    parts.append(_stop_line(demo))
+    return page("Home", "/", demo, "<h1>Home</h1>" + "".join(parts))
+
+
+def task_list(demo: Demo) -> str:
+    groups = _group(demo)
+    parts = []
+    for key, heading in SECTIONS:
+        items = groups[key]
+        cards = "".join(_card(e, True) for e in items) or '<li class="empty">Nothing here.</li>'
+        parts.append(_section(key, heading, cards, len(items)))
+    return page("Tasks", "/tasks", demo, "<h1>Tasks</h1>" + "".join(parts))
+
+
+def _path(entry: Entry) -> str:
+    """The task's way from authorisation to merge, one line per step, in words."""
+    st, flags = entry.status, entry.status.flags
+    rows: list[tuple[str, str, str]] = []  # (marker, step, detail)
+
+    if st.state is State.UNKNOWN:
+        authorised = ("?", "unknown")
+    elif st.state is State.PROPOSED or Flag.UNAUTHORIZED_WORK in flags:
+        authorised = ("!", "no") if Flag.UNAUTHORIZED_WORK in flags else ("-", "not yet")
+    else:
+        authorised = ("done", "yes, by the owner")
+    rows.append((authorised[0], "Authorised", authorised[1]))
+    rows.append(
+        (
+            "done" if st.head_sha else "-",
+            "Commit",
+            _short(st.head_sha) if st.head_sha else "none yet",
+        )
+    )
+
+    if st.reviewed_sha:
+        review = ("done", f"passed for {_short(st.reviewed_sha)}")
+    elif st.state is State.CHANGES_NEEDED or Flag.FIX_ROUNDS_EXHAUSTED in flags:
+        review = ("!", "blocking problems found")
+    elif Flag.STALE_REVIEW in flags:
+        review = ("!", "only for an older commit")
+    elif st.state is State.REVIEWING:
+        review = ("...", "under way")
+    else:
+        review = ("-", "not yet")
+    rows.append((review[0], "Review", review[1]))
+
+    if Flag.HEAD_MISMATCH in flags:
+        rows.append(("!", "Pull request", f"#{st.pr}: head is NOT the reviewed commit"))
+    elif st.pr is not None:
+        rows.append(("done", "Pull request", f"#{st.pr}, head {_short(st.head_sha)}"))
+    else:
+        rows.append(("-", "Pull request", "none yet"))
+
+    for flag, marker in (
+        (Flag.CHECKS_FAILING, "!"),
+        (Flag.CHECKS_STALE, "!"),
+        (Flag.CHECKS_MISSING, "!"),
+        (Flag.CHECKS_PENDING, "..."),
+        (Flag.CHECKS_PASSED, "done"),
+    ):
+        if flag in flags:
+            rows.append((marker, "Checks", FLAG_WORDS[flag].lower()))
+            break
+    else:
+        rows.append(("-", "Checks", "not yet"))
+
+    if Flag.CLINICAL in flags:
+        if Flag.CLINICAL_APPROVAL_MISSING in flags or Flag.MERGED_WITHOUT_CLINICIAN in flags:
+            rows.append(("!", "Clinician", "approval of this commit needed"))
+        else:
+            rows.append(("done", "Clinician", "approved this commit"))
+
+    if st.state is State.MERGED:
+        rows.append(("done", "Owner", "merged"))
+    elif st.state is State.UNSAFE and st.flags & {
+        Flag.UNAUTHORIZED_MERGE,
+        Flag.MERGED_UNREVIEWED,
+        Flag.MERGED_WITHOUT_CLINICIAN,
+    }:
+        rows.append(("!", "Owner", "merged unsafely; see the reasons"))
+    elif st.state is State.AWAITING_OWNER:
+        rows.append(("...", "Owner", "your decision"))
+    else:
+        rows.append(("-", "Owner", "approve and merge, later"))
+
+    items = "".join(
+        f'<li><span class="mark">[{_e(m)}]</span> <span class="step">{_e(s)}</span> '
+        f"<span>{_e(d)}</span></li>"
+        for m, s, d in rows
+    )
+    return f'<ol class="path">{items}</ol>'
+
+
+def task_detail(demo: Demo, entry: Entry) -> str:
+    st = entry.status
+    where = f"{entry.repo} #{entry.issue}" if entry.repo else "Unreadable task data"
+    clinical = "yes" if Flag.CLINICAL in st.flags else "no"
+    reasons = "".join(f"<li>{_e(r)}</li>" for r in st.reasons)
+    flags = "".join(
+        f"<li>{'<strong>Attention:</strong> ' if f in ATTENTION_FLAGS else ''}{_e(FLAG_WORDS[f])}"
+        f" <code>{_e(f.value)}</code></li>"
+        for f in sorted(st.flags)
+    )
+    parts = [
+        '<p><a href="/tasks">&lt; Tasks</a></p>',
+        f"<h1>{_e(entry.title)}</h1>",
+        f'<p class="meta">{_e(where)} · risk: {_e(entry.risk)} · clinical: {clinical}</p>',
+        _state_line(st),
+        f'<section aria-labelledby="h-why"><h2 id="h-why">Why</h2><ul>{reasons}</ul></section>',
+    ]
+    if flags:
+        parts.append(
+            f'<section aria-labelledby="h-flags"><h2 id="h-flags">Flags</h2>'
+            f'<ul class="flags">{flags}</ul></section>'
+        )
+    shas = (
+        f'<p>Current commit: <code class="sha">{_e(st.head_sha or "none")}</code></p>'
+        f'<p>Reviewed commit: <code class="sha">{_e(st.reviewed_sha or "none")}</code></p>'
+    )
+    parts.append(
+        f'<section aria-labelledby="h-path"><h2 id="h-path">Path</h2>{_path(entry)}{shas}</section>'
+    )
+
+    command = demo.command(entry)
+    if command:
+        what = "review" if command.kind == "review" else "publish the reviewed commit"
+        parts.append(
+            '<section aria-labelledby="h-next"><h2 id="h-next">Next: '
+            f"{_e(what)}</h2>"
+            f'<p>For commit <code class="sha">{_e(command.sha)}</code>:</p>'
+            f'<pre class="command" aria-label="Command to copy">{_e(command.text)}</pre>'
+            '<p class="note">Tap the command to select all of it, then copy. '
+            "Mission Control runs nothing.</p></section>"
+        )
+
+    gh = github_link(entry)
+    if gh:
+        parts.append(f"<p>{_link(*gh)}</p>")
+
+    events = "".join(f"<li><time>{_e(utc(at))}</time> {_e(text)}</li>" for at, text in entry.events)
+    parts.append(
+        f'<details class="events"><summary>Events ({len(entry.events)})</summary>'
+        f"<ol>{events or '<li>No readable events.</li>'}</ol></details>"
+    )
+    return page(entry.title, "/tasks", demo, "".join(parts))
+
+
+def usage(demo: Demo) -> str:
+    body = (
+        "<h1>Usage</h1>"
+        "<p>Spending against each provider's cap will show here once Mission Control reads real "
+        "usage. Nothing is tracked in this demo.</p>"
+    )
+    return page("Usage", "/usage", demo, body)
+
+
+def settings(demo: Demo) -> str:
+    body = (
+        "<h1>Settings</h1>"
+        '<section aria-labelledby="h-stop"><h2 id="h-stop">Stop switch</h2>'
+        f"{_stop_line(demo)}"
+        "<p>Read-only here. Turning it on from this page arrives with phase A4, with its own "
+        "tests and review.</p></section>"
+        '<section aria-labelledby="h-sched"><h2 id="h-sched">Schedules</h2>'
+        "<p>None. Nothing runs on a timer.</p></section>"
+        '<section aria-labelledby="h-account"><h2 id="h-account">Account</h2>'
+        "<p>Sign-in and sign-out arrive with phase A4.</p></section>"
+    )
+    return page("Settings", "/settings", demo, body)
+
+
+def unavailable() -> str:
+    body = (
+        "<h1>Data unavailable</h1>"
+        "<p>The demo data could not be read, so nothing is shown rather than a guess.</p>"
+    )
+    return page("Data unavailable", "", None, body)
+
+
+def not_found() -> str:
+    return page("Not found", "", None, '<h1>Not found</h1><p><a href="/">Home</a></p>')
