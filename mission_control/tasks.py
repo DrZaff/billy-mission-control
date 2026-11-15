@@ -688,6 +688,21 @@ def derive(raw: Any) -> TaskStatus:
             )
         return status(State.PROPOSED, "Not authorised by the owner.", head)
 
+    # A published PR whose head moved off the published (reviewed) commit is unsafe. This is
+    # checked before any other gate, so an open question or a failure can't hide the warning,
+    # and against every publish record for this PR, not only the current authorisation's: a
+    # publish makes a PR for one exact commit, so its head never legitimately moves.
+    if pr:
+        published = [r for r in runs if r.step == "publish" and r.pr == pr.number]
+        if any(r.sha != pr.head for r in published):
+            flags.add(Flag.HEAD_MISMATCH)
+            return status(
+                State.UNSAFE,
+                f"PR #{pr.number}'s head {pr.head[:12]} is not the commit that was reviewed "
+                "and published. Do not approve it.",
+                head,
+            )
+
     # An agent's question holds the task until the owner acts after it (authorises again).
     # Later builds or reviews never clear it: only the owner can. An owner action at the same
     # instant as the question doesn't count as an answer.
@@ -708,18 +723,6 @@ def derive(raw: Any) -> TaskStatus:
         if any(r.step == "build" for r in current):
             return status(State.BUILDING, "Work started; no commit yet.")
         return status(State.READY, "Authorised by the owner; no work yet.")
-
-    # A published PR whose head moved off the published (reviewed) commit is unsafe.
-    if pr:
-        published = [r for r in current if r.step == "publish" and r.pr == pr.number]
-        if any(r.sha != pr.head for r in published):
-            flags.add(Flag.HEAD_MISMATCH)
-            return status(
-                State.UNSAFE,
-                f"PR #{pr.number}'s head {pr.head[:12]} is not the commit that was reviewed "
-                "and published. Do not approve it.",
-                head,
-            )
 
     # Fix rounds: commits that failed review since the owner's latest decision. Once they exceed
     # the limit, the task waits for the owner whatever happens next: further builds or a later

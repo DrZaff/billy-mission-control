@@ -978,6 +978,61 @@ class CodexReviewOfE4d1a06(unittest.TestCase):
         self.assertEqual(derive(pending).state, State.PUBLISHED)
 
 
+class CodexReviewOf124d733(unittest.TestCase):
+    """Regression for the should-fix in Codex's review of 124d733: a moved PR head must be
+    reported as UNSAFE / HEAD_MISMATCH even when a question or a failure is also open."""
+
+    def moved(self, *later, timeline=None):
+        # Commit A was reviewed and published as PR #12, whose head is now B.
+        return derive(
+            task(
+                issue={"number": 7, "state": "open", "timeline": timeline or [labeled()]},
+                branch={"name": "claude/x", "head": B},
+                runs=[run("build"), passed(), published(), *later],
+                pull_request=pr(head=B),
+            )
+        )
+
+    def assert_unsafe(self, s):
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.HEAD_MISMATCH, s.flags)
+        self.assertTrue(s.needs_attention)
+
+    def test_an_open_question_does_not_hide_a_moved_head(self):
+        self.assert_unsafe(self.moved(run("question", sha=None, minute=5)))
+
+    def test_a_failure_does_not_hide_a_moved_head(self):
+        self.assert_unsafe(self.moved(run("failure", sha=None, minute=5)))
+
+    def test_a_question_and_a_failure_together_do_not_hide_it(self):
+        self.assert_unsafe(
+            self.moved(run("question", sha=None, minute=5), run("failure", sha=None, minute=5))
+        )
+
+    def test_a_publish_from_before_a_reauthorisation_still_counts(self):
+        timeline = [labeled(minute=0), labeled(kind="unlabeled", minute=5), labeled(minute=6)]
+        self.assert_unsafe(self.moved(timeline=timeline))
+
+    def test_the_stop_switch_does_not_hide_it_either(self):
+        value = task(
+            paused=True,
+            branch={"name": "claude/x", "head": B},
+            runs=[run("build"), passed(), published(), run("question", sha=None, minute=5)],
+            pull_request=pr(head=B),
+        )
+        self.assert_unsafe(derive(value))
+
+    def test_without_a_moved_head_the_question_still_blocks(self):
+        s = derive(
+            task(
+                runs=[run("build"), passed(), published(), run("question", sha=None, minute=5)],
+                pull_request=pr(),
+            )
+        )
+        self.assertEqual(s.state, State.BLOCKED)
+        self.assertNotIn(Flag.HEAD_MISMATCH, s.flags)
+
+
 class Fixtures(unittest.TestCase):
     """Self-contained JSON examples, also meant for phase A3's screens."""
 
