@@ -787,5 +787,69 @@ class CodexReviewOfAfb72d5(unittest.TestCase):
         self.assertEqual(synced, [True, False])  # the marker file, then its folder
 
 
+class CodexReviewOfA89371f(unittest.TestCase):
+    """Codex's review of a89371f (should fix): a FIFO in the marker's place must not hang the
+    helper, and requests refused while their headers are read must reach the events log."""
+
+    def test_a_fifo_in_the_markers_place_is_refused_without_hanging(self):
+        base = tmpdir(self)
+        control = base / "control"
+        control.mkdir(mode=0o755)
+        os.mkfifo(control / stopper.MARKER, 0o644)
+        result = []
+        thread = threading.Thread(target=lambda: result.append(stopper.set_marker(control, UID)))
+        thread.daemon = True
+        thread.start()
+        thread.join(3)
+        self.assertFalse(thread.is_alive(), "set_marker blocked on a FIFO")
+        self.assertEqual(result, [False])
+
+    def serve_raw(self, raw: bytes):
+        base = tmpdir(self)
+        cfg = parse_app(app_config_text(base))
+        events = Events(base / "events.db")
+        events.initialise()
+        rejected = []
+        path = base / "app.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        listener.listen(1)
+        server = UnixWSGIServer(
+            listener,
+            make_app(service=Service(config=cfg, events=events, stop=lambda: True)),
+            {UID},
+            on_rejected=rejected.append,
+        )
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(5)
+            client.connect(str(path))
+            client.sendall(raw)
+            client.shutdown(socket.SHUT_WR)
+            reply = b""
+            try:
+                while chunk := client.recv(65536):
+                    reply += chunk
+            except ConnectionResetError:
+                pass
+        thread.join(5)
+        return reply, rejected
+
+    def test_too_many_headers_is_recorded(self):
+        filler = "".join(f"X-Filler-{i}: x\r\n" for i in range(45))
+        reply, rejected = self.serve_raw(
+            ("GET / HTTP/1.1\r\nHost: x\r\n" + filler + "\r\n").encode()
+        )
+        self.assertIn(b"431", reply.split(b"\r\n", 1)[0])
+        self.assertEqual(rejected, [431])
+
+    def test_a_malformed_request_is_recorded(self):
+        reply, rejected = self.serve_raw(b"NONSENSE\r\n\r\n")
+        self.assertIn(b"400", reply.split(b"\r\n", 1)[0])
+        self.assertEqual(rejected, [400])
+
+
 if __name__ == "__main__":
     unittest.main()

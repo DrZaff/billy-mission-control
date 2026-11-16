@@ -56,7 +56,13 @@ def set_marker(control_dir: Path, owner: int) -> bool:
         except FileExistsError:
             # Already stopped: confirm it is a real marker, and write it (the file itself, then
             # the folder) to disk again, in case an earlier attempt failed before its fsync.
-            fd = os.open(MARKER, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=folder)
+            # Check the type before opening, and never block on the open: a FIFO in the
+            # marker's place would otherwise hang the helper until a writer appeared.
+            before = os.stat(MARKER, dir_fd=folder, follow_symlinks=False)
+            if not stat.S_ISREG(before.st_mode):
+                return False
+            nonblocking = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            fd = os.open(MARKER, nonblocking, dir_fd=folder)
             try:
                 existing = os.fstat(fd)
                 if not stat.S_ISREG(existing.st_mode) or existing.st_uid != owner:

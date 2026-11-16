@@ -185,6 +185,7 @@ def service_main(argv: list[str]) -> int:
         make_app(service=service),
         cfg.proxy_uids,
         on_refused=lambda uid: events.append("refused-connection", detail=f"uid {uid}"),
+        on_rejected=lambda code: events.append("rejected-request", status=code),
     )
     print("Mission Control ready (supervised testing only).", flush=True)
     server.serve_forever()

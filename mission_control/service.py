@@ -50,6 +50,12 @@ class Handler(WSGIRequestHandler):
     def log_message(self, format: str, *args) -> None:  # noqa: A002 (the base class's name)
         pass  # the events log records requests; journald gets nothing about them
 
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None):
+        # Requests refused while their headers are read (malformed, too long, too many headers)
+        # never reach the app, so they are recorded here: the status only, never the raw text.
+        self.server.on_rejected(code)
+        super().send_error(code, message, explain)
+
     def parse_request(self) -> bool:
         if not super().parse_request():
             return False
@@ -81,12 +87,14 @@ class UnixWSGIServer(WSGIServer):
         app: Callable[..., Iterable[bytes]],
         proxy_uids: Iterable[int],
         on_refused: Callable[[int | None], None] = lambda uid: None,
+        on_rejected: Callable[[int], None] = lambda code: None,
     ):
         socketserver.TCPServer.__init__(self, "unix", Handler, bind_and_activate=False)
         self.socket.close()
         self.socket = listener
         self.proxy_uids = frozenset(proxy_uids)
         self.on_refused = on_refused
+        self.on_rejected = on_rejected
         self.server_name, self.server_port = "localhost", 443
         self.setup_environ()
         self.set_app(app)
