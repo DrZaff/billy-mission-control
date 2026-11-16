@@ -30,6 +30,10 @@ MAX_HEADERS = 40
 MAX_HEADER_BYTES = 8192
 TIMEOUT = 10
 REQUEST_DEADLINE = 15.0
+# Statuses recorded for requests that never reached the app (no response was sent for these).
+TIMED_OUT = 408
+CONNECTION_LOST = 499  # the client closed or reset the connection (nginx's convention)
+SERVER_ERROR = 500
 
 
 class DeadlineReader:
@@ -108,7 +112,11 @@ class Handler(WSGIRequestHandler):
         try:
             super().handle()
         except TimeoutError:
-            self.server.on_rejected(408)  # too slow: dropped, and recorded
+            self.server.on_rejected(TIMED_OUT)  # too slow: dropped, and recorded
+        except OSError:
+            # The other end went away mid-request (a reset or a broken pipe): nothing to
+            # answer. Recorded, and never a traceback.
+            self.server.on_rejected(CONNECTION_LOST)
 
     def address_string(self) -> str:
         return "unix"
@@ -168,6 +176,11 @@ class UnixWSGIServer(WSGIServer):
     def get_request(self):
         conn, _ = self.socket.accept()
         return conn, ("unix", 0)
+
+    def handle_error(self, request, client_address) -> None:
+        # socketserver's default prints a traceback to stderr. Record the failure instead:
+        # nothing about requests, and no traceback, reaches journald.
+        self.on_rejected(SERVER_ERROR)
 
     def verify_request(self, request, client_address) -> bool:
         uid = peer_uid(request)
