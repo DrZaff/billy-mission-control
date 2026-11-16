@@ -13,6 +13,7 @@ import argparse
 import ipaddress
 import os
 import sys
+import time
 from wsgiref.simple_server import make_server
 
 from .app import application
@@ -69,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
 #
 # Each refuses to start unless every start-up check passes (checks.py).
 
-SERVICE_COMMANDS = ("serve", "stopper", "selfcheck", "export-events")
+SERVICE_COMMANDS = ("serve", "stopper", "selfcheck", "export-events", "passkey")
 MAX_CONFIG = 65536
 
 
@@ -111,6 +112,11 @@ def service_main(argv: list[str]) -> int:
     check = sub.add_parser("selfcheck")
     check.add_argument("kind", choices=("app", "stopper"))
     check.add_argument("--config", required=True)
+    passkey = sub.add_parser("passkey", help="manage passkeys (server shell only)")
+    passkey.add_argument("action", choices=("enroll", "list", "revoke", "reset"))
+    passkey.add_argument("credential", nargs="?", help="revoke: the credential id from list")
+    passkey.add_argument("--label", default="passkey", help="enroll: a name, e.g. iPhone")
+    passkey.add_argument("--config", required=True)
     export = sub.add_parser("export-events")
     export.add_argument("--config", required=True)
     export.add_argument("--since", required=True, help="YYYY-MM-DD (UTC)")
@@ -141,6 +147,9 @@ def service_main(argv: list[str]) -> int:
         print(checks.report(checks.failures(results)), file=sys.stderr)
         return _fail("start-up checks failed; nothing was started")
 
+    if args.command == "passkey":
+        return passkey_main(args, cfg)
+
     if args.command == "export-events":
         from .events import Events
 
@@ -169,11 +178,17 @@ def service_main(argv: list[str]) -> int:
         return 0
 
     from .app import Service, make_app
+    from .auth import Auth
     from .events import Events
     from .service import UnixWSGIServer
     from .stopper import confirmers, request_stop
 
     os.umask(0o077)  # SQLite's journal and any other file this process makes stay private
+    auth = Auth(cfg.auth_db, cfg.origin, cfg.owner_login)
+    try:
+        auth.initialise()
+    except Exception as error:  # noqa: BLE001 - no sign-in store, no service (fail closed)
+        return _fail("the sign-in database could not be opened: " + type(error).__name__)
     events = Events(cfg.events_db)
     try:
         events.initialise()
@@ -186,6 +201,7 @@ def service_main(argv: list[str]) -> int:
         config=cfg,
         events=events,
         stop=lambda: request_stop(cfg.stop_socket, confirmers(helper_uid)),
+        auth=auth,
     )
     server = UnixWSGIServer(
         listener,
@@ -196,6 +212,62 @@ def service_main(argv: list[str]) -> int:
     )
     print("Mission Control ready (supervised testing only).", flush=True)
     server.serve_forever()
+    return 0
+
+
+def passkey_main(args, cfg, confirm=input) -> int:
+    """Passkey management, from a shell on the server only: there is no web route for any of
+    this. Each action is recorded in the events log."""
+    from .auth import Auth, AuthError
+    from .events import Events
+
+    os.umask(0o077)
+    auth = Auth(cfg.auth_db, cfg.origin, cfg.owner_login)
+    events = Events(cfg.events_db)
+    try:
+        auth.initialise()
+    except Exception as error:  # noqa: BLE001
+        return _fail("the sign-in database could not be opened: " + type(error).__name__)
+    if args.action == "enroll":
+        try:
+            code = auth.new_enroll_code(args.label)
+        except AuthError as error:
+            return _fail(
+                "at most two passkeys: revoke one first"
+                if error.reason == "too-many-credentials"
+                else "use a short name with letters and digits for --label"
+            )
+        events.append("passkey-code", detail=f"label {args.label}")
+        print(f"One-time code: {code}")
+        print("Open /enroll on your phone, through Tailscale, within 10 minutes. It works once.")
+        return 0
+    if args.action == "list":
+        found = auth.credentials()
+        for c in found:
+            print(f"{c.id}  {c.label}  added {time.strftime('%Y-%m-%d', time.gmtime(c.created))}")
+        print(f"{len(found)} passkey(s); at most 2.")
+        return 0
+    if args.action == "revoke":
+        if not args.credential:
+            return _fail("give the credential id from `passkey list`")
+        remaining = [c for c in auth.credentials() if c.id != args.credential]
+        if len(remaining) == len(auth.credentials()):
+            return _fail("no such passkey")
+        if (
+            not remaining
+            and confirm("This removes the LAST passkey. Type 'revoke' to go on: ") != "revoke"
+        ):
+            return _fail("nothing removed")
+        auth.revoke(args.credential)
+        events.append("passkey-revoke", detail=f"credential {args.credential[:12]}")
+        print("Revoked, with every session it opened.")
+        return 0
+    answer = confirm("This removes EVERY passkey and session. Type 'reset' to go on: ")
+    if answer != "reset":
+        return _fail("nothing removed")
+    gone = auth.reset()
+    events.append("passkey-reset", detail=f"{gone} passkey(s) removed")
+    print(f"Reset: {gone} passkey(s) and every session removed. Enroll again to sign in.")
     return 0
 
 

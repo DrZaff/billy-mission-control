@@ -27,6 +27,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from . import PHASE, __version__, views
+from .auth import Auth, AuthError, cleared_cookie, cookie_value, session_cookie
 from .config import AppConfig
 from .demo import Demo, DemoError, load_file
 from .events import Events
@@ -46,6 +47,28 @@ SECURITY_HEADERS: list[tuple[str, str]] = [
     ("Cache-Control", "no-store"),
     ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
 ]
+
+# Only the two sign-in pages may run a script: the app's own passkey.js, which calls the
+# browser's WebAuthn API and posts to the app. Every other page keeps the policy above.
+SIGNIN_CSP = (
+    "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; "
+    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+)
+PASSKEY_JS = (Path(__file__).with_name("static") / "passkey.js").read_bytes()
+SIGNIN_PAGES = ("/signin", "/enroll")
+# Reachable with the owner's Tailscale login but no session yet. Everything else needs both.
+OPEN_PATHS = (
+    *SIGNIN_PAGES,
+    "/static/app.css",
+    "/static/passkey.js",
+    "/signin/begin",
+    "/signin/complete",
+    "/enroll/begin",
+    "/enroll/complete",
+)
+JSON_TYPE = "application/json"
+MAX_JSON_BODY = 16384
+SIGNIN_RATE_LIMIT = 10  # sign-in and enrollment attempts a minute
 
 READ_METHODS = ("GET", "HEAD")
 TASK_PATH = re.compile(r"/tasks/([a-z0-9][a-z0-9-]{0,63})")
@@ -78,6 +101,14 @@ def stylesheet() -> Response:
     return "200 OK", "text/css; charset=utf-8", STYLESHEET
 
 
+def passkey_script() -> Response:
+    return "200 OK", "text/javascript; charset=utf-8", PASSKEY_JS
+
+
+def _json(status: str, payload: dict) -> Response:
+    return status, "application/json", json.dumps(payload).encode("utf-8")
+
+
 PAGES: dict[str, Callable[[Demo], str]] = {
     "/": views.home,
     "/tasks": views.task_list,
@@ -87,6 +118,10 @@ PAGES: dict[str, Callable[[Demo], str]] = {
 STATIC: dict[str, Callable[[], Response]] = {
     "/healthz": health,
     "/static/app.css": stylesheet,
+}
+SERVICE_STATIC: dict[str, Callable[[], Response]] = {
+    "/static/app.css": stylesheet,
+    "/static/passkey.js": passkey_script,
 }
 
 
@@ -112,12 +147,16 @@ class Service:
     config: AppConfig
     events: Events
     stop: Callable[[], bool]
+    auth: Auth
     token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     rate: RateLimit = field(default_factory=RateLimit)
+    signin_rate: RateLimit = field(default_factory=lambda: RateLimit(limit=SIGNIN_RATE_LIMIT))
 
 
 def route(path: str, load: Callable[[], Demo], service: Service | None = None) -> Response:
-    if path in STATIC and not (service and path == "/healthz"):
+    if service is not None and path in SERVICE_STATIC:
+        return SERVICE_STATIC[path]()
+    if service is None and path in STATIC:
         return STATIC[path]()
     task = TASK_PATH.fullmatch(path)
     if path not in PAGES and not task:
@@ -133,30 +172,40 @@ def route(path: str, load: Callable[[], Demo], service: Service | None = None) -
             return _html("404 Not Found", views.not_found())
         return _html("200 OK", views.task_detail(demo, entry))
     if path == "/settings" and service:
-        return _html("200 OK", views.settings(demo, stop_token=service.token))
+        return _html("200 OK", views.settings(demo, stop_token=service.token, signed_in=True))
     return _html("200 OK", PAGES[path](demo))
 
 
-def stop_refusal(environ: dict, service: Service) -> str | None:
-    """Why a POST /stop must be refused, or None. Every check must pass."""
+def _same_origin_body(
+    environ: dict, service: Service, content_type: str, limit: int
+) -> tuple[str | None, bytes]:
+    """(why the POST must be refused or None, its body). Origin, fetch metadata, type, size."""
     if environ.get("HTTP_ORIGIN") != service.config.origin:
-        return "origin"
+        return "origin", b""
     if environ.get("HTTP_SEC_FETCH_SITE") != "same-origin":
-        return "fetch-site"
-    if environ.get("CONTENT_TYPE", "").split(";")[0].strip().lower() != FORM_TYPE:
-        return "content-type"
+        return "fetch-site", b""
+    if environ.get("CONTENT_TYPE", "").split(";")[0].strip().lower() != content_type:
+        return "content-type", b""
     try:
         length = int(environ.get("CONTENT_LENGTH") or "")
     except ValueError:
-        return "length"
-    if not 0 < length <= MAX_STOP_BODY:
-        return "length"
+        return "length", b""
+    if not 0 < length <= limit:
+        return "length", b""
     try:
         body = environ["wsgi.input"].read(length)
     except OSError:  # includes the request deadline (TimeoutError): refused, never a 500
-        return "body-timeout"
+        return "body-timeout", b""
     if len(body) != length:
-        return "body-incomplete"
+        return "body-incomplete", b""
+    return None, body
+
+
+def stop_refusal(environ: dict, service: Service) -> str | None:
+    """Why a form POST (the stop, sign-out) must be refused, or None. Every check must pass."""
+    refusal, body = _same_origin_body(environ, service, FORM_TYPE, MAX_STOP_BODY)
+    if refusal:
+        return refusal
     try:
         fields = parse_qs(body.decode("ascii"), strict_parsing=True, max_num_fields=2)
     except (UnicodeDecodeError, ValueError):
@@ -180,6 +229,78 @@ def stop(environ: dict, service: Service) -> tuple[Response, dict]:
     }
 
 
+def json_request(environ: dict, service: Service) -> tuple[str | None, dict]:
+    """(why the JSON POST must be refused or None, its object)."""
+    refusal, body = _same_origin_body(environ, service, JSON_TYPE, MAX_JSON_BODY)
+    if refusal:
+        return refusal, {}
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return "json", {}
+    if not isinstance(data, dict):
+        return "json", {}
+    return None, data
+
+
+CEREMONIES = {
+    "/enroll/begin": "enroll-begin",
+    "/enroll/complete": "enroll",
+    "/signin/begin": "signin-begin",
+    "/signin/complete": "signin",
+}
+
+
+def ceremony(environ: dict, service: Service, path: str, login: str):
+    """A passkey step. Returns (response, event, extra headers). Failures are generic to the
+    browser; the events log gets the reason (never a code, challenge, key or cookie)."""
+    kind = CEREMONIES[path]
+    if not service.signin_rate.allow():
+        return _json("429 Too Many Requests", {"ok": False}), {"kind": kind, "result": "rate"}, []
+    refusal, data = json_request(environ, service)
+    if refusal:
+        return (
+            _json("403 Forbidden", {"ok": False}),
+            {"kind": kind, "result": "refused:" + refusal},
+            [],
+        )
+    auth = service.auth
+    try:
+        if path == "/enroll/begin":
+            return (
+                _json("200 OK", auth.enroll_begin(data.get("code"), login)),
+                {"kind": kind, "result": "ok"},
+                [],
+            )
+        if path == "/signin/begin":
+            return _json("200 OK", auth.signin_begin(login)), {"kind": kind, "result": "ok"}, []
+        if path == "/enroll/complete":
+            cid = auth.enroll_complete(data.get("ticket"), data.get("credential"), login)
+            return (
+                _json("200 OK", {"ok": True}),
+                {"kind": kind, "result": "ok", "detail": "credential " + cid[:12]},
+                [],
+            )
+        token = auth.signin_complete(data.get("ticket"), data.get("credential"), login)
+        return (
+            _json("200 OK", {"ok": True}),
+            {"kind": kind, "result": "ok"},
+            [("Set-Cookie", session_cookie(token))],
+        )
+    except AuthError as error:
+        return (
+            _json("400 Bad Request", {"ok": False}),
+            {"kind": kind, "result": "failed:" + error.reason},
+            [],
+        )
+    except Exception:  # noqa: BLE001 - the sign-in store is unavailable: refuse, never a 500
+        return (
+            _json("503 Service Unavailable", {"ok": False}),
+            {"kind": kind, "result": "error"},
+            [],
+        )
+
+
 def _serve(environ: dict, load: Callable[[], Demo], service: Service | None):
     method = environ.get("REQUEST_METHOD", "GET").upper()
     path = environ.get("PATH_INFO") or "/"
@@ -194,6 +315,49 @@ def _serve(environ: dict, load: Callable[[], Demo], service: Service | None):
             return _text("403 Forbidden", "Not available."), extra, event, login
         if not service.rate.allow():
             return _text("429 Too Many Requests", "Too many requests."), extra, event, login
+        if path in CEREMONIES:
+            if method != "POST":
+                extra.append(("Allow", "POST"))
+                return _text("405 Method Not Allowed", "POST only."), extra, event, login
+            response, event, cookies = ceremony(environ, service, path, login)
+            return response, extra + cookies, event, login
+        if path in SIGNIN_PAGES:
+            if method not in READ_METHODS:
+                extra.append(("Allow", ", ".join(READ_METHODS)))
+                return _text("405 Method Not Allowed", "Read-only."), extra, event, login
+            extra.append(("Content-Security-Policy", SIGNIN_CSP))
+            page = views.signin_page() if path == "/signin" else views.enroll_page()
+            return _html("200 OK", page), extra, event, login
+        if path not in OPEN_PATHS:
+            token = cookie_value(environ.get("HTTP_COOKIE"))
+            try:
+                problem = service.auth.check_session(token, login)
+            except Exception:  # noqa: BLE001 - the sign-in store is unavailable: refuse
+                problem = "auth-unavailable"
+            if problem:
+                event = {"kind": "request", "result": problem}
+                if method in READ_METHODS:
+                    extra.append(("Location", "/signin"))
+                    if problem == "session-expired":
+                        extra.append(("Set-Cookie", cleared_cookie()))
+                    return _text("303 See Other", "Sign in first."), extra, event, login
+                return _text("403 Forbidden", "Sign in first."), extra, event, login
+        if path == "/signout":
+            if method != "POST":
+                extra.append(("Allow", "POST"))
+                return _text("405 Method Not Allowed", "POST only."), extra, event, login
+            refusal = stop_refusal(environ, service)
+            if refusal:
+                event = {"kind": "signout", "result": "refused:" + refusal}
+                return _text("403 Forbidden", "Refused."), extra, event, login
+            result = "ok"
+            try:
+                service.auth.end_session(cookie_value(environ.get("HTTP_COOKIE")))
+            except Exception:  # noqa: BLE001 - the cookie is cleared regardless; say so in the log
+                result = "cookie-cleared-session-not-removed"
+            extra += [("Set-Cookie", cleared_cookie()), ("Location", "/signin")]
+            event = {"kind": "signout", "result": result}
+            return _text("303 See Other", "Signed out."), extra, event, login
         if path == STOP_PATH:
             if method != "POST":
                 extra.append(("Allow", "POST"))
@@ -228,10 +392,11 @@ def make_app(
             )
             if not logged and content_type == HTML:
                 body = views.with_logging_warning(body.decode("utf-8")).encode("utf-8")
+        overrides = {name for name, _ in extra if name == "Content-Security-Policy"}
         headers = [
             ("Content-Type", content_type),
             ("Content-Length", str(len(body))),
-            *SECURITY_HEADERS,
+            *[(n, v) for n, v in SECURITY_HEADERS if n not in overrides],
             *extra,
         ]
         start_response(status, headers)

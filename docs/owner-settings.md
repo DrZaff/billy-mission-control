@@ -14,6 +14,8 @@ GitHub settings for this repository that only the owner can make. No agent, app 
 
 Turn on **Secret scanning** and **Push protection**; both are free for public repositories. Push protection refuses a push that contains a known key format, before it becomes public.
 
+Also turn on **Dependabot alerts** and **Dependabot security updates** (same page). Since A4b the app has one runtime library, python-fido2, pinned with what it needs by hash in `requirements.txt`. GitHub then emails the owner when a pinned package gets a security advisory, and can open a PR with the fix. That PR is reviewed like any other: Codex at its exact SHA, the owner merges. CI's `tools/audit_deps.py` step fails on any PR while a pinned package has a known vulnerability. Nothing updates on its own.
+
 ## 3. First CI run
 
 Open the A1 pull request. Under its **Checks**, confirm that **lint** and **test** both ran and passed. GitHub only offers a check as "required" after it has run once.

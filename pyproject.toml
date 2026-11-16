@@ -1,10 +1,11 @@
 [project]
 name = "billy-mission-control"
 version = "0.1.0"
-description = "Billy Mission Control: a private, read-only, phone-first cockpit (phase A4a, synthetic demo data)"
+description = "Billy Mission Control: a private, read-only, phone-first cockpit (phase A4b, synthetic demo data)"
 requires-python = ">=3.12"
-# No runtime dependencies: the app uses the Python standard library only.
-dependencies = []
+# One runtime dependency, for passkey sign-in only (A4b): python-fido2, imported only by
+# mission_control/auth/passkeys.py. requirements.txt pins it and everything it needs by hash.
+dependencies = ["fido2==2.2.1"]
 
 [tool.ruff]
 target-version = "py312"
