@@ -136,12 +136,16 @@ def serve(
             return
 
 
-def request_stop(path: Path, timeout: float = TIMEOUT) -> bool:
-    """The web app's side: ask the helper to stop. True only on the helper's `stopped`."""
+def request_stop(path: Path, helper_uid: int, timeout: float = TIMEOUT) -> bool:
+    """The web app's side: ask the helper to stop. True only on `stopped` from a process running
+    as the stop helper's own account (checked by the kernel), so nothing else that manages to
+    listen at the socket's path can fake a confirmation."""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
             conn.settimeout(timeout)
             conn.connect(str(path))
+            if peer_uid(conn) != helper_uid:
+                return False
             conn.sendall(REQUEST)
             reply = b""
             while len(reply) < 32:

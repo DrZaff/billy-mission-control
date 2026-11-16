@@ -7,8 +7,9 @@
   under `app.LOGIN_KEY`. A request with two login headers, or any header naming the login with
   underscores (`Tailscale_User_Login`, which wsgiref would otherwise merge with the real one),
   gets no identity. Every header whose name contains an underscore is dropped.
-- **Limits:** a 10-second socket timeout, at most 40 headers and 8 KB of them. Requests are
-  served one at a time.
+- **Limits:** a request must arrive in full within 15 seconds in total, however slowly its bytes
+  trickle in (a per-read timeout alone would let a drip of bytes hold the one-at-a-time server),
+  with at most 40 headers and 8 KB of them. Requests are served one at a time.
 - **Logs:** nothing about requests goes to journald; the events log records them.
 """
 
@@ -17,6 +18,7 @@ from __future__ import annotations
 import os
 import socket
 import socketserver
+import time
 from collections.abc import Callable, Iterable
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer
 
@@ -27,6 +29,47 @@ LOGIN_HEADER = "tailscale-user-login"
 MAX_HEADERS = 40
 MAX_HEADER_BYTES = 8192
 TIMEOUT = 10
+REQUEST_DEADLINE = 15.0
+
+
+class DeadlineReader:
+    """Reads from a socket, but never past a fixed deadline: each read waits only for the time
+    left, and an expired deadline raises TimeoutError. Covers what the handler and wsgiref use:
+    readline() for the request line and headers, read() for a body."""
+
+    def __init__(self, conn: socket.socket, deadline: float, clock=time.monotonic):
+        self.conn, self.deadline, self.clock = conn, deadline, clock
+        self.buffer = b""
+
+    def _fill(self) -> bool:
+        left = self.deadline - self.clock()
+        if left <= 0:
+            raise TimeoutError("request deadline")
+        self.conn.settimeout(left)
+        chunk = self.conn.recv(4096)
+        self.buffer += chunk
+        return bool(chunk)
+
+    def readline(self, limit: int = -1) -> bytes:
+        while b"\n" not in self.buffer and (limit < 0 or len(self.buffer) < limit):
+            if not self._fill():
+                break
+        end = self.buffer.find(b"\n") + 1 or len(self.buffer)
+        if limit >= 0:
+            end = min(end, limit)
+        line, self.buffer = self.buffer[:end], self.buffer[end:]
+        return line
+
+    def read(self, size: int = -1) -> bytes:
+        while size < 0 or len(self.buffer) < size:
+            if not self._fill():
+                break
+        size = len(self.buffer) if size < 0 else size
+        data, self.buffer = self.buffer[:size], self.buffer[size:]
+        return data
+
+    def close(self) -> None:
+        self.buffer = b""
 
 
 def trusted_login(headers) -> str | None:
@@ -43,6 +86,16 @@ def trusted_login(headers) -> str | None:
 
 class Handler(WSGIRequestHandler):
     timeout = TIMEOUT
+
+    def setup(self) -> None:
+        super().setup()
+        self.rfile = DeadlineReader(self.connection, time.monotonic() + REQUEST_DEADLINE)
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except TimeoutError:
+            self.server.on_rejected(408)  # too slow: dropped, and recorded
 
     def address_string(self) -> str:
         return "unix"

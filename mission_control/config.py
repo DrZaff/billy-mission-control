@@ -33,6 +33,7 @@ class AppConfig:
     origin: str
     owner_login: str
     service_account: str
+    stop_account: str
     proxy_uids: tuple[int, ...]
     stop_socket: Path
     events_db: Path
@@ -93,6 +94,7 @@ def parse_app(text: str) -> AppConfig:
             "origin",
             "owner_login",
             "service_account",
+            "stop_account",
             "proxy_uids",
             "stop_socket",
             "events_db",
@@ -111,10 +113,14 @@ def parse_app(text: str) -> AppConfig:
         and all(isinstance(u, int) and not isinstance(u, bool) and u >= 0 for u in uids),
         "proxy_uids must list the accounts allowed to connect (tailscaled: 0)",
     )
+    service = _account(d["service_account"], "service_account")
+    stop = _account(d["stop_account"], "stop_account")
+    _req(service != stop, "the web app and the stop helper must be different accounts")
     return AppConfig(
         origin=origin,
         owner_login=login,
-        service_account=_account(d["service_account"], "service_account"),
+        service_account=service,
+        stop_account=stop,
         proxy_uids=tuple(uids),
         stop_socket=_path(d["stop_socket"], "stop_socket"),
         events_db=_path(d["events_db"], "events_db"),

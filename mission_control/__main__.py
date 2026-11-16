@@ -179,7 +179,12 @@ def service_main(argv: list[str]) -> int:
         events.initialise()
     except Exception:  # noqa: BLE001 - a broken log never stops the service, or the stop
         print("WARNING: the events log could not be opened; pages will say so.", flush=True)
-    service = Service(config=cfg, events=events, stop=lambda: request_stop(cfg.stop_socket))
+    import pwd
+
+    helper_uid = pwd.getpwnam(cfg.stop_account).pw_uid  # exists: checked at start-up
+    service = Service(
+        config=cfg, events=events, stop=lambda: request_stop(cfg.stop_socket, helper_uid)
+    )
     server = UnixWSGIServer(
         listener,
         make_app(service=service),

@@ -15,12 +15,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 from wsgiref.util import setup_testing_defaults
 
 from mission_control import checks, stopper
+from mission_control import service as service_module
 from mission_control.app import LOGIN_KEY, RateLimit, Service, make_app
 from mission_control.config import ConfigError, parse_app, parse_stopper
 from mission_control.events import Events
@@ -32,8 +34,9 @@ OWNER = "owner@example.com"
 ORIGIN = "https://mission-control.example.invalid"
 
 
-def tmpdir(case: unittest.TestCase) -> Path:
-    path = Path(tempfile.mkdtemp())
+def tmpdir(case: unittest.TestCase, under_home: bool = False) -> Path:
+    # Under the home folder when a test needs no shared sticky folder (such as /tmp) above it.
+    path = Path(tempfile.mkdtemp(dir=Path.home() if under_home else None))
     os.chmod(path, 0o755)
     case.addCleanup(subprocess.run, ["rm", "-rf", str(path)], check=False)
     return path
@@ -44,6 +47,7 @@ def app_config_text(base: Path, **over) -> str:
         "origin": ORIGIN,
         "owner_login": OWNER,
         "service_account": "mission-control",
+        "stop_account": "billy-stop",
         "proxy_uids": [0],
         "stop_socket": str(base / "run" / "stop.sock"),
         "events_db": str(base / "state" / "events.db"),
@@ -105,7 +109,7 @@ class Config(unittest.TestCase):
 
 class StartupChecks(unittest.TestCase):
     def setUp(self):
-        self.base = tmpdir(self)
+        self.base = tmpdir(self, under_home=True)
 
     def test_root_and_the_wrong_account_are_refused(self):
         self.assertFalse(checks.not_root(0).ok)
@@ -190,7 +194,12 @@ class StartupChecks(unittest.TestCase):
             raise PermissionError(p)
 
         results = checks.app_checks(
-            cfg, path, uid=UID, account_of=lambda u: "mission-control", opener=refused
+            cfg,
+            path,
+            uid=UID,
+            account_of=lambda u: "mission-control",
+            opener=refused,
+            uid_of=lambda account: UID + 1000,
         )
         for c in results:
             if c.name == "not root":
@@ -302,13 +311,13 @@ class StopHelper(unittest.TestCase):
             kwargs={"log": lines.append, "once": True},
         )
         thread.start()
-        self.assertTrue(stopper.request_stop(path))
+        self.assertTrue(stopper.request_stop(path, UID))
         thread.join(5)
         self.assertTrue(self.marker.exists())
         self.assertEqual(lines, ["stop helper: stopped"])
 
     def test_request_stop_is_false_when_the_helper_is_unreachable(self):
-        self.assertFalse(stopper.request_stop(self.base / "missing.sock", timeout=0.5))
+        self.assertFalse(stopper.request_stop(self.base / "missing.sock", UID, timeout=0.5))
 
 
 # ---------------------------------------------------------------- events
@@ -890,6 +899,134 @@ class CodexReviewOf39a39c3(unittest.TestCase):
         folder.mkdir()
         flags = os.O_RDONLY | os.O_DIRECTORY
         self.assertFalse(checks.cannot_read(folder, lambda p: os.open(p, flags)).ok)
+
+
+class CodexReviewOfF131dd9(unittest.TestCase):
+    """Codex's review of f131dd9: a stop is confirmed only by the stop helper's own account
+    (blocking), and a request must arrive within a total deadline (should fix)."""
+
+    def setUp(self):
+        self.base = tmpdir(self)
+
+    def fake_helper(self, reply: bytes):
+        """Something listening at the socket's path, answering `stopped`."""
+        path = self.base / "stop.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        got = []
+
+        def answer():
+            conn, _ = listener.accept()
+            with conn:
+                conn.settimeout(2)
+                try:
+                    got.append(conn.recv(16))
+                    conn.sendall(reply)
+                except OSError:
+                    got.append(b"")
+
+        thread = threading.Thread(target=answer, daemon=True)
+        thread.start()
+        return path, thread, got
+
+    def test_a_stopped_reply_from_another_account_is_not_believed(self):
+        path, thread, got = self.fake_helper(stopper.STOPPED)
+        self.assertFalse(stopper.request_stop(path, helper_uid=UID + 1, timeout=2))
+        thread.join(3)
+        self.assertEqual(got[0], b"")  # the request was never even sent
+
+    def test_the_helpers_own_account_is_believed(self):
+        path, thread, got = self.fake_helper(stopper.STOPPED)
+        self.assertTrue(stopper.request_stop(path, helper_uid=UID, timeout=2))
+        thread.join(3)
+        self.assertEqual(got, [stopper.REQUEST])
+
+    def test_a_shared_sticky_folder_is_refused_for_the_stop_socket(self):
+        shared = tmpdir(self, under_home=True) / "shared"
+        shared.mkdir()
+        os.chmod(shared, 0o1777)
+        target = shared / "stop.sock"
+        self.assertTrue(checks.protected_above(target, {0, UID}).ok)
+        self.assertFalse(checks.protected_above(target, {0, UID}, allow_sticky=False).ok)
+
+    def test_the_stop_account_must_exist_and_differ(self):
+        base = tmpdir(self, under_home=True)
+        (base / "state").mkdir(mode=0o700)
+        (base / "run").mkdir(mode=0o755)
+        path = base / "config.json"
+        path.write_text(app_config_text(base))
+        os.chmod(path, 0o600)
+        cfg = parse_app(path.read_text())
+        for helper in (None, 0, UID):
+            results = checks.app_checks(cfg, path, uid=UID, uid_of=lambda a, h=helper: h)
+            names = [c.name for c in checks.failures(results)]
+            self.assertIn("stop account billy-stop", names, helper)
+
+    def test_the_stop_account_must_differ_from_the_web_apps(self):
+        with self.assertRaises(ConfigError):
+            parse_app(app_config_text(Path("/x"), stop_account="mission-control"))
+
+    def test_a_dripping_request_is_cut_off_at_the_deadline(self):
+        clock = [0.0]
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        reader = service_module.DeadlineReader(b, deadline=15.0, clock=lambda: clock[0])
+        a.sendall(b"GET / HT")
+        b.settimeout(0.2)
+        a.sendall(b"\n")
+        self.assertEqual(reader.readline(100), b"GET / HT\n")
+        a.sendall(b"Host")
+        clock[0] = 16.0
+        with self.assertRaises(TimeoutError):
+            reader.readline(100)
+
+    def test_the_reader_returns_lines_and_bodies(self):
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        reader = service_module.DeadlineReader(b, deadline=time.monotonic() + 5)
+        a.sendall(b"line one\nline two\nbody")
+        a.shutdown(socket.SHUT_WR)
+        self.assertEqual(reader.readline(), b"line one\n")
+        self.assertEqual(reader.readline(5), b"line ")
+        self.assertEqual(reader.readline(), b"two\n")
+        self.assertEqual(reader.read(4), b"body")
+        self.assertEqual(reader.read(), b"")
+
+    def test_a_slow_request_is_dropped_and_recorded(self):
+        base = tmpdir(self)
+        cfg = parse_app(app_config_text(base))
+        events = Events(base / "events.db")
+        events.initialise()
+        rejected = []
+        path = base / "app.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        listener.listen(1)
+        server = UnixWSGIServer(
+            listener,
+            make_app(service=Service(config=cfg, events=events, stop=lambda: True)),
+            {UID},
+            on_rejected=rejected.append,
+        )
+        self.addCleanup(server.server_close)
+        with mock.patch.object(service_module, "REQUEST_DEADLINE", 0.5):
+            thread = threading.Thread(target=server.handle_request, daemon=True)
+            thread.start()
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect(str(path))
+                try:
+                    for _ in range(10):  # one byte at a time, well inside the per-read timeout
+                        client.sendall(b"G")
+                        time.sleep(0.1)
+                except OSError:
+                    pass  # the server hung up: expected
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(rejected, [408])
 
 
 if __name__ == "__main__":

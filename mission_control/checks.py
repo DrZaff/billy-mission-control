@@ -26,6 +26,13 @@ class Check:
     detail: str
 
 
+def _uid_of(account: str) -> int | None:
+    try:
+        return pwd.getpwnam(account).pw_uid
+    except KeyError:
+        return None
+
+
 def _account_of(uid: int) -> str | None:
     try:
         return pwd.getpwuid(uid).pw_name
@@ -46,9 +53,10 @@ def _writable_by_others(info: os.stat_result) -> bool:
     return bool(info.st_mode & 0o022) and not info.st_mode & stat.S_ISVTX
 
 
-def protected_above(path: Path, trusted: Iterable[int]) -> Check:
+def protected_above(path: Path, trusted: Iterable[int], allow_sticky: bool = True) -> Check:
     """Every folder above `path` is a real folder owned by a trusted account and not writable
-    by others (a sticky folder such as /tmp is allowed: others can't replace our entries)."""
+    by others. A sticky folder such as /tmp is allowed unless `allow_sticky` is False: others
+    can't replace our entries there, but they can create their own, such as a socket."""
     trusted = set(trusted)
     for parent in path.parents:
         try:
@@ -57,7 +65,8 @@ def protected_above(path: Path, trusted: Iterable[int]) -> Check:
             return Check(f"folders above {path.name}", False, f"{parent} is unreadable")
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             return Check(f"folders above {path.name}", False, f"{parent} is not a real folder")
-        if info.st_uid not in trusted or _writable_by_others(info):
+        shared = info.st_mode & 0o022 and not allow_sticky
+        if info.st_uid not in trusted or _writable_by_others(info) or shared:
             return Check(f"folders above {path.name}", False, f"{parent} is not protected")
     return Check(f"folders above {path.name}", True, "protected")
 
@@ -158,9 +167,16 @@ def app_checks(
     uid: int | None = None,
     account_of: Callable[[int], str | None] = _account_of,
     opener: Callable[[str], int] | None = None,
+    uid_of: Callable[[str], int | None] = _uid_of,
 ) -> list[Check]:
     uid = os.geteuid() if uid is None else uid
     trusted = {0, uid}
+    helper = uid_of(cfg.stop_account)
+    helper_check = Check(
+        f"stop account {cfg.stop_account}",
+        helper is not None and helper not in (0, uid),
+        "exists" if helper is not None else "no such account",
+    )
     results = [
         not_root(uid),
         running_as(cfg.service_account, uid, account_of),
@@ -169,7 +185,10 @@ def app_checks(
         own_folder(cfg.events_db.parent, uid, "events folder"),
         private_database(cfg.events_db, uid),
         protected_above(cfg.events_db.parent, trusted),
-        protected_above(cfg.stop_socket, trusted),
+        helper_check,
+        # The stop socket's folders may belong to the helper, but no shared (sticky) folder:
+        # another account could otherwise put its own socket at that path.
+        protected_above(cfg.stop_socket, trusted | ({helper} - {None}), allow_sticky=False),
     ]
     results += [cannot_read(p, opener) for p in cfg.forbidden_paths]
     return results
