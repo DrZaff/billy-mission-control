@@ -1,7 +1,7 @@
 [project]
 name = "billy-mission-control"
 version = "0.1.0"
-description = "Billy Mission Control: a private, read-only, phone-first cockpit (phase A3, synthetic demo data)"
+description = "Billy Mission Control: a private, read-only, phone-first cockpit (phase A4a, synthetic demo data)"
 requires-python = ">=3.12"
 # No runtime dependencies: the app uses the Python standard library only.
 dependencies = []
@@ -18,5 +18,7 @@ select = ["E", "W", "F", "I", "B", "UP", "S"]
 # The developer tools run fixed commands (git, ruff, unittest) without a shell.
 "dev.py" = ["S603"]
 "tools/*.py" = ["S603", "S607"]
-# The server tests pass all-interfaces addresses on purpose, to prove they are refused.
-"tests/*.py" = ["S603", "S607", "S104"]
+# The server tests pass all-interfaces addresses on purpose, to prove they are refused. The A4a
+# tests set loose permissions (S103) to prove the start-up checks refuse them, and use a fixed
+# CSRF token (S106, S107) that is a test value, not a secret.
+"tests/*.py" = ["S603", "S607", "S104", "S103", "S106", "S107"]

@@ -1,0 +1,6 @@
+{
+  "account": "billy-stop",
+  "control_dir": "/CHANGE-ME/billy-control",
+  "client_account": "mission-control",
+  "forbidden_paths": ["/CHANGE-ME/publisher-key.pem", "/CHANGE-ME/agent-credentials"]
+}

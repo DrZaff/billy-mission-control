@@ -13,12 +13,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.y*ml"))
 
-# Modules the app package must not import in phase A1: outbound network clients and process
-# execution. (The development server's wsgiref is allowed; it only listens, on loopback.)
+# Modules the app package must not import: outbound network clients and process execution.
+# (The development server's wsgiref is allowed; it only listens, on loopback.) Since A4a
+# (owner decision 3), `socket` is allowed for Unix sockets only: the service listens on one and
+# the web app asks the stop helper over another. Internet sockets stay forbidden (below).
 FORBIDDEN_IMPORTS = {
     "urllib.request",
     "http.client",
-    "socket",
     "ssl",
     "subprocess",
     "requests",
@@ -86,6 +87,34 @@ class App(unittest.TestCase):
         for path in sorted((ROOT / "mission_control").rglob("*.py")):
             bad = {m for m in imported_modules(path) if m in FORBIDDEN_IMPORTS}
             self.assertEqual(bad, set(), path.name)
+
+    def test_sockets_are_unix_only(self):
+        # No internet address families, name lookups or connection helpers anywhere in the app.
+        banned = {"AF_INET", "AF_INET6", "create_connection", "getaddrinfo", "gethostbyname"}
+        for path in sorted((ROOT / "mission_control").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+            names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+            self.assertEqual(names & banned, set(), path.name)
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "socket"
+                    and node.args
+                ):
+                    first = node.args[0]
+                    self.assertTrue(
+                        isinstance(first, ast.Attribute) and first.attr == "AF_UNIX",
+                        (path.name, node.lineno),
+                    )
+
+    def test_the_stop_helper_cannot_remove_a_marker(self):
+        tree = ast.parse((ROOT / "mission_control" / "stopper.py").read_text(encoding="utf-8"))
+        names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        removers = {"unlink", "remove", "rmdir", "rename", "replace", "truncate", "ftruncate"}
+        self.assertEqual(names & (removers | {"O_TRUNC", "shutil"}), set())
 
     def test_no_runtime_dependencies(self):
         text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
