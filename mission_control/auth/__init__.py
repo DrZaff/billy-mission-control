@@ -167,6 +167,14 @@ class Auth:
             raise AuthError("ticket-expired")
         return state, label
 
+    @staticmethod
+    def _still_there(conn, table: str, column: str, key: str, reason: str) -> None:
+        """Inside a lock: the spent code or ticket must still exist. A reset deletes every
+        code and ticket at once, so whatever was begun before a reset can't finish after it."""
+        query = f"SELECT 1 FROM {table} WHERE {column} = ? AND used = 1"  # noqa: S608 - fixed names
+        if conn.execute(query, (key,)).fetchone() is None:
+            raise AuthError(reason)
+
     def _ticket(self, conn, kind: str, login: str, state: str, label: str = "") -> str:
         now = self.clock()
         conn.execute("DELETE FROM challenges WHERE created < ?", (now - 3600,))
@@ -251,13 +259,16 @@ class Auth:
                 raise AuthError("code-reused")
             if self.clock() - created > CODE_TTL:
                 raise AuthError("code-expired")
-            active = self._active(conn)
-            if len(active) >= MAX_CREDENTIALS:
-                raise AuthError("too-many-credentials")
-            options, state = _passkeys().registration_options(
-                self.origin, login, [blob for _, blob, _ in active]
-            )
-            ticket = self._ticket(conn, "enroll", login, state, label)
+            with self._locked(conn):
+                # A reset since the code was spent deleted it: begun before a reset, refused.
+                self._still_there(conn, "codes", "hash", digest, "code-reset")
+                active = self._active(conn)
+                if len(active) >= MAX_CREDENTIALS:
+                    raise AuthError("too-many-credentials")
+                options, state = _passkeys().registration_options(
+                    self.origin, login, [blob for _, blob, _ in active]
+                )
+                ticket = self._ticket(conn, "enroll", login, state, label)
         finally:
             conn.close()
         return {"ticket": ticket, "options": options}
@@ -270,6 +281,8 @@ class Auth:
             # The ticket is spent first, on its own, so it stays spent even if this fails.
             state, label = self._take_ticket(conn, ticket, "enroll", login)
             with self._locked(conn):  # the limit check and the insert happen as one
+                # A reset since the ticket was spent deleted it: begun before a reset, refused.
+                self._still_there(conn, "challenges", "ticket", ticket, "ticket-reset")
                 if len(self._active(conn)) >= MAX_CREDENTIALS:
                     raise AuthError("too-many-credentials")
                 try:
@@ -317,6 +330,7 @@ class Auth:
             # happen as one: a revoke or reset runs wholly before (no passkey to sign in with)
             # or wholly after (it deletes this session with the passkey), never in between.
             with self._locked(conn):
+                self._still_there(conn, "challenges", "ticket", ticket, "ticket-reset")
                 active = self._active(conn)
                 try:
                     raw_id, counter = _passkeys().authenticate(

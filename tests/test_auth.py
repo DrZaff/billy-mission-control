@@ -686,5 +686,56 @@ class CodexReviewOf9bad79d(Fixture):
         self.refused("ticket-reused", self.auth.signin_complete, begin["ticket"], good, OWNER)
 
 
+class CodexReviewOfE55171e(Fixture):
+    """Codex's review of e55171e (blocking): a reset between an enrollment spending its ticket
+    (or code) and taking the lock let the enrollment add a passkey after the reset."""
+
+    def reset_between(self, method, *args):
+        """Run `method(*args)` with a reset slipped in just after its ticket or code is spent."""
+        real = Auth._locked
+        other = Auth(self.base / "auth.db", ORIGIN, OWNER, clock=self.clock)
+        fired = []
+
+        def reset_then_lock(auth_self, conn):
+            if not fired:
+                fired.append(True)  # before the reset, which takes this same lock
+                other.reset()
+            return real(auth_self, conn)
+
+        from unittest import mock
+
+        with mock.patch.object(Auth, "_locked", reset_then_lock):
+            return method(*args)
+
+    def test_an_enrollment_begun_before_a_reset_cant_finish_after_it(self):
+        code = self.auth.new_enroll_code("iPhone")
+        begin = self.auth.enroll_begin(code, OWNER)
+        response = SoftKey(ORIGIN).create(begin["options"])
+        with self.assertRaises(AuthError) as caught:
+            self.reset_between(self.auth.enroll_complete, begin["ticket"], response, OWNER)
+        self.assertEqual(caught.exception.reason, "ticket-reset")
+        self.assertEqual(self.auth.credentials(), [])
+
+    def test_a_code_spent_before_a_reset_cant_start_an_enrollment(self):
+        code = self.auth.new_enroll_code("iPhone")
+        with self.assertRaises(AuthError) as caught:
+            self.reset_between(self.auth.enroll_begin, code, OWNER)
+        self.assertEqual(caught.exception.reason, "code-reset")
+
+    def test_a_sign_in_begun_before_a_reset_cant_finish_after_it(self):
+        key = SoftKey(ORIGIN)
+        self.enroll(key)
+        begin = self.auth.signin_begin(OWNER)
+        response = key.get(begin["options"])
+        with self.assertRaises(AuthError) as caught:
+            self.reset_between(self.auth.signin_complete, begin["ticket"], response, OWNER)
+        self.assertEqual(caught.exception.reason, "ticket-reset")
+
+    def test_without_a_reset_everything_still_works(self):
+        key = SoftKey(ORIGIN)
+        self.enroll(key)
+        self.assertIsNone(self.auth.check_session(self.signin(key), OWNER))
+
+
 if __name__ == "__main__":
     unittest.main()
