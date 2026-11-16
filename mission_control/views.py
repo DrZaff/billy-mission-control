@@ -155,9 +155,9 @@ def page(title: str, current: str, demo: Demo | None, body: str) -> str:
     )
     banner = (
         f'<p class="banner">Demo data (synthetic) · as of {_e(utc(demo.refreshed_at))} · '
-        f"Phase {_e(PHASE)}, read-only</p>"
+        f"Phase {_e(PHASE)}, read-only except the stop switch</p>"
         if demo
-        else f'<p class="banner">Phase {_e(PHASE)}, read-only</p>'
+        else f'<p class="banner">Phase {_e(PHASE)}, read-only except the stop switch</p>'
     )
     return (
         "<!doctype html>\n"
@@ -403,19 +403,92 @@ def usage(demo: Demo) -> str:
     return page("Usage", "/usage", demo, body)
 
 
-def settings(demo: Demo) -> str:
+STOP_SCOPE = (
+    "Stops new Billy review and publish steps. Work already running, cloud agents and GitHub "
+    "Actions are not affected."
+)
+STOP_BACKUP = (
+    "If this button fails, stop Billy from the server instead, as described in the main "
+    'repository\'s docs/agents/billy.md, "The stop marker".'
+)
+
+
+def _stop_form(token: str) -> str:
+    return (
+        '<section aria-labelledby="h-stop"><h2 id="h-stop">Stop switch</h2>'
+        f"<p><strong>{_e(STOP_SCOPE)}</strong></p>"
+        '<form method="post" action="/stop">'
+        f'<input type="hidden" name="token" value="{_e(token)}">'
+        '<button type="submit" class="stop-button">Stop new runs</button>'
+        "</form>"
+        "<p>This can only turn the stop on. Only the owner clears it, on the server.</p>"
+        f'<p class="note">{_e(STOP_BACKUP)}</p>'
+        "<p class=\"note\">The marker's current state isn't shown yet: this page still runs on "
+        "demo data.</p></section>"
+    )
+
+
+def settings(demo: Demo, stop_token: str | None = None) -> str:
+    if stop_token is None:
+        stop = (
+            '<section aria-labelledby="h-stop"><h2 id="h-stop">Stop switch</h2>'
+            f"{_stop_line(demo)}"
+            "<p>Read-only here. Turning it on from this page arrives with phase A4, with its own "
+            "tests and review.</p></section>"
+        )
+        account = "<p>Sign-in and sign-out arrive with phase A4.</p>"
+    else:
+        stop = _stop_form(stop_token)
+        account = (
+            "<p>Signed in through Tailscale as the owner. The passkey arrives with phase A4b.</p>"
+        )
     body = (
         "<h1>Settings</h1>"
-        '<section aria-labelledby="h-stop"><h2 id="h-stop">Stop switch</h2>'
-        f"{_stop_line(demo)}"
-        "<p>Read-only here. Turning it on from this page arrives with phase A4, with its own "
-        "tests and review.</p></section>"
+        f"{stop}"
         '<section aria-labelledby="h-sched"><h2 id="h-sched">Schedules</h2>'
         "<p>None. Nothing runs on a timer.</p></section>"
-        '<section aria-labelledby="h-account"><h2 id="h-account">Account</h2>'
-        "<p>Sign-in and sign-out arrive with phase A4.</p></section>"
+        f'<section aria-labelledby="h-account"><h2 id="h-account">Account</h2>{account}</section>'
     )
     return page("Settings", "/settings", demo, body)
+
+
+def stop_result(stopped: bool) -> str:
+    if stopped:
+        body = (
+            "<h1>Billy is stopped</h1>"
+            f"<p><strong>{_e(STOP_SCOPE)}</strong></p>"
+            "<p>The stop helper set the stop marker and confirmed it is on disk. Only the owner "
+            "clears it, on the server.</p>"
+        )
+    else:
+        body = (
+            '<h1 class="attention">The stop could NOT be confirmed</h1>'
+            "<p><strong>Billy may still be running.</strong> Stop it from the server now, as "
+            'described in the main repository\'s docs/agents/billy.md, "The stop marker".</p>'
+        )
+    return page("Stop", "/settings", None, body + '<p><a href="/settings">Settings</a></p>')
+
+
+def stop_refused() -> str:
+    body = (
+        '<h1 class="attention">Stop refused</h1>'
+        "<p>The request didn't come from this app's own Settings page, or the page was out of "
+        "date (the app restarted). Nothing was changed.</p>"
+        f'<p>Reload <a href="/settings">Settings</a> and press the button again. {_e(STOP_BACKUP)}'
+        "</p>"
+    )
+    return page("Stop refused", "/settings", None, body)
+
+
+LOGGING_WARNING = (
+    '<p class="banner attention" role="alert">Logging degraded: this request could not be '
+    "recorded in the events log.</p>"
+)
+
+
+def with_logging_warning(html: str) -> str:
+    """The page with a logging-failure banner at the top of its main content."""
+    return html.replace("<main>\n", "<main>\n" + LOGGING_WARNING + "\n", 1)
 
 
 def unavailable() -> str:

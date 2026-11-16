@@ -77,7 +77,7 @@ class SecurityHeaders(unittest.TestCase):
         directives = {d.split()[0]: d.split()[1:] for d in csp.split("; ")}
         self.assertEqual(directives["default-src"], ["'none'"])
         self.assertEqual(directives["style-src"], ["'self'"])
-        self.assertEqual(directives["form-action"], ["'none'"])
+        self.assertEqual(directives["form-action"], ["'self'"])  # the stop button (A4a)
         self.assertEqual(
             set(directives),
             {"default-src", "style-src", "base-uri", "form-action", "frame-ancestors"},

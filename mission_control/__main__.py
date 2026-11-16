@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import os
 import sys
 from wsgiref.simple_server import make_server
 
@@ -59,5 +60,142 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- phase A4a service commands
+#
+#   python3 -m mission_control serve --config FILE          the web app (systemd socket unit)
+#   python3 -m mission_control stopper --config FILE        the stop helper (its own socket unit)
+#   python3 -m mission_control selfcheck app|stopper --config FILE
+#   python3 -m mission_control export-events --config FILE --since YYYY-MM-DD --out FILE
+#
+# Each refuses to start unless every start-up check passes (checks.py).
+
+SERVICE_COMMANDS = ("serve", "stopper", "selfcheck", "export-events")
+MAX_CONFIG = 65536
+
+
+def read_config(path: str) -> str:
+    """The config's text, read without following a symlink."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as f:
+        data = f.read(MAX_CONFIG + 1)
+    if len(data) > MAX_CONFIG:
+        raise ValueError("the config file is too large")
+    return data.decode("utf-8")
+
+
+def _fail(message: str) -> int:
+    print("STOP: " + message, file=sys.stderr)
+    return 2
+
+
+def _app_config(path: str):
+    from .config import parse_app
+
+    return parse_app(read_config(path))
+
+
+def _stopper_config(path: str):
+    from .config import parse_stopper
+
+    return parse_stopper(read_config(path))
+
+
+def service_main(argv: list[str]) -> int:
+    from . import checks
+    from .config import ConfigError
+
+    parser = argparse.ArgumentParser(prog="python3 -m mission_control")
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("serve", "stopper"):
+        sub.add_parser(name).add_argument("--config", required=True)
+    check = sub.add_parser("selfcheck")
+    check.add_argument("kind", choices=("app", "stopper"))
+    check.add_argument("--config", required=True)
+    export = sub.add_parser("export-events")
+    export.add_argument("--config", required=True)
+    export.add_argument("--since", required=True, help="YYYY-MM-DD (UTC)")
+    export.add_argument("--out", required=True, help="a new file; never overwritten")
+    args = parser.parse_args(argv)
+
+    try:
+        if args.command == "selfcheck":
+            kind = args.kind
+            cfg = _app_config(args.config) if kind == "app" else _stopper_config(args.config)
+        else:
+            kind = "stopper" if args.command == "stopper" else "app"
+            cfg = _app_config(args.config) if kind == "app" else _stopper_config(args.config)
+    except (OSError, ValueError, ConfigError) as error:
+        detail = str(error) if isinstance(error, ConfigError) else type(error).__name__
+        return _fail("the config could not be read: " + detail)
+
+    from pathlib import Path
+
+    path = Path(args.config)
+    results = (checks.app_checks if kind == "app" else checks.stopper_checks)(cfg, path)
+    if args.command == "selfcheck":
+        print(checks.report(results))
+        failed = checks.failures(results)
+        print(f"{len(results) - len(failed)} of {len(results)} checks passed.")
+        return 1 if failed else 0
+    if checks.failures(results):
+        print(checks.report(checks.failures(results)), file=sys.stderr)
+        return _fail("start-up checks failed; nothing was started")
+
+    if args.command == "export-events":
+        from .events import Events
+
+        try:
+            count = Events(cfg.events_db).export(args.since, Path(args.out))
+        except (OSError, ValueError) as error:
+            return _fail("export failed: " + type(error).__name__)
+        print(f"Exported {count} event(s) to {args.out}.")
+        return 0
+
+    from .service import systemd_socket
+
+    try:
+        listener = systemd_socket()
+    except RuntimeError as error:
+        return _fail(str(error))
+
+    if args.command == "stopper":
+        import pwd
+
+        from .stopper import serve
+
+        client_uid = pwd.getpwnam(cfg.client_account).pw_uid
+        print("Stop helper ready.", flush=True)
+        serve(listener, cfg.control_dir, os.geteuid(), client_uid, log=print)
+        return 0
+
+    from .app import Service, make_app
+    from .events import Events
+    from .service import UnixWSGIServer
+    from .stopper import request_stop
+
+    events = Events(cfg.events_db)
+    try:
+        events.initialise()
+    except Exception:  # noqa: BLE001 - a broken log never stops the service, or the stop
+        print("WARNING: the events log could not be opened; pages will say so.", flush=True)
+    service = Service(config=cfg, events=events, stop=lambda: request_stop(cfg.stop_socket))
+    server = UnixWSGIServer(
+        listener,
+        make_app(service=service),
+        cfg.proxy_uids,
+        on_refused=lambda uid: events.append("refused-connection", detail=f"uid {uid}"),
+    )
+    print("Mission Control ready (supervised testing only).", flush=True)
+    server.serve_forever()
+    return 0
+
+
+def entry(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] in SERVICE_COMMANDS:
+        return service_main(argv)
+    return main(argv)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(entry())
