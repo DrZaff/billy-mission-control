@@ -186,9 +186,10 @@ def app_checks(
         private_database(cfg.events_db, uid),
         protected_above(cfg.events_db.parent, trusted),
         helper_check,
-        # The stop socket's folders may belong to the helper, but no shared (sticky) folder:
-        # another account could otherwise put its own socket at that path.
-        protected_above(cfg.stop_socket, trusted | ({helper} - {None}), allow_sticky=False),
+        # Only root or the stop helper may own the folders above the stop socket, and none may
+        # be shared (sticky): no other account can put a socket there, so a confirmation from
+        # root (systemd's socket activation) or the helper is genuine (stopper.confirmers).
+        protected_above(cfg.stop_socket, {0} | ({helper} - {None}), allow_sticky=False),
     ]
     results += [cannot_read(p, opener) for p in cfg.forbidden_paths]
     return results

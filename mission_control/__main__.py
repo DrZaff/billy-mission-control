@@ -171,7 +171,7 @@ def service_main(argv: list[str]) -> int:
     from .app import Service, make_app
     from .events import Events
     from .service import UnixWSGIServer
-    from .stopper import request_stop
+    from .stopper import confirmers, request_stop
 
     os.umask(0o077)  # SQLite's journal and any other file this process makes stay private
     events = Events(cfg.events_db)
@@ -183,7 +183,9 @@ def service_main(argv: list[str]) -> int:
 
     helper_uid = pwd.getpwnam(cfg.stop_account).pw_uid  # exists: checked at start-up
     service = Service(
-        config=cfg, events=events, stop=lambda: request_stop(cfg.stop_socket, helper_uid)
+        config=cfg,
+        events=events,
+        stop=lambda: request_stop(cfg.stop_socket, confirmers(helper_uid)),
     )
     server = UnixWSGIServer(
         listener,

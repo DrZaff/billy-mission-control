@@ -311,13 +311,15 @@ class StopHelper(unittest.TestCase):
             kwargs={"log": lines.append, "once": True},
         )
         thread.start()
-        self.assertTrue(stopper.request_stop(path, UID))
+        self.assertTrue(stopper.request_stop(path, frozenset({UID})))
         thread.join(5)
         self.assertTrue(self.marker.exists())
         self.assertEqual(lines, ["stop helper: stopped"])
 
     def test_request_stop_is_false_when_the_helper_is_unreachable(self):
-        self.assertFalse(stopper.request_stop(self.base / "missing.sock", UID, timeout=0.5))
+        self.assertFalse(
+            stopper.request_stop(self.base / "missing.sock", frozenset({UID}), timeout=0.5)
+        )
 
 
 # ---------------------------------------------------------------- events
@@ -933,13 +935,13 @@ class CodexReviewOfF131dd9(unittest.TestCase):
 
     def test_a_stopped_reply_from_another_account_is_not_believed(self):
         path, thread, got = self.fake_helper(stopper.STOPPED)
-        self.assertFalse(stopper.request_stop(path, helper_uid=UID + 1, timeout=2))
+        self.assertFalse(stopper.request_stop(path, frozenset({UID + 1}), timeout=2))
         thread.join(3)
         self.assertEqual(got[0], b"")  # the request was never even sent
 
     def test_the_helpers_own_account_is_believed(self):
         path, thread, got = self.fake_helper(stopper.STOPPED)
-        self.assertTrue(stopper.request_stop(path, helper_uid=UID, timeout=2))
+        self.assertTrue(stopper.request_stop(path, frozenset({UID}), timeout=2))
         thread.join(3)
         self.assertEqual(got, [stopper.REQUEST])
 
@@ -1027,6 +1029,54 @@ class CodexReviewOfF131dd9(unittest.TestCase):
             thread.join(5)
         self.assertFalse(thread.is_alive())
         self.assertEqual(rejected, [408])
+
+
+class CodexReviewOfE4cdc32(unittest.TestCase):
+    """Codex's review of e4cdc32 (blocking): with systemd socket activation the listener is
+    created by root, so the kernel reports root, not the helper, as the stop socket's owner."""
+
+    def test_root_and_the_helper_may_confirm_nobody_else(self):
+        self.assertEqual(stopper.confirmers(1234), frozenset({0, 1234}))
+        self.assertNotIn(1235, stopper.confirmers(1234))
+
+    def test_a_socket_handed_over_by_another_process_is_believed_when_allowed(self):
+        # Like systemd: one process creates and listens, another accepts and answers.
+        base = tmpdir(self)
+        control = base / "control"
+        control.mkdir(mode=0o755)
+        path = base / "stop.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        thread = threading.Thread(
+            target=stopper.serve,
+            args=(listener, control, UID, UID),
+            kwargs={"log": lambda line: None, "once": True},
+            daemon=True,
+        )
+        thread.start()
+        # The listener's creator here is this test process (UID), standing in for root.
+        self.assertTrue(stopper.request_stop(path, stopper.confirmers(UID)))
+        thread.join(5)
+        self.assertTrue((control / stopper.MARKER).exists())
+
+    def test_the_stop_socket_folders_may_not_belong_to_the_web_app(self):
+        base = tmpdir(self, under_home=True)
+        (base / "state").mkdir(mode=0o700)
+        (base / "run").mkdir(mode=0o755)
+        path = base / "config.json"
+        path.write_text(app_config_text(base))
+        os.chmod(path, 0o600)
+        cfg = parse_app(path.read_text())
+        # The test's own folders are owned by UID, here standing in for the web app.
+        results = checks.app_checks(cfg, path, uid=UID, uid_of=lambda a: UID + 1000)
+        failed = [c for c in checks.failures(results) if c.name == "folders above stop.sock"]
+        if UID != 0:  # as root, the folders' owner is root, which is allowed
+            self.assertTrue(failed)
+        helper = checks.app_checks(cfg, path, uid=UID + 1, uid_of=lambda a: UID)
+        names = [c.name for c in checks.failures(helper)]
+        self.assertNotIn("folders above stop.sock", names)
 
 
 if __name__ == "__main__":

@@ -136,15 +136,24 @@ def serve(
             return
 
 
-def request_stop(path: Path, helper_uid: int, timeout: float = TIMEOUT) -> bool:
-    """The web app's side: ask the helper to stop. True only on `stopped` from a process running
-    as the stop helper's own account (checked by the kernel), so nothing else that manages to
-    listen at the socket's path can fake a confirmation."""
+def confirmers(helper_uid: int) -> frozenset[int]:
+    """Who may own the listening socket a stop confirmation comes from: the stop helper, or root.
+    With systemd socket activation, systemd (root) creates the listener and hands it to the
+    helper, so the kernel reports root as the listener's account. That is safe because the
+    start-up checks allow only root and the helper to own the folders above the stop socket:
+    no other account can put a socket at that path."""
+    return frozenset({0, helper_uid})
+
+
+def request_stop(path: Path, allowed: frozenset[int], timeout: float = TIMEOUT) -> bool:
+    """The web app's side: ask the helper to stop. True only on `stopped` over a socket whose
+    listener belongs to an `allowed` account (checked by the kernel), so nothing else that
+    manages to listen at the socket's path can fake a confirmation."""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
             conn.settimeout(timeout)
             conn.connect(str(path))
-            if peer_uid(conn) != helper_uid:
+            if peer_uid(conn) not in allowed:
                 return False
             conn.sendall(REQUEST)
             reply = b""
