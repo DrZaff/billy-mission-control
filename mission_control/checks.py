@@ -73,9 +73,31 @@ def private_file(path: Path, owner: int) -> Check:
         return Check(name, False, "not a regular file (a symlink is refused)")
     if info.st_uid != owner:
         return Check(name, False, "owned by another account")
-    if info.st_mode & 0o027:
-        return Check(name, False, "others can read it, or its group can write it")
+    if info.st_mode & 0o077:
+        return Check(name, False, "another account (or its group) can read or write it")
     return Check(name, True, "private")
+
+
+DATABASE_FILES = ("", "-journal", "-wal", "-shm")
+
+
+def private_database(path: Path, owner: int) -> Check:
+    """The events database and SQLite's side files, where they exist: regular files (not
+    symlinks) owned by `owner` that nobody else can read or write. A missing database is fine:
+    the service creates it privately."""
+    for suffix in DATABASE_FILES:
+        part = Path(str(path) + suffix)
+        try:
+            info = os.lstat(part)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return Check("events database", False, f"{part.name} is unreadable")
+        if not stat.S_ISREG(info.st_mode):
+            return Check("events database", False, f"{part.name} is not a regular file")
+        if info.st_uid != owner or info.st_mode & 0o077:
+            return Check("events database", False, f"{part.name} is not private")
+    return Check("events database", True, "private, or not created yet")
 
 
 def own_folder(path: Path, owner: int, label: str) -> Check:
@@ -125,6 +147,7 @@ def app_checks(
         private_file(config_path, uid),
         protected_above(config_path, trusted),
         own_folder(cfg.events_db.parent, uid, "events folder"),
+        private_database(cfg.events_db, uid),
         protected_above(cfg.events_db.parent, trusted),
         protected_above(cfg.stop_socket, trusted),
     ]

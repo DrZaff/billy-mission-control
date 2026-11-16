@@ -54,10 +54,16 @@ def set_marker(control_dir: Path, owner: int) -> bool:
         try:
             fd = os.open(MARKER, create, 0o644, dir_fd=folder)
         except FileExistsError:
-            # Already stopped: confirm it is a real marker, and that it is on disk.
-            existing = os.stat(MARKER, dir_fd=folder, follow_symlinks=False)
-            if not stat.S_ISREG(existing.st_mode) or existing.st_uid != owner:
-                return False
+            # Already stopped: confirm it is a real marker, and write it (the file itself, then
+            # the folder) to disk again, in case an earlier attempt failed before its fsync.
+            fd = os.open(MARKER, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=folder)
+            try:
+                existing = os.fstat(fd)
+                if not stat.S_ISREG(existing.st_mode) or existing.st_uid != owner:
+                    return False
+                os.fsync(fd)
+            finally:
+                os.close(fd)
             os.fsync(folder)
             return True
         try:

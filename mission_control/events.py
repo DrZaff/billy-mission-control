@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -43,6 +44,15 @@ def clean(value: object, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def private(info: os.stat_result) -> bool:
+    """A regular file owned by this account that no other account can read or write."""
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_uid == os.geteuid()
+        and not stat.S_IMODE(info.st_mode) & 0o077
+    )
+
+
 def now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
@@ -60,9 +70,15 @@ class Events:
         return db
 
     def initialise(self) -> None:
-        """Create the schema (idempotent) with a private file mode. Raises if it can't."""
+        """Create the schema (idempotent). Raises if the file, new or existing, isn't a private
+        regular file owned by this account: a creation mode doesn't change an existing file."""
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-        os.close(fd)
+        try:
+            info = os.fstat(fd)
+        finally:
+            os.close(fd)
+        if not private(info):
+            raise PermissionError("the events database must be a private file of this account")
         with self._connect() as db:
             for statement in SCHEMA:
                 db.execute(statement)

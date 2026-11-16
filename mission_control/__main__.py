@@ -173,6 +173,7 @@ def service_main(argv: list[str]) -> int:
     from .service import UnixWSGIServer
     from .stopper import request_stop
 
+    os.umask(0o077)  # SQLite's journal and any other file this process makes stay private
     events = Events(cfg.events_db)
     try:
         events.initialise()

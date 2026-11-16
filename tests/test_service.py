@@ -703,5 +703,89 @@ class CommandLine(unittest.TestCase):
         self.assertIn("loopback", result.stderr)
 
 
+class CodexReviewOfAfb72d5(unittest.TestCase):
+    """Codex's review of afb72d5: an existing events database must be private (blocking); a
+    group-readable config is not private; an existing marker is written to disk again."""
+
+    def setUp(self):
+        self.base = tmpdir(self)
+
+    def test_an_existing_database_that_others_can_read_is_refused(self):
+        db = self.base / "events.db"
+        for mode in (0o644, 0o640, 0o604, 0o660, 0o606):
+            db.write_text("")
+            os.chmod(db, mode)
+            with self.assertRaises(PermissionError, msg=oct(mode)):
+                Events(db).initialise()
+            self.assertFalse(checks.private_database(db, UID).ok, oct(mode))
+            db.unlink()
+
+    def test_a_symlinked_database_is_refused(self):
+        real = self.base / "real.db"
+        real.write_text("")
+        os.chmod(real, 0o600)
+        link = self.base / "events.db"
+        link.symlink_to(real)
+        with self.assertRaises(OSError):
+            Events(link).initialise()
+        self.assertFalse(checks.private_database(link, UID).ok)
+
+    def test_sqlite_side_files_must_be_private_too(self):
+        db = self.base / "events.db"
+        Events(db).initialise()
+        self.assertTrue(checks.private_database(db, UID).ok)
+        wal = self.base / "events.db-wal"
+        wal.write_text("")
+        os.chmod(wal, 0o644)
+        self.assertFalse(checks.private_database(db, UID).ok)
+        os.chmod(wal, 0o600)
+        self.assertTrue(checks.private_database(db, UID).ok)
+        self.assertFalse(checks.private_database(db, UID + 1).ok)
+
+    def test_a_missing_database_is_fine_and_is_created_private(self):
+        db = self.base / "events.db"
+        self.assertTrue(checks.private_database(db, UID).ok)
+        Events(db).initialise()
+        self.assertEqual(stat.S_IMODE(os.stat(db).st_mode), 0o600)
+
+    def test_the_app_checks_include_the_database(self):
+        (self.base / "state").mkdir(mode=0o700)
+        (self.base / "run").mkdir(mode=0o755)
+        db = self.base / "state" / "events.db"
+        db.write_text("")
+        os.chmod(db, 0o644)
+        path = self.base / "config.json"
+        path.write_text(app_config_text(self.base))
+        os.chmod(path, 0o600)
+        results = checks.app_checks(parse_app(path.read_text()), path, uid=UID)
+        self.assertIn("events database", [c.name for c in checks.failures(results)])
+
+    def test_a_group_readable_config_is_not_private(self):
+        path = self.base / "config.json"
+        path.write_text("{}")
+        for mode in (0o640, 0o660, 0o604, 0o610):
+            os.chmod(path, mode)
+            self.assertFalse(checks.private_file(path, UID).ok, oct(mode))
+        os.chmod(path, 0o600)
+        self.assertTrue(checks.private_file(path, UID).ok)
+
+    def test_an_existing_marker_is_written_to_disk_again(self):
+        control = self.base / "control"
+        control.mkdir(mode=0o755)
+        marker = control / stopper.MARKER
+        marker.write_text("left by an earlier attempt")
+        os.chmod(marker, 0o644)
+        synced = []
+        real = os.fsync
+
+        def record(fd):
+            synced.append(stat.S_ISREG(os.fstat(fd).st_mode))
+            real(fd)
+
+        with mock.patch.object(stopper.os, "fsync", side_effect=record):
+            self.assertTrue(stopper.set_marker(control, UID))
+        self.assertEqual(synced, [True, False])  # the marker file, then its folder
+
+
 if __name__ == "__main__":
     unittest.main()
