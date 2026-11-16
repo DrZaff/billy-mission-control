@@ -1129,5 +1129,68 @@ class CodexReviewOf8b52f99(unittest.TestCase):
         stream.flush()
 
 
+class CodexReviewOf051e567(unittest.TestCase):
+    """Codex's review of 051e567 (should fix): a connection reset mid-request is recorded, and
+    no request failure prints a traceback."""
+
+    def server(self):
+        base = tmpdir(self)
+        cfg = parse_app(app_config_text(base))
+        events = Events(base / "events.db")
+        events.initialise()
+        rejected = []
+        path = base / "app.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        listener.listen(1)
+        server = UnixWSGIServer(
+            listener,
+            make_app(service=Service(config=cfg, events=events, stop=lambda: True)),
+            {UID},
+            on_rejected=rejected.append,
+        )
+        self.addCleanup(server.server_close)
+        return server, path, rejected
+
+    def test_a_reset_mid_request_is_recorded_without_a_traceback(self):
+        server, path, rejected = self.server()
+
+        def reset_on_read(*args, **kwargs):
+            raise ConnectionResetError("reset by peer")
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(service_module.DeadlineReader, "readline", reset_on_read),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            thread = threading.Thread(target=server.handle_request, daemon=True)
+            thread.start()
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect(str(path))
+                client.sendall(b"GET / HTTP/1.1\r\n")
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(rejected, [service_module.CONNECTION_LOST])
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_any_other_failure_is_recorded_without_a_traceback(self):
+        server, path, rejected = self.server()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                service_module.Handler, "handle", side_effect=RuntimeError("unexpected")
+            ),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            thread = threading.Thread(target=server.handle_request, daemon=True)
+            thread.start()
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect(str(path))
+                client.sendall(b"GET / HTTP/1.1\r\n\r\n")
+            thread.join(5)
+        self.assertEqual(rejected, [service_module.SERVER_ERROR])
+        self.assertEqual(stderr.getvalue(), "")
+
+
 if __name__ == "__main__":
     unittest.main()
