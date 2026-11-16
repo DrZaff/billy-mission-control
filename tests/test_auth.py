@@ -485,6 +485,27 @@ class WebFlow(unittest.TestCase):
         self.assertEqual(status, "303 See Other")
         self.assertIn("Max-Age=0", self.header(headers, "Set-Cookie")[0])
 
+    # Codex's review of e305ca9 (should fix): without JavaScript, the enrollment form's
+    # default GET would have put the unspent code in the address bar.
+
+    def test_the_enrollment_form_posts(self):
+        _, _, body = self.call("/enroll")
+        form = re.search(rb'<form id="enroll"[^>]*>', body).group(0)
+        self.assertIn(b'method="post"', form)
+        self.assertIn(b'action="/enroll"', form)
+
+    def test_a_scriptless_post_is_refused_and_the_code_stays_unspent_and_unlogged(self):
+        code = self.auth.new_enroll_code("iPhone")
+        status, _, _ = self.call(
+            "/enroll",
+            "POST",
+            f"code={code}".encode(),
+            CONTENT_TYPE="application/x-www-form-urlencoded",
+        )
+        self.assertEqual(status, "405 Method Not Allowed")
+        self.assertNotIn(code.encode(), Path(self.cfg.events_db).read_bytes())
+        self.assertIn("ticket", self.auth.enroll_begin(code, OWNER))  # still usable
+
 
 # ---------------------------------------------------------------- the server shell
 

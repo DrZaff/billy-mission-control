@@ -499,7 +499,10 @@ def enroll_page() -> str:
         "<h1>Add a passkey</h1>"
         "<p>Enter the one-time code from <code>passkey enroll</code> on the server. It works "
         "once, for 10 minutes. At most two passkeys: this iPhone and a backup security key.</p>"
-        '<form id="enroll">'
+        # POST, never GET: without the script, the code must not land in the address bar,
+        # history or a referrer. The server refuses that POST (only the script's JSON call is
+        # accepted), and it never logs a request body.
+        '<form id="enroll" method="post" action="/enroll">'
         '<label for="code">One-time code</label>'
         '<input id="code" name="code" autocomplete="one-time-code" autocapitalize="characters" '
         'spellcheck="false" maxlength="11" required>'
