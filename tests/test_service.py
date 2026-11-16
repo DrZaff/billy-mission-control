@@ -26,7 +26,7 @@ from mission_control import service as service_module
 from mission_control.app import LOGIN_KEY, RateLimit, Service, make_app
 from mission_control.config import ConfigError, parse_app, parse_stopper
 from mission_control.events import Events
-from mission_control.service import UnixWSGIServer, systemd_socket, trusted_login
+from mission_control.service import Handler, UnixWSGIServer, systemd_socket, trusted_login
 
 ROOT = Path(__file__).resolve().parent.parent
 UID = os.getuid()
@@ -183,7 +183,9 @@ class StartupChecks(unittest.TestCase):
         (self.base / "run").mkdir(mode=0o755)
         (self.base / "key.pem").write_text("x")
         cfg_path = self.base / "config.json"
-        cfg_path.write_text(app_config_text(self.base))
+        # The stop socket's folders must belong to root or the stop helper. These test folders
+        # belong to whoever runs the tests (the web app here), so put the socket under "/".
+        cfg_path.write_text(app_config_text(self.base, stop_socket="/mission-control-test.sock"))
         os.chmod(cfg_path, 0o600)
         return parse_app(cfg_path.read_text()), cfg_path
 
@@ -1077,6 +1079,54 @@ class CodexReviewOfE4cdc32(unittest.TestCase):
         helper = checks.app_checks(cfg, path, uid=UID + 1, uid_of=lambda a: UID)
         names = [c.name for c in checks.failures(helper)]
         self.assertNotIn("folders above stop.sock", names)
+
+
+class CodexReviewOf8b52f99(unittest.TestCase):
+    """Codex's review of 8b52f99: a stop POST whose body times out is refused and recorded, not
+    a 500, and no traceback is written to the service's error output."""
+
+    def test_a_stop_body_that_times_out_is_refused(self):
+        base = tmpdir(self)
+        cfg = parse_app(app_config_text(base))
+        events = Events(base / "events.db")
+        events.initialise()
+        stops = []
+        app = make_app(
+            service=Service(
+                config=cfg, events=events, stop=lambda: stops.append(1) or True, token="t"
+            )
+        )
+
+        class Slow:
+            def read(self, size=-1):
+                raise TimeoutError("request deadline")
+
+        for body_input, length in ((Slow(), "7"), (io.BytesIO(b"tok"), "7")):
+            environ = {"PATH_INFO": "/stop", "REQUEST_METHOD": "POST"}
+            setup_testing_defaults(environ)
+            environ.update(
+                {
+                    LOGIN_KEY: OWNER,
+                    "HTTP_ORIGIN": ORIGIN,
+                    "HTTP_SEC_FETCH_SITE": "same-origin",
+                    "CONTENT_TYPE": "application/x-www-form-urlencoded",
+                    "CONTENT_LENGTH": length,
+                    "wsgi.input": body_input,
+                }
+            )
+            captured = {}
+            app(environ, lambda status, headers, exc=None, c=captured: c.update(status=status))
+            self.assertEqual(captured["status"], "403 Forbidden")
+        self.assertEqual(stops, [])
+        db = sqlite3.connect(base / "events.db")
+        self.addCleanup(db.close)
+        results = [json.loads(r)["result"] for (r,) in db.execute("SELECT record FROM events")]
+        self.assertEqual(results, ["refused:body-timeout", "refused:body-incomplete"])
+
+    def test_the_server_writes_no_tracebacks(self):
+        stream = Handler.get_stderr(None)
+        self.assertEqual(stream.write("Traceback (most recent call last)"), 33)
+        stream.flush()
 
 
 if __name__ == "__main__":

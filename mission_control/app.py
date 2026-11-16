@@ -151,7 +151,12 @@ def stop_refusal(environ: dict, service: Service) -> str | None:
         return "length"
     if not 0 < length <= MAX_STOP_BODY:
         return "length"
-    body = environ["wsgi.input"].read(length)
+    try:
+        body = environ["wsgi.input"].read(length)
+    except OSError:  # includes the request deadline (TimeoutError): refused, never a 500
+        return "body-timeout"
+    if len(body) != length:
+        return "body-incomplete"
     try:
         fields = parse_qs(body.decode("ascii"), strict_parsing=True, max_num_fields=2)
     except (UnicodeDecodeError, ValueError):

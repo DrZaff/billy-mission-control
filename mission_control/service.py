@@ -84,8 +84,21 @@ def trusted_login(headers) -> str | None:
     return value or None
 
 
+class _Discard:
+    """Where wsgiref's error output goes: nowhere. Nothing about requests reaches journald."""
+
+    def write(self, text: str) -> int:
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+
 class Handler(WSGIRequestHandler):
     timeout = TIMEOUT
+
+    def get_stderr(self):
+        return _Discard()
 
     def setup(self) -> None:
         super().setup()
