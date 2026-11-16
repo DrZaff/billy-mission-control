@@ -19,6 +19,7 @@ Nothing secret is ever logged: not codes, challenges, keys or cookies.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import os
@@ -40,6 +41,7 @@ def _passkeys():
 
 
 SCHEMA_VERSION = 1
+BUSY_TIMEOUT_MS = 2000  # long enough for a sign-in in progress to finish
 CODE_TTL = 600
 CHALLENGE_TTL = 120
 IDLE_TIMEOUT = 1800
@@ -101,8 +103,20 @@ class Auth:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db, timeout=0.5, isolation_level=None)
-        conn.execute("PRAGMA busy_timeout = 500")
+        conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         return conn
+
+    @contextlib.contextmanager
+    def _locked(self, conn: sqlite3.Connection):
+        """One write transaction, taken before anything is read (BEGIN IMMEDIATE): a sign-in,
+        an enrollment, a revoke or a reset runs whole, never interleaved with another."""
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
 
     def initialise(self) -> None:
         """Create the schema. Refuses anything but a private regular file of this account."""
@@ -197,8 +211,11 @@ class Auth:
         """Remove one credential and every session it created."""
         conn = self._connect()
         try:
-            gone = conn.execute("DELETE FROM credentials WHERE id = ?", (credential_id,)).rowcount
-            conn.execute("DELETE FROM sessions WHERE credential = ?", (credential_id,))
+            with self._locked(conn):
+                gone = conn.execute(
+                    "DELETE FROM credentials WHERE id = ?", (credential_id,)
+                ).rowcount
+                conn.execute("DELETE FROM sessions WHERE credential = ?", (credential_id,))
         finally:
             conn.close()
         return bool(gone)
@@ -207,9 +224,10 @@ class Auth:
         """Remove every credential, session, code and challenge. Returns credentials removed."""
         conn = self._connect()
         try:
-            gone = conn.execute("DELETE FROM credentials").rowcount
-            for table in ("sessions", "codes", "challenges"):
-                conn.execute(f"DELETE FROM {table}")  # noqa: S608 - fixed table names
+            with self._locked(conn):
+                gone = conn.execute("DELETE FROM credentials").rowcount
+                for table in ("sessions", "codes", "challenges"):
+                    conn.execute(f"DELETE FROM {table}")  # noqa: S608 - fixed table names
         finally:
             conn.close()
         return gone
@@ -249,22 +267,24 @@ class Auth:
             raise AuthError("response")
         conn = self._connect()
         try:
+            # The ticket is spent first, on its own, so it stays spent even if this fails.
             state, label = self._take_ticket(conn, ticket, "enroll", login)
-            if len(self._active(conn)) >= MAX_CREDENTIALS:
-                raise AuthError("too-many-credentials")
-            try:
-                raw_id, blob, counter = _passkeys().register(self.origin, state, response)
-            except ValueError as error:  # passkeys.PasskeyError
-                raise AuthError("rejected:" + str(error)[:40]) from None
-            cid = _b64(raw_id)
-            try:
-                conn.execute(
-                    "INSERT INTO credentials (id, blob, counter, label, created)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (cid, blob, counter, label, self.clock()),
-                )
-            except sqlite3.IntegrityError:
-                raise AuthError("duplicate") from None
+            with self._locked(conn):  # the limit check and the insert happen as one
+                if len(self._active(conn)) >= MAX_CREDENTIALS:
+                    raise AuthError("too-many-credentials")
+                try:
+                    raw_id, blob, counter = _passkeys().register(self.origin, state, response)
+                except ValueError as error:  # passkeys.PasskeyError
+                    raise AuthError("rejected:" + str(error)[:40]) from None
+                cid = _b64(raw_id)
+                try:
+                    conn.execute(
+                        "INSERT INTO credentials (id, blob, counter, label, created)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        (cid, blob, counter, label, self.clock()),
+                    )
+                except sqlite3.IntegrityError:
+                    raise AuthError("duplicate") from None
         finally:
             conn.close()
         return cid
@@ -291,28 +311,33 @@ class Auth:
             raise AuthError("response")
         conn = self._connect()
         try:
+            # The ticket is spent first, on its own, so it stays spent even if this fails.
             state, _ = self._take_ticket(conn, ticket, "signin", login)
-            active = self._active(conn)
-            try:
-                raw_id, counter = _passkeys().authenticate(
-                    self.origin, state, [blob for _, blob, _ in active], response
+            # Reading the passkeys, checking and raising the counter, and opening the session
+            # happen as one: a revoke or reset runs wholly before (no passkey to sign in with)
+            # or wholly after (it deletes this session with the passkey), never in between.
+            with self._locked(conn):
+                active = self._active(conn)
+                try:
+                    raw_id, counter = _passkeys().authenticate(
+                        self.origin, state, [blob for _, blob, _ in active], response
+                    )
+                except ValueError as error:  # passkeys.PasskeyError
+                    raise AuthError("rejected:" + str(error)[:40]) from None
+                cid = _b64(raw_id)
+                stored = next((c for i, _, c in active if i == cid), None)
+                if stored is None:
+                    raise AuthError("unknown-credential")
+                if (counter or stored) and counter <= stored:
+                    raise AuthError("counter")  # a cloned authenticator, or a replay
+                conn.execute("UPDATE credentials SET counter = ? WHERE id = ?", (counter, cid))
+                token = secrets.token_urlsafe(32)
+                now = self.clock()
+                conn.execute(
+                    "INSERT INTO sessions (hash, login, credential, created, seen)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (_hash(token), login, cid, now, now),
                 )
-            except ValueError as error:  # passkeys.PasskeyError
-                raise AuthError("rejected:" + str(error)[:40]) from None
-            cid = _b64(raw_id)
-            stored = next((c for i, _, c in active if i == cid), None)
-            if stored is None:
-                raise AuthError("unknown-credential")
-            if (counter or stored) and counter <= stored:
-                raise AuthError("counter")  # a cloned authenticator, or a replay
-            conn.execute("UPDATE credentials SET counter = ? WHERE id = ?", (counter, cid))
-            token = secrets.token_urlsafe(32)
-            now = self.clock()
-            conn.execute(
-                "INSERT INTO sessions (hash, login, credential, created, seen)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (_hash(token), login, cid, now, now),
-            )
         finally:
             conn.close()
         return token

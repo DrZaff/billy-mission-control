@@ -622,5 +622,69 @@ class Policies(unittest.TestCase):
         self.assertTrue(COOKIE.startswith("__Host-"))
 
 
+class CodexReviewOf9bad79d(Fixture):
+    """Codex's review of 9bad79d (blocking): a revoke or reset between a sign-in's reading of
+    the passkeys and its creating the session left a session for a removed passkey."""
+
+    def setUp(self):
+        super().setUp()
+        self.key = SoftKey(ORIGIN)
+        self.cid = self.enroll(self.key)
+
+    def race(self, shell_action):
+        """Run `shell_action` (from another connection) while a sign-in is inside its check."""
+        import threading
+
+        real = auth_module._passkeys().authenticate
+        started, done = threading.Event(), []
+
+        def slow_authenticate(*args, **kwargs):
+            started.set()
+            result = real(*args, **kwargs)
+            threading.Event().wait(0.3)  # the window Codex found
+            return result
+
+        other = Auth(self.base / "auth.db", ORIGIN, OWNER, clock=self.clock)
+
+        def shell():
+            started.wait(5)
+            done.append(shell_action(other))
+
+        thread = threading.Thread(target=shell)
+        thread.start()
+        begin = self.auth.signin_begin(OWNER)
+        response = self.key.get(begin["options"])
+        from unittest import mock
+
+        with mock.patch.object(auth_module._passkeys(), "authenticate", slow_authenticate):
+            token = self.auth.signin_complete(begin["ticket"], response, OWNER)
+        thread.join(5)
+        self.assertEqual(len(done), 1, "the shell action never finished")
+        return token
+
+    def test_a_revoke_during_sign_in_leaves_no_session(self):
+        token = self.race(lambda other: other.revoke(self.cid))
+        self.assertEqual(self.auth.credentials(), [])
+        self.assertEqual(self.auth.check_session(token, OWNER), "no-session")
+
+    def test_a_reset_during_sign_in_leaves_no_session(self):
+        token = self.race(lambda other: other.reset())
+        self.assertEqual(self.auth.credentials(), [])
+        self.assertEqual(self.auth.check_session(token, OWNER), "no-session")
+
+    def test_a_revoke_before_sign_in_means_no_sign_in(self):
+        begin = self.auth.signin_begin(OWNER)
+        response = self.key.get(begin["options"])
+        self.auth.revoke(self.cid)
+        self.refused("rejected", self.auth.signin_complete, begin["ticket"], response, OWNER)
+
+    def test_a_failed_sign_in_still_spends_its_ticket(self):
+        begin = self.auth.signin_begin(OWNER)
+        bad = self.key.get(begin["options"], tamper=True)
+        self.refused("rejected", self.auth.signin_complete, begin["ticket"], bad, OWNER)
+        good = self.key.get(begin["options"])
+        self.refused("ticket-reused", self.auth.signin_complete, begin["ticket"], good, OWNER)
+
+
 if __name__ == "__main__":
     unittest.main()
