@@ -149,16 +149,20 @@ class Auth:
     def _take_ticket(self, conn, ticket: object, kind: str, login: str) -> tuple[str, str]:
         if not isinstance(ticket, str) or not 0 < len(ticket) <= 64:
             raise AuthError("ticket")
+        # Spend it in one atomic step: of any callers presenting the same ticket at once,
+        # exactly one changes used from 0 to 1; every other finds it already used.
+        won = conn.execute(
+            "UPDATE challenges SET used = 1 WHERE ticket = ? AND used = 0", (ticket,)
+        ).rowcount
         row = conn.execute(
-            "SELECT kind, login, state, label, created, used FROM challenges WHERE ticket = ?",
+            "SELECT kind, login, state, label, created FROM challenges WHERE ticket = ?",
             (ticket,),
         ).fetchone()
         if row is None:
             raise AuthError("ticket")
-        conn.execute("UPDATE challenges SET used = 1 WHERE ticket = ?", (ticket,))
-        r_kind, r_login, state, label, created, used = row
-        if used:
+        if not won:
             raise AuthError("ticket-reused")
+        r_kind, r_login, state, label, created = row
         if r_kind != kind:
             raise AuthError("ticket")
         if not hmac.compare_digest(r_login.encode(), login.encode()):
@@ -248,15 +252,18 @@ class Auth:
         digest = _hash(normalise_code(code))
         conn = self._connect()
         try:
+            # Spent now, in one atomic step: only one caller can change used from 0 to 1.
+            won = conn.execute(
+                "UPDATE codes SET used = 1 WHERE hash = ? AND used = 0", (digest,)
+            ).rowcount
             row = conn.execute(
-                "SELECT label, created, used FROM codes WHERE hash = ?", (digest,)
+                "SELECT label, created FROM codes WHERE hash = ?", (digest,)
             ).fetchone()
             if row is None:
                 raise AuthError("code")
-            label, created, used = row
-            conn.execute("UPDATE codes SET used = 1 WHERE hash = ?", (digest,))  # spent now
-            if used:
+            if not won:
                 raise AuthError("code-reused")
+            label, created = row
             if self.clock() - created > CODE_TTL:
                 raise AuthError("code-expired")
             with self._locked(conn):

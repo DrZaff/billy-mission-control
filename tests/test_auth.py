@@ -737,5 +737,88 @@ class CodexReviewOfE55171e(Fixture):
         self.assertIsNone(self.auth.check_session(self.signin(key), OWNER))
 
 
+class CodexReviewOfBeab808(Fixture):
+    """Codex's review of beab808 (should fix): spending a ticket or code was a read and a
+    separate write, so two callers at once could both find it unused. Here a competitor tries
+    to spend the same ticket or code right after our first database step: exactly one wins."""
+
+    def with_competitor(self, table, column, key, method, *args):
+        path = self.base / "auth.db"
+        real_connect = Auth._connect
+        competitor = []
+
+        class Done:
+            def __init__(self, rows, rowcount):
+                self.rows, self.rowcount = rows, rowcount
+
+            def fetchone(self):
+                return self.rows[0] if self.rows else None
+
+            def fetchall(self):
+                return self.rows
+
+            def __iter__(self):
+                return iter(self.rows)
+
+        class Proxy:
+            def __init__(self, conn):
+                self.conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self.conn, name)
+
+            def execute(self, sql, params=()):
+                cursor = self.conn.execute(sql, params)
+                # Finish our step completely (rows fetched, nothing left open) before the
+                # competitor runs, as a separate request would.
+                result = Done(cursor.fetchall(), cursor.rowcount)
+                if not competitor and table in sql and key in params:
+                    other = sqlite3.connect(path, isolation_level=None)
+                    try:
+                        competitor.append(
+                            other.execute(
+                                f"UPDATE {table} SET used = 1 WHERE {column} = ? AND used = 0",  # noqa: S608
+                                (key,),
+                            ).rowcount
+                        )
+                    finally:
+                        other.close()
+                return result
+
+        from unittest import mock
+
+        with mock.patch.object(Auth, "_connect", lambda auth_self: Proxy(real_connect(auth_self))):
+            try:
+                method(*args)
+                ours = True
+            except AuthError:
+                ours = False
+        return ours, bool(competitor and competitor[0])
+
+    def test_a_sign_in_ticket_is_won_by_exactly_one(self):
+        key = SoftKey(ORIGIN)
+        self.enroll(key)
+        begin = self.auth.signin_begin(OWNER)
+        response = key.get(begin["options"])
+        ours, theirs = self.with_competitor(
+            "challenges",
+            "ticket",
+            begin["ticket"],
+            self.auth.signin_complete,
+            begin["ticket"],
+            response,
+            OWNER,
+        )
+        self.assertEqual((ours, theirs), (True, False))
+
+    def test_an_enrollment_code_is_won_by_exactly_one(self):
+        code = self.auth.new_enroll_code("iPhone")
+        digest = auth_module._hash(auth_module.normalise_code(code))
+        ours, theirs = self.with_competitor(
+            "codes", "hash", digest, self.auth.enroll_begin, code, OWNER
+        )
+        self.assertEqual((ours, theirs), (True, False))
+
+
 if __name__ == "__main__":
     unittest.main()
