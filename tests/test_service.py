@@ -164,7 +164,9 @@ class StartupChecks(unittest.TestCase):
         def missing(path):
             raise FileNotFoundError(path)
 
-        self.assertTrue(checks.cannot_read(Path("/x/key"), refused).ok)
+        key = self.base / "refused.pem"
+        key.write_text("x")
+        self.assertTrue(checks.cannot_read(key, refused).ok)
         self.assertFalse(checks.cannot_read(Path("/x/key"), missing).ok)
         readable = self.base / "key.pem"
         readable.write_text("not a key")
@@ -849,6 +851,45 @@ class CodexReviewOfA89371f(unittest.TestCase):
         reply, rejected = self.serve_raw(b"NONSENSE\r\n\r\n")
         self.assertIn(b"400", reply.split(b"\r\n", 1)[0])
         self.assertEqual(rejected, [400])
+
+
+class CodexReviewOf39a39c3(unittest.TestCase):
+    """Codex's review of 39a39c3 (blocking): a forbidden folder that can't be listed but can be
+    entered still lets known files inside be opened, so it must not pass."""
+
+    def setUp(self):
+        self.base = tmpdir(self)
+
+    @staticmethod
+    def refused(path):
+        raise PermissionError(path)
+
+    def test_an_enterable_but_unlistable_folder_fails(self):
+        folder = self.base / "credentials"
+        folder.mkdir()
+        result = checks.cannot_read(folder, self.refused, can_enter=lambda p: True)
+        self.assertFalse(result.ok)
+        self.assertIn("ENTERABLE", result.detail)
+
+    def test_a_folder_that_cant_be_entered_passes(self):
+        folder = self.base / "credentials"
+        folder.mkdir()
+        self.assertTrue(checks.cannot_read(folder, self.refused, can_enter=lambda p: False).ok)
+
+    def test_an_unreadable_file_passes_whatever_its_execute_bit(self):
+        key = self.base / "key.pem"
+        key.write_text("x")
+        self.assertTrue(checks.cannot_read(key, self.refused, can_enter=lambda p: True).ok)
+
+    def test_a_path_behind_an_unenterable_folder_passes(self):
+        with mock.patch.object(checks.os, "stat", side_effect=PermissionError):
+            self.assertTrue(checks.cannot_read(self.base / "x" / "key", self.refused).ok)
+
+    def test_a_folder_that_can_be_listed_fails(self):
+        folder = self.base / "credentials"
+        folder.mkdir()
+        flags = os.O_RDONLY | os.O_DIRECTORY
+        self.assertFalse(checks.cannot_read(folder, lambda p: os.open(p, flags)).ok)
 
 
 if __name__ == "__main__":

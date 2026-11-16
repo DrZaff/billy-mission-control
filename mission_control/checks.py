@@ -115,14 +115,34 @@ def own_folder(path: Path, owner: int, label: str) -> Check:
     return Check(label, True, "protected")
 
 
-def cannot_read(path: Path, opener: Callable[[str], int] | None = None) -> Check:
-    """The account must not be able to open `path` at all. A path that doesn't exist fails too:
-    the config should list only real paths, so a typo can't silently skip the check."""
+def _can_enter(path: str) -> bool:
+    if os.access in os.supports_effective_ids:
+        return os.access(path, os.X_OK, effective_ids=True)
+    return os.access(path, os.X_OK)
+
+
+def cannot_read(
+    path: Path,
+    opener: Callable[[str], int] | None = None,
+    can_enter: Callable[[str], bool] = _can_enter,
+) -> Check:
+    """The account must not be able to read `path` at all. For a folder that means it can
+    neither list it nor enter it: a folder that can be entered but not listed still lets a known
+    file inside (a key at a known name) be opened. A path that doesn't exist fails too: the
+    config should list only real paths, so a typo can't silently skip the check."""
     name = f"cannot read {path}"
     opener = opener or (lambda p: os.open(p, os.O_RDONLY))
     try:
         fd = opener(str(path))
     except PermissionError:
+        try:
+            info = os.stat(path)
+        except PermissionError:
+            return Check(name, True, "unreachable, as it should be")
+        except OSError as error:
+            return Check(name, False, f"could not be checked ({type(error).__name__})")
+        if stat.S_ISDIR(info.st_mode) and can_enter(str(path)):
+            return Check(name, False, "ENTERABLE: files inside may be readable by name")
         return Check(name, True, "refused, as it should be")
     except FileNotFoundError:
         return Check(name, False, "does not exist: list only real paths")
