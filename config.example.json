@@ -6,5 +6,6 @@
   "proxy_uids": [0],
   "stop_socket": "/CHANGE-ME/run/stop-helper.sock",
   "events_db": "/CHANGE-ME/state/events.db",
+  "auth_db": "/CHANGE-ME/state/auth.db",
   "forbidden_paths": ["/CHANGE-ME/publisher-key.pem", "/CHANGE-ME/agent-credentials"]
 }

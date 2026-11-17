@@ -81,6 +81,12 @@ class Workflows(unittest.TestCase):
         self.assertIn("python dev.py test", text)
         self.assertIn("--require-hashes", text)
 
+    def test_ci_installs_the_runtime_pins_and_audits_them(self):
+        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("pip install --require-hashes -r requirements.txt", text)
+        self.assertIn("python tools/audit_deps.py requirements.txt", text)
+        self.assertLess(text.index("tools/audit_deps.py"), text.index("python dev.py test"))
+
 
 class App(unittest.TestCase):
     def test_no_outbound_network_or_process_execution(self):
@@ -116,9 +122,12 @@ class App(unittest.TestCase):
         removers = {"unlink", "remove", "rmdir", "rename", "replace", "truncate", "ftruncate"}
         self.assertEqual(names & (removers | {"O_TRUNC", "shutil"}), set())
 
-    def test_no_runtime_dependencies(self):
+    def test_one_runtime_dependency_for_sign_in_only(self):
+        # A4b (issue #10, owner decision 1): python-fido2, pinned with everything it needs by
+        # hash in requirements.txt. Adding another needs the owner's approval in a PR.
         text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertRegex(text, r"(?m)^dependencies = \[\]$")
+        self.assertRegex(text, r'(?m)^dependencies = \["fido2==2\.2\.1"\]$')
+        self.assertIn("fido2==2.2.1 \\", (ROOT / "requirements.txt").read_text(encoding="utf-8"))
 
 
 # Generic shapes of a server's details: absolute system paths, privilege escalation, a Node

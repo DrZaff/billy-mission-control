@@ -5,6 +5,7 @@ No network: everything runs on Unix sockets and files in a temporary folder.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -24,6 +25,7 @@ from wsgiref.util import setup_testing_defaults
 from mission_control import checks, stopper
 from mission_control import service as service_module
 from mission_control.app import LOGIN_KEY, RateLimit, Service, make_app
+from mission_control.auth import COOKIE, Auth
 from mission_control.config import ConfigError, parse_app, parse_stopper
 from mission_control.events import Events
 from mission_control.service import Handler, UnixWSGIServer, systemd_socket, trusted_login
@@ -51,10 +53,30 @@ def app_config_text(base: Path, **over) -> str:
         "proxy_uids": [0],
         "stop_socket": str(base / "run" / "stop.sock"),
         "events_db": str(base / "state" / "events.db"),
+        "auth_db": str(base / "state" / "auth.db"),
         "forbidden_paths": [str(base / "key.pem")],
     }
     data.update(over)
     return json.dumps(data)
+
+
+SESSION = "test-session-token"
+
+
+def signed_in(base: Path, login: str = OWNER) -> Auth:
+    """A real sign-in store holding one valid session for `login`, whose cookie the tests send.
+    (The passkey ceremonies themselves are tested in test_auth.py.)"""
+    auth = Auth(base / "auth.db", ORIGIN, OWNER)
+    auth.initialise()
+    db = sqlite3.connect(base / "auth.db")
+    now = time.time()
+    db.execute(
+        "INSERT INTO sessions (hash, login, credential, created, seen) VALUES (?, ?, ?, ?, ?)",
+        (hashlib.sha256(SESSION.encode()).hexdigest(), login, "cred", now, now),
+    )
+    db.commit()
+    db.close()
+    return auth
 
 
 # ---------------------------------------------------------------- config
@@ -406,7 +428,11 @@ class ServiceMode(unittest.TestCase):
         self.stops = []
         self.stop_result = True
         self.service = Service(
-            config=self.cfg, events=self.events, stop=self.fake_stop, token="test-token"
+            config=self.cfg,
+            events=self.events,
+            stop=self.fake_stop,
+            auth=signed_in(self.base),
+            token="test-token",
         )
         self.app = make_app(service=self.service)
 
@@ -419,6 +445,7 @@ class ServiceMode(unittest.TestCase):
         setup_testing_defaults(environ)
         environ[LOGIN_KEY] = login
         environ["wsgi.input"] = io.BytesIO(body)
+        environ["HTTP_COOKIE"] = f"{COOKIE}={SESSION}"
         environ.update(headers)
         captured = {}
 
@@ -507,7 +534,9 @@ class ServiceMode(unittest.TestCase):
         self.assertTrue(all(r.startswith("refused:") for r in refusals))
 
     def test_a_token_from_before_a_restart_is_refused(self):
-        restarted = Service(config=self.cfg, events=self.events, stop=self.fake_stop)
+        restarted = Service(
+            config=self.cfg, events=self.events, stop=self.fake_stop, auth=self.service.auth
+        )
         self.assertNotEqual(restarted.token, "test-token")
         self.app = make_app(service=restarted)
         status, _, body = self.stop_post()
@@ -569,7 +598,9 @@ class UnixServer(unittest.TestCase):
         self.events = Events(self.base / "events.db")
         self.events.initialise()
         self.refused = []
-        self.service = Service(config=self.cfg, events=self.events, stop=lambda: True)
+        self.service = Service(
+            config=self.cfg, events=self.events, stop=lambda: True, auth=signed_in(self.base)
+        )
 
     def serve(self, proxy_uids, raw: bytes) -> bytes:
         path = self.base / "app.sock"
@@ -600,7 +631,13 @@ class UnixServer(unittest.TestCase):
         return data
 
     def request(self, *headers: str) -> bytes:
-        lines = ["GET / HTTP/1.1", "Host: mission-control", "Connection: close", *headers]
+        lines = [
+            "GET / HTTP/1.1",
+            "Host: mission-control",
+            "Connection: close",
+            f"Cookie: {COOKIE}={SESSION}",
+            *headers,
+        ]
         return ("\r\n".join(lines) + "\r\n\r\n").encode()
 
     def status(self, data: bytes) -> str:
@@ -831,7 +868,9 @@ class CodexReviewOfA89371f(unittest.TestCase):
         listener.listen(1)
         server = UnixWSGIServer(
             listener,
-            make_app(service=Service(config=cfg, events=events, stop=lambda: True)),
+            make_app(
+                service=Service(config=cfg, events=events, stop=lambda: True, auth=signed_in(base))
+            ),
             {UID},
             on_rejected=rejected.append,
         )
@@ -1012,7 +1051,9 @@ class CodexReviewOfF131dd9(unittest.TestCase):
         listener.listen(1)
         server = UnixWSGIServer(
             listener,
-            make_app(service=Service(config=cfg, events=events, stop=lambda: True)),
+            make_app(
+                service=Service(config=cfg, events=events, stop=lambda: True, auth=signed_in(base))
+            ),
             {UID},
             on_rejected=rejected.append,
         )
@@ -1093,7 +1134,11 @@ class CodexReviewOf8b52f99(unittest.TestCase):
         stops = []
         app = make_app(
             service=Service(
-                config=cfg, events=events, stop=lambda: stops.append(1) or True, token="t"
+                config=cfg,
+                events=events,
+                stop=lambda: stops.append(1) or True,
+                auth=signed_in(base),
+                token="t",
             )
         )
 
@@ -1107,6 +1152,7 @@ class CodexReviewOf8b52f99(unittest.TestCase):
             environ.update(
                 {
                     LOGIN_KEY: OWNER,
+                    "HTTP_COOKIE": f"{COOKIE}={SESSION}",
                     "HTTP_ORIGIN": ORIGIN,
                     "HTTP_SEC_FETCH_SITE": "same-origin",
                     "CONTENT_TYPE": "application/x-www-form-urlencoded",
@@ -1145,7 +1191,9 @@ class CodexReviewOf051e567(unittest.TestCase):
         listener.listen(1)
         server = UnixWSGIServer(
             listener,
-            make_app(service=Service(config=cfg, events=events, stop=lambda: True)),
+            make_app(
+                service=Service(config=cfg, events=events, stop=lambda: True, auth=signed_in(base))
+            ),
             {UID},
             on_rejected=rejected.append,
         )

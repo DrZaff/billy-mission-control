@@ -37,6 +37,7 @@ class AppConfig:
     proxy_uids: tuple[int, ...]
     stop_socket: Path
     events_db: Path
+    auth_db: Path
     forbidden_paths: tuple[Path, ...]
 
 
@@ -98,6 +99,7 @@ def parse_app(text: str) -> AppConfig:
             "proxy_uids",
             "stop_socket",
             "events_db",
+            "auth_db",
             "forbidden_paths",
         },
         "config",
@@ -124,6 +126,7 @@ def parse_app(text: str) -> AppConfig:
         proxy_uids=tuple(uids),
         stop_socket=_path(d["stop_socket"], "stop_socket"),
         events_db=_path(d["events_db"], "events_db"),
+        auth_db=_path(d["auth_db"], "auth_db"),
         forbidden_paths=_paths(d["forbidden_paths"], "forbidden_paths"),
     )
 

@@ -428,7 +428,7 @@ def _stop_form(token: str) -> str:
     )
 
 
-def settings(demo: Demo, stop_token: str | None = None) -> str:
+def settings(demo: Demo, stop_token: str | None = None, signed_in: bool = False) -> str:
     if stop_token is None:
         stop = (
             '<section aria-labelledby="h-stop"><h2 id="h-stop">Stop switch</h2>'
@@ -440,7 +440,15 @@ def settings(demo: Demo, stop_token: str | None = None) -> str:
     else:
         stop = _stop_form(stop_token)
         account = (
-            "<p>Signed in through Tailscale as the owner. The passkey arrives with phase A4b.</p>"
+            "<p>Signed in as the owner: Tailscale and a passkey. Sessions end after 30 minutes "
+            "idle, or 12 hours at most.</p>"
+            '<form method="post" action="/signout">'
+            f'<input type="hidden" name="token" value="{_e(stop_token)}">'
+            '<button type="submit" class="plain-button">Sign out</button></form>'
+            '<p class="note">Passkeys are added, listed and removed only from a shell on the '
+            "server.</p>"
+            if signed_in
+            else "<p>Signed in through Tailscale as the owner.</p>"
         )
     body = (
         "<h1>Settings</h1>"
@@ -450,6 +458,57 @@ def settings(demo: Demo, stop_token: str | None = None) -> str:
         f'<section aria-labelledby="h-account"><h2 id="h-account">Account</h2>{account}</section>'
     )
     return page("Settings", "/settings", demo, body)
+
+
+def _signin_shell(title: str, mode: str, body: str) -> str:
+    """A sign-in page: the app's own script, no navigation (nothing else is reachable yet)."""
+    return (
+        "<!doctype html>\n"
+        '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<meta name="color-scheme" content="light dark">\n'
+        f"<title>{_e(title)} · Billy Mission Control</title>\n"
+        '<link rel="stylesheet" href="/static/app.css">\n'
+        '<script src="/static/passkey.js" defer></script>\n'
+        f'</head>\n<body data-mode="{_e(mode)}">\n'
+        '<header><p class="brand">[+] Billy Mission Control</p></header>\n'
+        f"<main>\n{body}\n"
+        '<p id="status" class="status" role="status" aria-live="polite"></p>\n'
+        "<noscript><p>Sign-in needs JavaScript for the passkey. Nothing else on this site "
+        "uses it.</p></noscript>\n"
+        "</main>\n</body>\n</html>\n"
+    )
+
+
+def signin_page() -> str:
+    return _signin_shell(
+        "Sign in",
+        "signin",
+        "<h1>Sign in</h1>"
+        "<p>Use your passkey: Face ID on this iPhone, or your security key.</p>"
+        '<button type="button" id="signin" class="plain-button">Sign in with a passkey</button>'
+        '<p class="note">No passkey yet? Make a one-time code on the server, then '
+        '<a href="/enroll">add a passkey</a>.</p>',
+    )
+
+
+def enroll_page() -> str:
+    return _signin_shell(
+        "Add a passkey",
+        "enroll",
+        "<h1>Add a passkey</h1>"
+        "<p>Enter the one-time code from <code>passkey enroll</code> on the server. It works "
+        "once, for 10 minutes. At most two passkeys: this iPhone and a backup security key.</p>"
+        # POST, never GET: without the script, the code must not land in the address bar,
+        # history or a referrer. The server refuses that POST (only the script's JSON call is
+        # accepted), and it never logs a request body.
+        '<form id="enroll" method="post" action="/enroll">'
+        '<label for="code">One-time code</label>'
+        '<input id="code" name="code" autocomplete="one-time-code" autocapitalize="characters" '
+        'spellcheck="false" maxlength="11" required>'
+        '<button type="submit" class="plain-button">Add passkey</button></form>'
+        '<p><a href="/signin">Back to sign in</a></p>',
+    )
 
 
 def stop_result(stopped: bool) -> str:

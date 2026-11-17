@@ -90,7 +90,7 @@ def private_file(path: Path, owner: int) -> Check:
 DATABASE_FILES = ("", "-journal", "-wal", "-shm")
 
 
-def private_database(path: Path, owner: int) -> Check:
+def private_database(path: Path, owner: int, label: str = "events database") -> Check:
     """The events database and SQLite's side files, where they exist: regular files (not
     symlinks) owned by `owner` that nobody else can read or write. A missing database is fine:
     the service creates it privately."""
@@ -101,12 +101,12 @@ def private_database(path: Path, owner: int) -> Check:
         except FileNotFoundError:
             continue
         except OSError:
-            return Check("events database", False, f"{part.name} is unreadable")
+            return Check(label, False, f"{part.name} is unreadable")
         if not stat.S_ISREG(info.st_mode):
-            return Check("events database", False, f"{part.name} is not a regular file")
+            return Check(label, False, f"{part.name} is not a regular file")
         if info.st_uid != owner or info.st_mode & 0o077:
-            return Check("events database", False, f"{part.name} is not private")
-    return Check("events database", True, "private, or not created yet")
+            return Check(label, False, f"{part.name} is not private")
+    return Check(label, True, "private, or not created yet")
 
 
 def own_folder(path: Path, owner: int, label: str) -> Check:
@@ -185,6 +185,9 @@ def app_checks(
         own_folder(cfg.events_db.parent, uid, "events folder"),
         private_database(cfg.events_db, uid),
         protected_above(cfg.events_db.parent, trusted),
+        own_folder(cfg.auth_db.parent, uid, "sign-in folder"),
+        private_database(cfg.auth_db, uid, "sign-in database"),
+        protected_above(cfg.auth_db.parent, trusted),
         helper_check,
         # Only root or the stop helper may own the folders above the stop socket, and none may
         # be shared (sticky): no other account can put a socket there, so a confirmation from
