@@ -88,6 +88,12 @@ class SecurityHeaders(unittest.TestCase):
         self.assertIn("frame-ancestors 'none'", csp)
         self.assertEqual(dict(SECURITY_HEADERS)["Cache-Control"], "no-store")
 
+    def test_referrer_policy_lets_form_posts_carry_their_origin(self):
+        # Under "no-referrer", a browser's plain form POST carries `Origin: null`, so the stop
+        # and sign-out buttons were refused with "origin" on a real iPhone (A4c). "same-origin"
+        # sends the origin to the app itself and no referrer to any other site.
+        self.assertEqual(dict(SECURITY_HEADERS)["Referrer-Policy"], "same-origin")
+
 
 if __name__ == "__main__":
     unittest.main()
