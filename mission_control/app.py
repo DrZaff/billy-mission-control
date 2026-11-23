@@ -43,7 +43,10 @@ SECURITY_HEADERS: list[tuple[str, str]] = [
     ),
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
-    ("Referrer-Policy", "no-referrer"),
+    # same-origin, not no-referrer: under no-referrer, browsers send `Origin: null` on a plain
+    # form post (the stop and sign-out buttons), which the same-origin check must refuse. Found
+    # on the real iPhone in A4c. same-origin still sends no referrer to any other site.
+    ("Referrer-Policy", "same-origin"),
     ("Cache-Control", "no-store"),
     ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
 ]
