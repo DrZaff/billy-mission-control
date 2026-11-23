@@ -340,6 +340,48 @@ class StopHelper(unittest.TestCase):
         self.assertTrue(self.marker.exists())
         self.assertEqual(lines, ["stop helper: stopped"])
 
+    def test_a_stuck_log_never_holds_back_the_confirmation(self):
+        # Codex's review of fce4cc8 (blocking): the log line was written before the connection
+        # closed, and the app confirms only at the end of the connection. A stalled journal
+        # turned a stop that was done into "could NOT be confirmed".
+        path = self.base / "stop.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        release = threading.Event()
+        self.addCleanup(release.set)
+        logged = []
+
+        def stuck_log(line: str) -> None:
+            release.wait(10)
+            logged.append(line)
+
+        thread = threading.Thread(
+            target=stopper.serve,
+            args=(listener, self.control, UID, UID),
+            kwargs={"log": stuck_log, "once": True},
+            daemon=True,
+        )
+        thread.start()
+        self.assertTrue(stopper.request_stop(path, frozenset({UID}), timeout=2))
+        self.assertTrue(self.marker.exists())
+        self.assertEqual(logged, [])  # the log was still stuck when the stop was confirmed
+        release.set()
+        thread.join(5)
+        self.assertEqual(logged, ["stop helper: stopped"])
+
+    def test_a_broken_log_never_stops_the_helper(self):
+        class Broken(io.StringIO):
+            def write(self, text):
+                raise BrokenPipeError
+
+            def flush(self):
+                raise BrokenPipeError
+
+        with mock.patch("sys.stdout", Broken()):
+            stopper.log_line("stop helper: stopped")  # no exception
+
     def test_request_stop_is_false_when_the_helper_is_unreachable(self):
         self.assertFalse(
             stopper.request_stop(self.base / "missing.sock", frozenset({UID}), timeout=0.5)

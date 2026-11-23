@@ -42,19 +42,22 @@
   }
 
   // What a refused step means, by the server's status. The server keeps the reasons generic
-  // (the events log has the detail); these only tell apart the cases the owner acts on
-  // differently. 503: the sign-in store is unavailable, so nobody can sign in or enroll.
-  function refused(result, otherwise) {
-    if (result.status === 503) {
-      return "Sign-in is unavailable right now (a problem on the server). Try again later. " +
-        "To stop Billy meanwhile, use the stop marker on the server.";
-    }
-    if (result.status === 429) return "Too many tries. Wait a minute, then try again.";
-    return otherwise;
+  // (the events log has the detail); the page only tells apart the cases the owner acts on
+  // differently. Each step names its own message for each status, and "other" for the rest:
+  // no status falls through to a message meant for another (Codex, A4c).
+  const UNAVAILABLE = "Sign-in is unavailable right now (a problem on the server). Try again " +
+    "later. To stop Billy meanwhile, use the stop marker on the server.";
+  const RELOAD = "The request was refused. Reload this page and try again.";
+  const NEW_CODE = "The one-time code is used up. Make a new one on the server, then reload " +
+    "this page.";
+
+  function explain(result, cases) {
+    return cases[result.status] || cases.other;
   }
 
-  // After a passkey is added, the code is spent: the form goes away so it can't be sent again
-  // (a second press was refused as a reused code and read like a failure, in A4c).
+  // Once enrollment has begun, the code is spent, whatever happens next: the form goes away
+  // so it can't be sent again (a second press was refused as a reused code and read like a
+  // failure, in A4c), and every message after that point asks for a new code.
   function finishEnroll() {
     const form = document.getElementById("enroll");
     if (form) form.hidden = true;
@@ -69,8 +72,14 @@
   async function enroll(code) {
     const begin = await post("/enroll/begin", { code: code });
     if (!begin.ok) {
-      return say(refused(begin, "That code didn't work: it was mistyped, used already, or " +
-        "more than 10 minutes old. Make a new one on the server."));
+      // The code is spent only when this step succeeds, so it may be tried again here.
+      return say(explain(begin, {
+        400: "That code didn't work: it was mistyped, used already, or more than 10 minutes " +
+          "old. Make a new one on the server.",
+        429: "Too many tries. Wait a minute, then try again.",
+        503: UNAVAILABLE,
+        other: RELOAD,
+      }));
     }
     const o = begin.data.options;
     const publicKey = Object.assign({}, o, {
@@ -83,12 +92,12 @@
       credential = await navigator.credentials.create({ publicKey: publicKey });
     } catch (error) {
       // The browser lists this device's passkey as already added (excludeCredentials).
+      finishEnroll();
       if (error && error.name === "InvalidStateError") {
-        finishEnroll();
         return say("This device already has a passkey for Mission Control. Nothing was " +
           "added; sign in with the one you have.");
       }
-      throw error;
+      return say("Cancelled, or the passkey didn't respond. Nothing was added. " + NEW_CODE);
     }
     const done = await post("/enroll/complete", {
       ticket: begin.data.ticket,
@@ -102,18 +111,25 @@
         },
       },
     });
-    if (done.ok) {
-      finishEnroll();
-      return say("Passkey added. You can sign in now.");
-    }
-    say(refused(done, "The passkey was not added. Make a new code on the server and try again."));
+    finishEnroll();
+    if (done.ok) return say("Passkey added. You can sign in now.");
+    say(explain(done, {
+      429: "Too many tries. Nothing was added. Wait a minute. " + NEW_CODE,
+      503: UNAVAILABLE + " Nothing was added; once it works again: " + NEW_CODE,
+      other: "The passkey was not added. " + NEW_CODE,
+    }));
   }
 
   async function signin() {
     const begin = await post("/signin/begin", {});
     if (!begin.ok) {
-      return say(refused(begin, "No passkey is set up yet. Make a one-time code on the " +
-        "server, then add a passkey."));
+      return say(explain(begin, {
+        400: "No passkey is set up yet. Make a one-time code on the server, then add a " +
+          "passkey.",
+        429: "Too many tries. Wait a minute, then try again.",
+        503: UNAVAILABLE,
+        other: RELOAD,
+      }));
     }
     const o = begin.data.options;
     const publicKey = Object.assign({}, o, {
@@ -139,7 +155,11 @@
     if (done.ok) {
       window.location.assign("/");
     } else {
-      say(refused(done, "Sign-in failed. Try again."));
+      say(explain(done, {
+        429: "Too many tries. Wait a minute, then try again.",
+        503: UNAVAILABLE,
+        other: "Sign-in failed. Try again.",
+      }));
     }
   }
 

@@ -636,13 +636,34 @@ class Policies(unittest.TestCase):
 
     def test_the_script_tells_the_owner_which_failure_it_is(self):
         # A4c: with the sign-in store down, the page said "Add a passkey first", and a second
-        # press after a successful enrollment read like a failure.
+        # press after a successful enrollment read like a failure. Codex's review of fce4cc8:
+        # each step must map each status to its own message, never fall through to another
+        # step's (a 403 read as "no passkey"; a 429 after the code was spent said "try again").
         js = (ROOT / "mission_control" / "static" / "passkey.js").read_text(encoding="utf-8")
-        self.assertIn("result.status === 503", js)  # unavailable, not "no passkey"
-        self.assertIn("result.status === 429", js)
+        tables = {}
+        for step in ("enroll/begin", "enroll/complete", "signin/begin", "signin/complete"):
+            after = js.split(f'post("/{step}"', 1)[1]
+            table = after.split("explain(", 1)[1].split("}));", 1)[0]
+            tables[step] = dict(re.findall(r"^\s*(\d{3}|other): (.+?),?$", table, re.M | re.S))
+        for step, table in tables.items():
+            self.assertIn("other", table, step)
+            self.assertTrue(table["503"].startswith("UNAVAILABLE"), step)
+            self.assertIn("429", table, step)
+        # "No passkey" only when the server said so (400 at sign-in begin), never for others.
+        self.assertIn("No passkey is set up yet", tables["signin/begin"]["400"])
+        self.assertEqual(tables["signin/begin"]["other"], "RELOAD")
+        self.assertEqual(js.count("No passkey is set up yet"), 1)
         self.assertNotIn("Add a passkey first", js)
+        # Once enrollment has begun, the code is spent: every outcome asks for a new one.
+        for status, message in tables["enroll/complete"].items():
+            self.assertIn("NEW_CODE", message, status)
+        # ...including a cancelled Face ID (between creating the passkey and sending it).
+        cancelled = js.split("navigator.credentials.create", 1)[1].split('post("/enroll/complete"')[
+            0
+        ]
+        self.assertIn("NEW_CODE", cancelled)
         self.assertIn('"InvalidStateError"', js)  # this device already has a passkey
-        self.assertEqual(js.count("finishEnroll();"), 2)  # after success, and after "already"
+        self.assertEqual(js.count("finishEnroll();"), 2)  # once creation starts, either way
         css = (ROOT / "mission_control" / "static" / "app.css").read_text(encoding="utf-8")
         self.assertIn("form#enroll[hidden]", css)  # its display: grid would override hidden
 

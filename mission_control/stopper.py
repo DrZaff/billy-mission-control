@@ -120,8 +120,12 @@ def handle(conn: socket.socket, control_dir: Path, owner: int, client_uid: int) 
 
 def log_line(text: str) -> None:
     """One line for the helper's log, flushed at once. Under systemd, stdout is a pipe, and
-    Python holds unflushed lines in a buffer: a stop could be done but not yet in the journal."""
-    print(text, flush=True)
+    Python holds unflushed lines in a buffer: a stop could be done but not yet in the journal.
+    A broken log never stops the helper: the marker is the record that matters."""
+    try:
+        print(text, flush=True)
+    except (OSError, ValueError):
+        pass
 
 
 def serve(
@@ -133,11 +137,14 @@ def serve(
     once: bool = False,
 ) -> None:
     """Answer requests one at a time. Each connection has a short timeout, so a stuck client
-    holds the helper for at most TIMEOUT seconds."""
+    holds the helper for at most TIMEOUT seconds. The connection is closed before the log line
+    is written: the app confirms a stop only at the end of the connection, so a slow or stuck
+    log must never hold back a confirmation (Codex, A4c)."""
     while True:
         conn, _ = listener.accept()
         with conn:
-            log("stop helper: " + handle(conn, control_dir, owner, client_uid))
+            result = handle(conn, control_dir, owner, client_uid)
+        log("stop helper: " + result)
         if once:
             return
 
