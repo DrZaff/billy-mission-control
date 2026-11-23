@@ -237,7 +237,9 @@ def home(demo: Demo) -> str:
         parts.append(_section(f"h-{key}", heading, cards, len(items)))
     done = len(groups["done"])
     parts.append(f'<p><a href="/tasks#done">{done} merged or closed: see Tasks</a></p>')
-    parts.append(_stop_line(demo))
+    # Not the demo's stop state: on the server it read like Billy's real state (A4c). The
+    # stop switch lives on Settings.
+    parts.append('<p class="stop"><a href="/settings#h-stop">Stop switch: on Settings</a></p>')
     return page("Home", "/", demo, "<h1>Home</h1>" + "".join(parts))
 
 

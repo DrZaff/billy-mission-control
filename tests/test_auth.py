@@ -634,6 +634,18 @@ class Policies(unittest.TestCase):
             ["/enroll/begin", "/enroll/complete", "/signin/begin", "/signin/complete"],
         )
 
+    def test_the_script_tells_the_owner_which_failure_it_is(self):
+        # A4c: with the sign-in store down, the page said "Add a passkey first", and a second
+        # press after a successful enrollment read like a failure.
+        js = (ROOT / "mission_control" / "static" / "passkey.js").read_text(encoding="utf-8")
+        self.assertIn("result.status === 503", js)  # unavailable, not "no passkey"
+        self.assertIn("result.status === 429", js)
+        self.assertNotIn("Add a passkey first", js)
+        self.assertIn('"InvalidStateError"', js)  # this device already has a passkey
+        self.assertEqual(js.count("finishEnroll();"), 2)  # after success, and after "already"
+        css = (ROOT / "mission_control" / "static" / "app.css").read_text(encoding="utf-8")
+        self.assertIn("form#enroll[hidden]", css)  # its display: grid would override hidden
+
     def test_the_rules_are_the_issues(self):
         self.assertEqual(auth_module.MAX_CREDENTIALS, 2)
         self.assertEqual(CODE_TTL, 600)

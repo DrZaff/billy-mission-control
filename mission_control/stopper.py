@@ -118,12 +118,18 @@ def handle(conn: socket.socket, control_dir: Path, owner: int, client_uid: int) 
         return "error: connection"
 
 
+def log_line(text: str) -> None:
+    """One line for the helper's log, flushed at once. Under systemd, stdout is a pipe, and
+    Python holds unflushed lines in a buffer: a stop could be done but not yet in the journal."""
+    print(text, flush=True)
+
+
 def serve(
     listener: socket.socket,
     control_dir: Path,
     owner: int,
     client_uid: int,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] = log_line,
     once: bool = False,
 ) -> None:
     """Answer requests one at a time. Each connection has a short timeout, so a stuck client

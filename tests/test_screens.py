@@ -163,7 +163,10 @@ class Screens(unittest.TestCase):
         self.assertLess(waiting, running)
         self.assertLess(running, alerts)
         self.assertIn('href="#h-alerts"', body)  # the summary jumps straight to alerts
-        self.assertIn("Stop switch:", body)
+        self.assertIn('href="/settings#h-stop"', body)  # the stop switch is one tap away
+        # ...but Home never shows a stop state: the demo's read like Billy's real one (A4c).
+        self.assertNotIn("runs may start", body)
+        self.assertNotIn("no new runs start", body)
 
     def test_home_lists_every_task_but_the_done_ones(self):
         _, _, body = call(APP, "/")

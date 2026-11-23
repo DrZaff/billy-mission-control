@@ -349,6 +349,44 @@ class StopHelper(unittest.TestCase):
 # ---------------------------------------------------------------- events
 
 
+class StopHelperLog(unittest.TestCase):
+    """A4c: under systemd, stdout is a pipe. The helper's "stop helper: stopped" line sat in
+    Python's buffer and never reached the journal while the helper kept running."""
+
+    def test_each_log_line_leaves_the_process_at_once(self):
+        path = tmpdir(self) / "s.sock"
+        script = (
+            "import socket, sys, time\n"
+            "from pathlib import Path\n"
+            "from mission_control import stopper\n"
+            "l = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+            f"l.bind({str(path)!r}); l.listen(1)\n"
+            "print('listening', flush=True)\n"
+            "stopper.serve(l, Path('/nonexistent'), 0, -1, once=True)\n"  # default log
+            "time.sleep(30)\n"  # still running, as the real helper is
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            # As systemd starts it: without this, a developer's or CI's setting would hide the
+            # buffering this test is about.
+            env={k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"},
+        )
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        self.assertEqual(proc.stdout.readline().strip(), "listening")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.connect(str(path))
+            conn.recv(64)  # refused: wrong account
+        got: list[str] = []
+        reader = threading.Thread(target=lambda: got.append(proc.stdout.readline()), daemon=True)
+        reader.start()
+        reader.join(5)
+        self.assertTrue(got and got[0].startswith("stop helper: refused"), got)
+
+
 class EventsLog(unittest.TestCase):
     def setUp(self):
         self.base = tmpdir(self)

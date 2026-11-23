@@ -38,7 +38,26 @@
     } catch (error) {
       data = {};
     }
-    return { ok: response.ok, data: data };
+    return { ok: response.ok, status: response.status, data: data };
+  }
+
+  // What a refused step means, by the server's status. The server keeps the reasons generic
+  // (the events log has the detail); these only tell apart the cases the owner acts on
+  // differently. 503: the sign-in store is unavailable, so nobody can sign in or enroll.
+  function refused(result, otherwise) {
+    if (result.status === 503) {
+      return "Sign-in is unavailable right now (a problem on the server). Try again later. " +
+        "To stop Billy meanwhile, use the stop marker on the server.";
+    }
+    if (result.status === 429) return "Too many tries. Wait a minute, then try again.";
+    return otherwise;
+  }
+
+  // After a passkey is added, the code is spent: the form goes away so it can't be sent again
+  // (a second press was refused as a reused code and read like a failure, in A4c).
+  function finishEnroll() {
+    const form = document.getElementById("enroll");
+    if (form) form.hidden = true;
   }
 
   function descriptors(list) {
@@ -49,14 +68,28 @@
 
   async function enroll(code) {
     const begin = await post("/enroll/begin", { code: code });
-    if (!begin.ok) return say("That code didn't work. Make a new one on the server.");
+    if (!begin.ok) {
+      return say(refused(begin, "That code didn't work: it was mistyped, used already, or " +
+        "more than 10 minutes old. Make a new one on the server."));
+    }
     const o = begin.data.options;
     const publicKey = Object.assign({}, o, {
       challenge: fromB64url(o.challenge),
       user: Object.assign({}, o.user, { id: fromB64url(o.user.id) }),
       excludeCredentials: descriptors(o.excludeCredentials),
     });
-    const credential = await navigator.credentials.create({ publicKey: publicKey });
+    let credential;
+    try {
+      credential = await navigator.credentials.create({ publicKey: publicKey });
+    } catch (error) {
+      // The browser lists this device's passkey as already added (excludeCredentials).
+      if (error && error.name === "InvalidStateError") {
+        finishEnroll();
+        return say("This device already has a passkey for Mission Control. Nothing was " +
+          "added; sign in with the one you have.");
+      }
+      throw error;
+    }
     const done = await post("/enroll/complete", {
       ticket: begin.data.ticket,
       credential: {
@@ -69,12 +102,19 @@
         },
       },
     });
-    say(done.ok ? "Passkey added. You can sign in now." : "The passkey was not added.");
+    if (done.ok) {
+      finishEnroll();
+      return say("Passkey added. You can sign in now.");
+    }
+    say(refused(done, "The passkey was not added. Make a new code on the server and try again."));
   }
 
   async function signin() {
     const begin = await post("/signin/begin", {});
-    if (!begin.ok) return say("Sign-in isn't available. Add a passkey first.");
+    if (!begin.ok) {
+      return say(refused(begin, "No passkey is set up yet. Make a one-time code on the " +
+        "server, then add a passkey."));
+    }
     const o = begin.data.options;
     const publicKey = Object.assign({}, o, {
       challenge: fromB64url(o.challenge),
@@ -99,7 +139,7 @@
     if (done.ok) {
       window.location.assign("/");
     } else {
-      say("Sign-in failed. Try again.");
+      say(refused(done, "Sign-in failed. Try again."));
     }
   }
 

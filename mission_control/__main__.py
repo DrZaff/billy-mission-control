@@ -170,11 +170,11 @@ def service_main(argv: list[str]) -> int:
     if args.command == "stopper":
         import pwd
 
-        from .stopper import serve
+        from .stopper import log_line, serve
 
         client_uid = pwd.getpwnam(cfg.client_account).pw_uid
-        print("Stop helper ready.", flush=True)
-        serve(listener, cfg.control_dir, os.geteuid(), client_uid, log=print)
+        log_line("Stop helper ready.")
+        serve(listener, cfg.control_dir, os.geteuid(), client_uid, log=log_line)
         return 0
 
     from .app import Service, make_app
