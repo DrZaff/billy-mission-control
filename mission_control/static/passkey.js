@@ -137,8 +137,13 @@
         NEW_CODE);
     }
     if (done.ok) return say("Passkey added. You can sign in now.");
-    // Only these statuses come from the app itself, and each means nothing was saved. Any
-    // other (a gateway's 502, say) may arrive after the app saved it (Codex, 785bcf2).
+    // A refusal is known to come from the app itself only when it carries the app's own body,
+    // {"ok": false}; each of those means nothing was saved. Anything else (a gateway's 502 or
+    // 503, say) may arrive after the app saved it, so the page doesn't guess (Codex, 785bcf2
+    // and 0fad454: a status number alone can't tell the app's 503 from a gateway's).
+    if (!(done.data && done.data.ok === false)) {
+      return say("Mission Control didn't answer normally. " + MAYBE_ADDED + NEW_CODE);
+    }
     say(explain(done, {
       // 400 includes a racing enrollment that took the last of the two slots: the server
       // issues no new code at the limit, so that case comes first (Codex, 785bcf2).

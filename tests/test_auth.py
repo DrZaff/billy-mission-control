@@ -686,6 +686,13 @@ class Policies(unittest.TestCase):
         self.assertIn("MAYBE_ADDED", complete["other"])
         for status in ("400", "403", "429", "503"):
             self.assertNotIn("MAYBE_ADDED", complete[status], status)
+        # The definite messages are used only for the app's own refusals, which carry
+        # {"ok": false}; a gateway's 503 has no such body (Codex, 0fad454).
+        handled = js.split('post("/enroll/complete"', 1)[1].split("if (done.ok)", 1)[1]
+        check = "if (!(done.data && done.data.ok === false))"
+        self.assertIn(check, handled)
+        self.assertLess(handled.index(check), handled.index("explain(done"))
+        self.assertIn("MAYBE_ADDED", handled.split(check, 1)[1].split("}", 1)[0])
         # ...and a 400 may be a racing enrollment that took the last slot: revoke one first.
         self.assertIn("shows two passkeys", complete["400"])
         self.assertLess(complete["400"].index("revoke one"), complete["400"].index("NEW_CODE"))
