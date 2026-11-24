@@ -45,6 +45,7 @@ MAX_SNAPSHOT = 2 * 1024 * 1024
 SHA = re.compile(r"[0-9a-f]{40}")
 CONTROL = re.compile(r"[\x00-\x1f\x7f  ‪-‮⁦-⁩]")
 REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"}
+CHECK_EVENTS = ("pull_request", "pull_request_target", "push", "merge_group")
 CHECK_STATUS = {"QUEUED": "queued", "IN_PROGRESS": "in_progress", "COMPLETED": "completed"}
 
 QUERY = Template("""
@@ -65,7 +66,8 @@ fragment pr on PullRequest {
   number title state isDraft merged closedAt
   mergedBy { login }
   headRefName headRefOid
-  files(first: $files) { totalCount nodes { path } }
+  updatedAt
+  files(first: $files) { totalCount nodes { path changeType } }
   reviews(last: $reviews) {
     totalCount
     nodes { state submittedAt author { __typename login } commit { oid } }
@@ -75,6 +77,7 @@ fragment pr on PullRequest {
       totalCount
       nodes {
         app { slug }
+        workflowRun { event }
         checkRuns(first: $runs) { totalCount nodes { name status conclusion } }
       }
     } } }
@@ -198,8 +201,14 @@ def _files(pr: dict) -> list[str]:
     plain, bounded string leaves the list out, so the model shows UNKNOWN."""
     paths = []
     for node in _connection(pr.get("files"), MAX_FILES):
-        path = _obj(node).get("path")
+        n = _obj(node)
+        path = n.get("path")
         if not isinstance(path, str) or not 0 < len(path) <= 4096 or "\x00" in path:
+            raise _Incomplete()
+        # A renamed or copied file is listed by its new path only, so a move out of a clinical
+        # folder would hide where it came from: the list isn't complete (Codex's review of
+        # f37d0c7), and the model shows UNKNOWN.
+        if n.get("changeType") not in ("ADDED", "MODIFIED", "DELETED", "CHANGED"):
             raise _Incomplete()
         paths.append(path)
     return paths
@@ -247,6 +256,13 @@ def _checks(pr: dict, head: str, app: str) -> list[dict]:
         suite = _obj(suite)
         suite_app = suite.get("app")
         if not isinstance(suite_app, dict) or suite_app.get("slug") != app:
+            continue
+        # Only runs started by a pull request, a push or the merge queue can stand for a PR's
+        # required checks; GitHub leaves out a manually dispatched or scheduled run, and so
+        # does this (Codex's review of f37d0c7). The aim is never to look greener than GitHub:
+        # its ruleset, shown in the merge box, stays the authority on what can merge.
+        run_event = _obj(suite.get("workflowRun") or {}).get("event")
+        if run_event not in CHECK_EVENTS:
             continue
         for run in _connection(suite.get("checkRuns"), MAX_RUNS):
             r = _obj(run)
@@ -378,18 +394,27 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
 
 
 def repo_items(repo: str, cfg: FetcherConfig, data: dict, now: datetime) -> tuple[list, bool]:
-    """(items, whether more open pull requests exist than one request returned)."""
+    """(items, whether more pull requests may exist than one request returned: open ones
+    past the first page, or closed ones in the 14-day window past it)."""
     repository = _obj(_obj(data).get("repository"))
     open_conn = _obj(repository.get("open"))
     open_nodes = _list(open_conn.get("nodes"))
     more_open = _int(open_conn.get("totalCount")) > len(open_nodes)
     since = now - timedelta(days=RECENT_DAYS)
     items = [_item(repo, cfg, n) for n in open_nodes]
-    for node in _list(_obj(repository.get("closed")).get("nodes")):
+    closed_nodes = _list(_obj(repository.get("closed")).get("nodes"))
+    for node in closed_nodes:
         closed_at = _obj(node).get("closedAt")
         if closed_at is not None and datetime.fromisoformat(_time(closed_at)) >= since:
             items.append(_item(repo, cfg, node))
-    return items, more_open
+    # Closed pull requests come newest-updated first: if the last one on a full page was
+    # still updated in the window, more may lie past it. Say so rather than drop them
+    # silently (Codex's review of f37d0c7).
+    more_closed = False
+    if len(closed_nodes) >= MAX_CLOSED:
+        last = _obj(closed_nodes[-1]).get("updatedAt")
+        more_closed = last is None or datetime.fromisoformat(_time(last)) >= since
+    return items, more_open or more_closed
 
 
 def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:

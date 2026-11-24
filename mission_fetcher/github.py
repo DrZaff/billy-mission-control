@@ -199,8 +199,8 @@ class GitHub:
         if answer.get("permissions") != EXPECTED_PERMISSIONS:
             # Refused, and revoked first: it must not stay valid for its hour (Codex's review
             # of f772122).
-            self.revoke(token)
-            raise FetchError("token-not-read-only")
+            revoked = self.revoke(token)
+            raise FetchError("token-not-read-only" + ("" if revoked else "+token-not-revoked"))
         return token
 
     def repositories(self, token: str, repos: list[str]) -> None:

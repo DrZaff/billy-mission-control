@@ -85,6 +85,9 @@ def pr_node(
     merged=False,
     files_total=None,
     checks_app="github-actions",
+    check_event="pull_request",
+    renamed=(),
+    updated_at=None,
 ):
     node = {
         "number": number,
@@ -93,12 +96,15 @@ def pr_node(
         "isDraft": False,
         "merged": merged,
         "closedAt": closed_at,
+        "updatedAt": updated_at or closed_at or "2026-11-23T00:00:00Z",
         "mergedBy": {"login": OWNER} if merged else None,
         "headRefName": f"claude/task-{number}",
         "headRefOid": head,
         "files": {
             "totalCount": len(files) if files_total is None else files_total,
-            "nodes": [{"path": p} for p in files],
+            "nodes": [
+                {"path": p, "changeType": "RENAMED" if p in renamed else "MODIFIED"} for p in files
+            ],
         },
         "reviews": {"totalCount": len(reviews), "nodes": list(reviews)},
         "commits": {
@@ -111,6 +117,7 @@ def pr_node(
                             "nodes": [
                                 {
                                     "app": {"slug": checks_app},
+                                    "workflowRun": {"event": check_event},
                                     "checkRuns": {
                                         "totalCount": len(checks),
                                         "nodes": [
@@ -356,6 +363,12 @@ class ReadOnlyApp(Base):
         self.fake.installed.append("example-owner/other")
         self.refused("wrong-repositories", step="repositories")
 
+    def test_a_refused_token_that_could_not_be_revoked_says_so(self):
+        # Codex's review of f37d0c7.
+        self.fake.token_permissions["pull_requests"] = "write"
+        self.fake.fail["/installation/token"] = (500, {}, b"")
+        self.refused("token-not-read-only+token-not-revoked", step="token")
+
     def test_a_token_that_is_not_read_only_is_refused_and_revoked(self):
         # Codex's review of f772122 (blocking): it was refused but left valid for its hour.
         self.fake.token_permissions["pull_requests"] = "write"
@@ -556,6 +569,52 @@ class Refresh(Base):
                 ]
                 item = self.run_refresh()["items"][0]
                 self.assertIn(flag, tasks.derive(self.task_of(item)).flags)
+
+    def test_a_renamed_file_makes_the_file_list_incomplete(self):
+        # Codex's review of f37d0c7 (blocking): a rename lists only the new path, so a move out
+        # of a clinical folder would hide where it came from.
+        self.fake.prs[REPO_A]["open"][0] = pr_node(
+            1, issue=issue_node(10), files=("site/moved.md",), renamed=("site/moved.md",)
+        )
+        item = self.run_refresh()["items"][0]
+        self.assertNotIn("files", item["task"]["pull_request"])
+        self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNKNOWN)
+
+    def test_a_manually_dispatched_run_never_counts(self):
+        # Codex's review of f37d0c7 (blocking): GitHub leaves runs from workflow_dispatch out of
+        # a PR's required checks.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        for event, flag in (
+            ("pull_request", tasks.Flag.CHECKS_PASSED),
+            ("push", tasks.Flag.CHECKS_PASSED),
+            ("workflow_dispatch", tasks.Flag.CHECKS_MISSING),
+            ("schedule", tasks.Flag.CHECKS_MISSING),
+        ):
+            with self.subTest(event=event):
+                self.fake.prs[REPO_A]["open"] = []
+                self.fake.prs[REPO_A]["closed"] = [
+                    pr_node(
+                        1,
+                        state="MERGED",
+                        merged=True,
+                        closed_at=recent,
+                        issue=issue_node(10),
+                        check_event=event,
+                    )
+                ]
+                item = self.run_refresh()["items"][0]
+                self.assertIn(flag, tasks.derive(self.task_of(item)).flags)
+
+    def test_a_full_page_of_recently_updated_closed_prs_is_flagged(self):
+        # Codex's review of f37d0c7: more closed pull requests could lie past the first page.
+        recent = (NOW - timedelta(days=2)).isoformat()
+        self.fake.prs[REPO_B]["closed"] = [
+            pr_node(100 + i, state="CLOSED", closed_at=recent) for i in range(snapshot.MAX_CLOSED)
+        ]
+        self.assertIn(REPO_B, self.run_refresh()["truncated"])
+        old = (NOW - timedelta(days=30)).isoformat()
+        self.fake.prs[REPO_B]["closed"][-1] = pr_node(199, state="CLOSED", closed_at=old)
+        self.assertNotIn(REPO_B, self.run_refresh()["truncated"])
 
     def test_a_failed_refresh_says_when_the_token_outlived_it(self):
         # Codex's review of bf76866: a failed revoke was reported only on success.
