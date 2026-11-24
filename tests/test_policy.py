@@ -157,6 +157,9 @@ class App(unittest.TestCase):
         self.assertEqual(ast.unparse(call.args[1]), "443")
         # No redirects or proxy settings: nothing reads the environment.
         names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        # TLS is set up by hand: create_default_context() honours SSLKEYLOGFILE and would write
+        # session secrets (Codex's review of f772122).
+        self.assertNotIn("create_default_context", names)
         self.assertNotIn("environ", names)
         self.assertNotIn("getenv", names)
 

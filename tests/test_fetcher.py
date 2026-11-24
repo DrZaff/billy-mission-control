@@ -125,11 +125,12 @@ def pr_node(
     return node
 
 
-def issue_node(number, actor=OWNER, label="agent:ready"):
+def issue_node(number, actor=OWNER, label="agent:ready", repo=REPO_A):
     return {
         "number": number,
         "title": "A synthetic issue",
         "state": "OPEN",
+        "repository": {"nameWithOwner": repo},
         "timelineItems": {
             "totalCount": 1,
             "nodes": [
@@ -161,7 +162,7 @@ class FakeGitHub:
                 "open": [pr_node(1, issue=issue_node(10)), pr_node(2)],
                 "closed": [],
             },
-            REPO_B: {"open": [pr_node(3, issue=issue_node(11))], "closed": []},
+            REPO_B: {"open": [pr_node(3, issue=issue_node(11, repo=REPO_B))], "closed": []},
         }
         self.fail = {}  # path -> (status, headers, body) or an exception
         self.calls = []
@@ -344,9 +345,29 @@ class ReadOnlyApp(Base):
         self.fake.installed.append("example-owner/other")
         self.refused("wrong-repositories", step="repositories")
 
-    def test_a_token_that_is_not_read_only_is_refused(self):
+    def test_a_token_that_is_not_read_only_is_refused_and_revoked(self):
+        # Codex's review of f772122 (blocking): it was refused but left valid for its hour.
         self.fake.token_permissions["pull_requests"] = "write"
         self.refused("token-not-read-only", step="token")
+        self.assertEqual(self.fake.revoked, 1)
+
+    def test_tls_never_writes_a_key_log(self):
+        # Codex's review of f772122 (blocking): create_default_context() reads SSLKEYLOGFILE.
+        keylog = self.base / "keys.log"
+        saved = os.environ.get("SSLKEYLOGFILE")
+        os.environ["SSLKEYLOGFILE"] = str(keylog)
+        try:
+            context = gh.tls_context()
+        finally:
+            if saved is None:
+                del os.environ["SSLKEYLOGFILE"]
+            else:
+                os.environ["SSLKEYLOGFILE"] = saved
+        self.assertIsNone(context.keylog_filename)
+        self.assertFalse(keylog.exists())
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, __import__("ssl").CERT_REQUIRED)
+        self.assertGreaterEqual(context.minimum_version, __import__("ssl").TLSVersion.TLSv1_2)
 
     def test_another_app_account_or_a_suspended_one_is_refused(self):
         for attr, value, code in (
@@ -439,6 +460,45 @@ class Refresh(Base):
         self.fake.prs[REPO_A]["open"][0] = node
         item = self.run_refresh()["items"][0]
         self.assertEqual(item["linked_issues"], 2)
+        self.assertNotIn("issue", item["task"])
+
+    def test_paths_are_kept_exactly_so_clinical_rules_still_match(self):
+        # Codex's review of f772122 (blocking): cleaning collapsed distinct paths, and a path
+        # covered by a clinical rule could lose its match.
+        paths = ("evidence/a  b.md", "evidence/a b.md", "evidence/\u202ex.md", "site/x\ty.html")
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10), files=paths)
+        item = self.run_refresh()["items"][0]
+        self.assertEqual(item["task"]["pull_request"]["files"], list(paths))
+        state = tasks.derive(self.task_of(item))
+        self.assertIn(tasks.Flag.CLINICAL, state.flags)
+
+    def test_a_removal_by_a_deleted_account_still_withdraws(self):
+        # Codex's review of f772122 (blocking): skipping it left the authorisation in force.
+        issue = issue_node(10)
+        issue["timelineItems"]["totalCount"] = 2
+        issue["timelineItems"]["nodes"].append(
+            {
+                "__typename": "UnlabeledEvent",
+                "createdAt": "2026-11-21T09:00:00Z",
+                "actor": None,
+                "label": {"name": "agent:ready"},
+            }
+        )
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue)
+        item = self.run_refresh()["items"][0]
+        self.assertEqual(item["task"]["issue"]["timeline"][1]["actor"], "ghost")
+        authorised = dict(self.task_of(item))
+        authorised["issue"] = dict(
+            authorised["issue"], timeline=authorised["issue"]["timeline"][:1]
+        )
+        self.assertNotEqual(tasks.derive(self.task_of(item)).state, tasks.derive(authorised).state)
+
+    def test_an_issue_in_another_repository_gives_no_issue(self):
+        # Codex's review of f772122: its number would point at the wrong issue here.
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10, repo=REPO_B))
+        item = self.run_refresh()["items"][0]
+        self.assertEqual(item["linked_issues"], 1)
+        self.assertIsNone(item["issue"])
         self.assertNotIn("issue", item["task"])
 
     def test_authorisation_comes_only_from_label_events(self):
@@ -551,6 +611,40 @@ class RefresherFiles(Base):
         self.assertEqual(self.make(lambda: NOW.timestamp()).run(), b"failed:write\n")
         self.assertEqual(os.listdir(elsewhere), [])
 
+    def test_a_file_that_misses_the_folders_group_is_refused(self):
+        # Codex's review of f772122 (blocking): without setgid, files took the fetcher's own
+        # group and the web app couldn't read them. Needs root to give the folder another group.
+        if os.getuid() != 0:
+            self.skipTest("needs root to set the folder's group")
+        os.chown(self.cfg.snapshot_dir, -1, 1)  # another group, no setgid
+        os.chmod(self.cfg.snapshot_dir, 0o750)
+        self.assertEqual(self.make(lambda: NOW.timestamp()).run(), b"failed:write\n")
+        self.assertFalse((self.cfg.snapshot_dir / snapshot.SNAPSHOT).exists())
+
+    def test_one_refresh_at_a_time_across_processes(self):
+        # Codex's review of f772122: the floor was per process and recorded after the network
+        # work, so fetch-now and the service could both start.
+        seen = {}
+        refresher = self.make(lambda: NOW.timestamp())
+        real = self.fake.__call__
+
+        def during(method, path, headers, body):
+            if "busy" not in seen:
+                other = server.Refresher(self.cfg, clock=lambda: NOW.timestamp())
+                seen["busy"] = other.run()  # a second process, mid-refresh
+                seen["status"] = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+            return real(method, path, headers, body)
+
+        self.fake.__call__ = during
+        refresher.github = lambda cfg: gh.GitHub(
+            APP_ID, KEY, transport=during, clock=lambda: NOW.timestamp()
+        )
+        self.assertEqual(refresher.run(), server.OK)
+        self.assertEqual(seen["busy"], server.BUSY)
+        # The attempt was on disk before the first request, so a restart can't skip the floor.
+        self.assertEqual(seen["status"]["result"], "running")
+        self.assertEqual(seen["status"]["attempt_epoch"], NOW.timestamp())
+
 
 # ---------------------------------------------------------------- the socket
 
@@ -632,13 +726,15 @@ class StartupChecks(Base):
 
     def test_the_snapshot_folder_is_for_the_web_app_only(self):
         folder = self.cfg.snapshot_dir
-        for mode, ok in ((0o750, True), (0o755, False), (0o700, False), (0o770, False)):
+        # Setgid is required, so new files take the folder's group (Codex, f772122).
+        cases = ((0o2750, True), (0o750, False), (0o2755, False), (0o2700, False), (0o2770, False))
+        for mode, ok in cases:
             with self.subTest(mode=oct(mode)):
                 os.chmod(folder, mode)
                 self.assertEqual(
                     shared_with_web_app(folder, "web-account", lambda a: self.gid).ok, ok
                 )
-        os.chmod(folder, 0o750)
+        os.chmod(folder, 0o2750)
         self.assertFalse(shared_with_web_app(folder, "web-account", lambda a: self.gid + 1).ok)
 
 

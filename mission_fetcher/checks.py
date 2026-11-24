@@ -63,6 +63,10 @@ def shared_with_web_app(path: Path, client: str, gid_of: Callable[[str], int | N
         return Check(name, False, f"{client} can't read it")
     if info.st_mode & 0o020:
         return Check(name, False, f"{client} could write to it")
+    if not info.st_mode & stat.S_ISGID:
+        # Without setgid, new files take the fetcher's own group and the web app can't read
+        # them (Codex's review of f772122).
+        return Check(name, False, "not setgid: new files wouldn't take its group (chmod 2750)")
     return Check(name, True, "yes")
 
 

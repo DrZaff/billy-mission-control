@@ -9,6 +9,7 @@ the status file records the time and a short reason code, never a token or a res
 
 from __future__ import annotations
 
+import fcntl
 import os
 import socket
 import time
@@ -25,6 +26,8 @@ from .snapshot import SNAPSHOT, STATUS, read_json, refresh, write_json
 REQUEST = b"REFRESH\n"
 OK = b"ok\n"
 TOO_SOON = b"too-soon\n"
+BUSY = b"busy\n"
+LOCK = ".refresh.lock"
 REFUSED = b"refused\n"
 MIN_INTERVAL = 60.0
 MAX_KEY = 16 * 1024
@@ -60,23 +63,53 @@ class Refresher:
         self.cfg = cfg
         self.github = github
         self.clock = clock
-        status = read_json(cfg.snapshot_dir, STATUS) or {}
-        last = status.get("attempt_epoch")
-        # The floor survives a restart; a time in the future (a changed clock) counts as now.
-        self.last_attempt = min(last, clock()) if isinstance(last, (int, float)) else None
 
     def run(self) -> bytes:
+        """One refresh, if none is running and none started in the last minute. A lock file
+        held for the whole refresh keeps the service and `fetch-now` from running at once, and
+        the attempt is recorded before any network work, so neither a second process nor a
+        restart mid-refresh gets round the floor (Codex's review of f772122)."""
+        # The folder is opened first, without following a symlink, and the lock made inside
+        # it: O_NOFOLLOW on a full path guards only its last part.
+        folder_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            folder = os.open(self.cfg.snapshot_dir, folder_flags)
+            try:
+                lock = os.open(LOCK, flags, 0o600, dir_fd=folder)
+            finally:
+                os.close(folder)
+        except OSError:
+            return b"failed:write\n"
+        try:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return BUSY
+            return self._locked()
+        finally:
+            os.close(lock)  # releases the lock
+
+    def _locked(self) -> bytes:
         now = self.clock()
-        if self.last_attempt is not None and now - self.last_attempt < MIN_INTERVAL:
-            return TOO_SOON
-        self.last_attempt = now
-        stamp = datetime.fromtimestamp(now, UTC)
         previous = read_json(self.cfg.snapshot_dir, STATUS) or {}
+        last = previous.get("attempt_epoch")
+        if isinstance(last, (int, float)) and not isinstance(last, bool):
+            # A time in the future (a changed clock) counts as now.
+            if now - min(last, now) < MIN_INTERVAL:
+                return TOO_SOON
+        stamp = datetime.fromtimestamp(now, UTC)
         status = {
             "attempt_epoch": now,
             "attempt_at": stamp.isoformat(),
             "snapshot_at": previous.get("snapshot_at"),
+            "result": "running",
+            "reason": None,
         }
+        try:
+            write_json(self.cfg.snapshot_dir, STATUS, status)
+        except OSError:
+            return b"failed:write\n"  # without a recorded attempt, no network work
         try:
             snapshot = refresh(self.cfg, self.github(self.cfg), stamp)
             write_json(self.cfg.snapshot_dir, SNAPSHOT, snapshot)

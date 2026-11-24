@@ -50,10 +50,21 @@ class FetchError(Exception):
         self.code = code
 
 
+def tls_context() -> ssl.SSLContext:
+    """Certificate and host-name checks on, TLS 1.2 or newer, and never a key log: unlike
+    ssl.create_default_context(), a bare SSLContext doesn't read SSLKEYLOGFILE, which would
+    write session secrets that decrypt the App's JWTs and tokens (Codex's review of
+    f772122)."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # verifies certificates and host names
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+    context.keylog_filename = None
+    return context
+
+
 def https_transport(method: str, path: str, headers: dict[str, str], body: bytes | None):
     """One HTTPS request to api.github.com. The real transport; tests pass a fake one."""
-    context = ssl.create_default_context()
-    conn = http.client.HTTPSConnection(HOST, 443, timeout=TIMEOUT, context=context)
+    conn = http.client.HTTPSConnection(HOST, 443, timeout=TIMEOUT, context=tls_context())
     try:
         conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
@@ -179,11 +190,14 @@ class GitHub:
         )
         if not isinstance(answer, dict):
             raise FetchError("bad-response")
-        if answer.get("permissions") != EXPECTED_PERMISSIONS:
-            raise FetchError("token-not-read-only")
         token = answer.get("token")
         if not isinstance(token, str) or not TOKEN_SHAPE.fullmatch(token):
             raise FetchError("bad-token")
+        if answer.get("permissions") != EXPECTED_PERMISSIONS:
+            # Refused, and revoked first: it must not stay valid for its hour (Codex's review
+            # of f772122).
+            self.revoke(token)
+            raise FetchError("token-not-read-only")
         return token
 
     def repositories(self, token: str, repos: list[str]) -> None:

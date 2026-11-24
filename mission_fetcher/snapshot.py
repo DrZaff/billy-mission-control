@@ -80,6 +80,7 @@ fragment pr on PullRequest {
     totalCount
     nodes {
       number title state
+      repository { nameWithOwner }
       timelineItems(itemTypes: [LABELED_EVENT, UNLABELED_EVENT], last: $events) {
         totalCount
         nodes {
@@ -177,9 +178,16 @@ def _connection(value: Any, limit: int, counted: bool = True) -> list:
 
 
 def _files(pr: dict) -> list[str]:
-    paths = [_str(_obj(n).get("path"), 500) for n in _connection(pr.get("files"), MAX_FILES)]
-    if any(not p for p in paths):
-        raise _bad()
+    """The changed paths exactly as GitHub gives them: they are only matched against the
+    clinical patterns, never shown, so cleaning them could only make two paths look alike and
+    let a clinical one slip past its rule (Codex's review of f772122). A path that isn't a
+    plain, bounded string leaves the list out, so the model shows UNKNOWN."""
+    paths = []
+    for node in _connection(pr.get("files"), MAX_FILES):
+        path = _obj(node).get("path")
+        if not isinstance(path, str) or not 0 < len(path) <= 4096 or "\x00" in path:
+            raise _Incomplete()
+        paths.append(path)
     return paths
 
 
@@ -236,14 +244,18 @@ def _checks(pr: dict, head: str) -> list[dict]:
     return out
 
 
-def _issue(pr: dict) -> tuple[int, dict | None, dict | None]:
-    """(how many issues the PR closes, the issue's model input or None, its screen fields)."""
+def _issue(repo: str, pr: dict) -> tuple[int, dict | None, dict | None]:
+    """(how many issues the PR closes, the issue's model input or None, its screen fields).
+    An issue in another repository gives no issue: its number would point at the wrong one
+    here (Codex's review of f772122)."""
     refs = _obj(pr.get("closingIssuesReferences"))
     total = _int(refs.get("totalCount"))
     nodes = _list(refs.get("nodes"))
     if total != 1 or len(nodes) != 1:
         return total, None, None  # none, or several: the model can't pick one, so no guess
     node = _obj(nodes[0])
+    if _obj(node.get("repository")).get("nameWithOwner") != repo:
+        return total, None, None
     number = _int(node.get("number"))
     state = node.get("state")
     if state not in ("OPEN", "CLOSED"):
@@ -259,9 +271,10 @@ def _issue(pr: dict) -> tuple[int, dict | None, dict | None]:
         kind = {"LabeledEvent": "labeled", "UnlabeledEvent": "unlabeled"}.get(e.get("__typename"))
         if kind is None:
             raise _bad()
-        actor = _login(e.get("actor"))
-        if actor is None:
-            continue  # a deleted account authorises nothing
+        # A deleted account is kept as "ghost": it can never authorise, but its removal of the
+        # label still withdraws an authorisation (Codex's review of f772122: skipping it could
+        # leave an earlier authorisation in force).
+        actor = _login(e.get("actor")) or "ghost"
         timeline.append(
             {
                 "event": kind,
@@ -304,7 +317,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
             pull[key] = read()
         except _Incomplete:
             pass
-    linked, issue, issue_screen = _issue(pr)
+    linked, issue, issue_screen = _issue(repo, pr)
     task = {
         "repo": repo,
         "owner": cfg.owner,
@@ -392,11 +405,17 @@ def write_json(folder: Path, name: str, data: dict) -> None:
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     folder_fd = os.open(folder, flags)
     try:
+        group = os.fstat(folder_fd).st_gid
         tmp = f".{name}.{os.getpid()}.tmp"
         create = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
         fd = os.open(tmp, create, 0o600, dir_fd=folder_fd)
         try:
             try:
+                # The web app reads through the folder's group, which a new file inherits only
+                # in a setgid folder (checked at start-up); refuse a file that didn't (Codex's
+                # review of f772122), rather than write one the web app can't read.
+                if os.fstat(fd).st_gid != group:
+                    raise OSError("the new file didn't inherit the folder's group")
                 os.write(fd, text)
                 os.fsync(fd)
                 os.fchmod(fd, 0o640)
