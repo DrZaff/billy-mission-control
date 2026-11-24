@@ -123,6 +123,10 @@ class Refresher:
             reply, status["result"], status["reason"] = b"failed:write\n", "failed", "write"
         else:
             reply, status["result"], status["reason"] = OK, "ok", None
+            if snapshot.get("token_revoked") is not True:
+                # The data is good, but say so plainly: the token stays valid until it
+                # expires, within the hour (Codex's review of 1cc6cf8).
+                reply, status["reason"] = b"ok:token-not-revoked\n", "token-not-revoked"
             status["snapshot_at"] = snapshot["fetched_at"]
             status["items"] = len(snapshot["items"])
         try:

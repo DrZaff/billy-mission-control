@@ -472,6 +472,61 @@ class Refresh(Base):
         state = tasks.derive(self.task_of(item))
         self.assertIn(tasks.Flag.CLINICAL, state.flags)
 
+    def test_a_label_name_is_never_cleaned_into_the_authorisation_label(self):
+        # Codex's review of 1cc6cf8 (blocking): cleaning "agent:ready " (or one with a control
+        # character) gave "agent:ready", an authorisation.
+        for name in ("agent:ready ", "agent:ready\u200b", "agent:\x01ready", " agent:ready"):
+            with self.subTest(name=repr(name)):
+                self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10, label=name))
+                item = self.run_refresh()["items"][0]
+                labels = [e["label"] for e in item["task"].get("issue", {}).get("timeline", [])]
+                self.assertNotIn("agent:ready", labels)
+                self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNSAFE)
+
+    def test_check_names_are_matched_exactly(self):
+        # Codex's review of 1cc6cf8 (blocking): cleaning made " lint" satisfy "lint", and kept
+        # a configured name with doubled spaces from ever matching. A merged pull request is
+        # where the model weighs the required checks, so each case is one.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        for required, ran, flag in (
+            ("unit  tests", "unit  tests", tasks.Flag.CHECKS_PASSED),
+            ("lint", " lint", tasks.Flag.CHECKS_MISSING),
+            ("lint", "lint\u200b", tasks.Flag.CHECKS_MISSING),
+            ("lint", "lint", tasks.Flag.CHECKS_PASSED),
+        ):
+            with self.subTest(required=required, ran=repr(ran)):
+                data = config_data(self.base)
+                data["repos"][REPO_A]["required_checks"] = [required]
+                self.cfg = fconfig.parse_fetcher(json.dumps(data))
+                self.fake.prs[REPO_A]["open"] = []
+                self.fake.prs[REPO_A]["closed"] = [
+                    pr_node(
+                        1,
+                        state="MERGED",
+                        merged=True,
+                        closed_at=recent,
+                        issue=issue_node(10),
+                        checks=(ran,),
+                    )
+                ]
+                item = self.run_refresh()["items"][0]
+                self.assertEqual(item["task"]["pull_request"]["checks"][0]["name"], ran)
+                self.assertIn(flag, tasks.derive(self.task_of(item)).flags)
+
+    def test_the_size_limit_is_measured_as_written(self):
+        # Codex's review of 1cc6cf8: it measured compact JSON, but the file is indented.
+        written = len(snapshot.encode(self.run_refresh()))
+        compact = len(json.dumps(self.run_refresh()))
+        self.assertGreater(written, compact)
+        saved = snapshot.MAX_SNAPSHOT
+        snapshot.MAX_SNAPSHOT = (written + compact) // 2  # compact fits, written doesn't
+        try:
+            with self.assertRaises(gh.FetchError) as caught:
+                self.run_refresh()
+        finally:
+            snapshot.MAX_SNAPSHOT = saved
+        self.assertEqual(caught.exception.code, "too-large")
+
     def test_a_removal_by_a_deleted_account_still_withdraws(self):
         # Codex's review of f772122 (blocking): skipping it left the authorisation in force.
         issue = issue_node(10)
@@ -611,6 +666,14 @@ class RefresherFiles(Base):
         self.assertEqual(self.make(lambda: NOW.timestamp()).run(), b"failed:write\n")
         self.assertEqual(os.listdir(elsewhere), [])
 
+    def test_a_token_that_could_not_be_revoked_is_reported(self):
+        # Codex's review of 1cc6cf8: a good refresh said "ok" while the token stayed valid.
+        self.fake.fail["/installation/token"] = (500, {}, b"")
+        self.assertEqual(self.make(lambda: NOW.timestamp()).run(), b"ok:token-not-revoked\n")
+        status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+        self.assertEqual((status["result"], status["reason"]), ("ok", "token-not-revoked"))
+        self.assertTrue((self.cfg.snapshot_dir / snapshot.SNAPSHOT).exists())
+
     def test_a_file_that_misses_the_folders_group_is_refused(self):
         # Codex's review of f772122 (blocking): without setgid, files took the fetcher's own
         # group and the web app couldn't read them. Needs root to give the folder another group.
@@ -707,6 +770,10 @@ class StartupChecks(Base):
         os.chmod(self.base, 0o755)
         (self.base / "publisher.pem").write_text("x")
 
+    @property
+    def alone(self):
+        return ("web-account", lambda a: self.gid, lambda g: {"web-account"})
+
     def checks(self, **kw):
         return {
             c.name: c
@@ -731,11 +798,19 @@ class StartupChecks(Base):
         for mode, ok in cases:
             with self.subTest(mode=oct(mode)):
                 os.chmod(folder, mode)
-                self.assertEqual(
-                    shared_with_web_app(folder, "web-account", lambda a: self.gid).ok, ok
-                )
+                self.assertEqual(shared_with_web_app(folder, *self.alone).ok, ok)
         os.chmod(folder, 0o2750)
-        self.assertFalse(shared_with_web_app(folder, "web-account", lambda a: self.gid + 1).ok)
+        wrong_group = ("web-account", lambda a: self.gid + 1, lambda g: {"web-account"})
+        self.assertFalse(shared_with_web_app(folder, *wrong_group).ok)
+
+    def test_the_group_holds_the_web_app_alone(self):
+        # Codex's review of 1cc6cf8 (blocking): any other member could read the snapshot.
+        folder = self.cfg.snapshot_dir
+        os.chmod(folder, 0o2750)
+        shared = ("web-account", lambda a: self.gid, lambda g: {"web-account", "intruder"})
+        check = shared_with_web_app(folder, *shared)
+        self.assertFalse(check.ok)
+        self.assertIn("intruder", check.detail)
 
 
 if __name__ == "__main__":

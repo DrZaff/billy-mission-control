@@ -137,6 +137,17 @@ def _str(value: Any, limit: int = MAX_TEXT) -> str:
     return " ".join(CONTROL.sub(" ", value).split())[:limit]
 
 
+def _exact(value: Any, limit: int = MAX_TEXT) -> str:
+    """A value the model matches (a label, a check, a branch name): kept exactly as GitHub
+    gives it, never cleaned, because cleaning can turn one name into another (Codex's reviews of
+    f772122 and 1cc6cf8: a cleaned label could become the authorisation label, a cleaned check
+    name a required one). Only text that is shown is cleaned (_str). Anything that isn't a
+    plain, bounded string leaves its part out, so the model shows UNKNOWN."""
+    if not isinstance(value, str) or not 0 < len(value) <= limit or "\x00" in value:
+        raise _Incomplete()
+    return value
+
+
 def _sha(value: Any) -> str:
     if not isinstance(value, str) or not SHA.fullmatch(value):
         raise _bad()
@@ -235,7 +246,7 @@ def _checks(pr: dict, head: str) -> list[dict]:
                 raise _bad()
             out.append(
                 {
-                    "name": _str(r.get("name"), 100),
+                    "name": _exact(r.get("name")),
                     "head_sha": head,
                     "status": status,
                     "conclusion": conclusion.lower() if conclusion else None,
@@ -266,25 +277,31 @@ def _issue(repo: str, pr: dict) -> tuple[int, dict | None, dict | None]:
     except _Incomplete:
         return total, None, screen
     timeline = []
-    for event in events:
-        e = _obj(event)
-        kind = {"LabeledEvent": "labeled", "UnlabeledEvent": "unlabeled"}.get(e.get("__typename"))
-        if kind is None:
-            raise _bad()
-        # A deleted account is kept as "ghost": it can never authorise, but its removal of the
-        # label still withdraws an authorisation (Codex's review of f772122: skipping it could
-        # leave an earlier authorisation in force).
-        actor = _login(e.get("actor")) or "ghost"
-        timeline.append(
-            {
-                "event": kind,
-                "label": _str(_obj(e.get("label")).get("name"), 100),
-                "actor": actor,
-                "at": _time(e.get("createdAt")),
-            }
-        )
+    try:
+        for event in events:
+            timeline.append(_event(event))
+    except _Incomplete:
+        return total, None, screen
     issue = {"number": number, "state": state.lower(), "timeline": timeline}
     return total, issue, screen
+
+
+def _event(event: Any) -> dict:
+    """One label event, its label name exact (_exact)."""
+    e = _obj(event)
+    kind = {"LabeledEvent": "labeled", "UnlabeledEvent": "unlabeled"}.get(e.get("__typename"))
+    if kind is None:
+        raise _bad()
+    # A deleted account is kept as "ghost": it can never authorise, but its removal of the
+    # label still withdraws an authorisation (Codex's review of f772122: skipping it could
+    # leave an earlier authorisation in force).
+    actor = _login(e.get("actor")) or "ghost"
+    return {
+        "event": kind,
+        "label": _exact(_obj(e.get("label")).get("name")),
+        "actor": actor,
+        "at": _time(e.get("createdAt")),
+    }
 
 
 def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
@@ -325,10 +342,13 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
         "clinical_paths": list(settings.clinical_paths),
         "required_checks": list(settings.required_checks),
         "max_fix_rounds": 1,
-        "branch": {"name": _str(pr.get("headRefName")), "head": head},
         "runs": [],
         "pull_request": pull,
     }
+    try:
+        task["branch"] = {"name": _exact(pr.get("headRefName")), "head": head}
+    except _Incomplete:
+        pass  # no branch key: the model shows UNKNOWN
     if issue is not None:
         task["issue"] = issue
     short = repo.split("/", 1)[1]
@@ -369,6 +389,7 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
     repos = sorted(cfg.repos)
     installation = github.installation(cfg.owner, repos)
     token = github.token(installation)
+    revoked = False
     try:
         github.repositories(token, repos)
         items, truncated = [], []
@@ -380,17 +401,24 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
             if more:
                 truncated.append(repo)
     finally:
-        github.revoke(token)
+        revoked = github.revoke(token)
     snapshot = {
+        "token_revoked": revoked,
         "version": VERSION,
         "fetched_at": now.astimezone(UTC).isoformat(),
         "repos": repos,
         "truncated": truncated,
         "items": items,
     }
-    if len(json.dumps(snapshot)) > MAX_SNAPSHOT:
+    # Measured exactly as it will be written and read (Codex's review of 1cc6cf8).
+    if len(encode(snapshot)) > MAX_SNAPSHOT:
         raise FetchError("too-large")
     return snapshot
+
+
+def encode(data: dict) -> bytes:
+    """The one way a snapshot or status file is written."""
+    return json.dumps(data, indent=1, sort_keys=True).encode("utf-8")
 
 
 # ---------------------------------------------------------------- files
@@ -401,7 +429,7 @@ def write_json(folder: Path, name: str, data: dict) -> None:
     file. Never through a symlink (the folder is opened with O_NOFOLLOW and used by its file
     descriptor); private while being written, then readable by the folder's group (the web
     app's account) only."""
-    text = json.dumps(data, indent=1, sort_keys=True).encode("utf-8")
+    text = encode(data)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     folder_fd = os.open(folder, flags)
     try:

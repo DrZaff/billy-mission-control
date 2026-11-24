@@ -12,6 +12,7 @@ refresh (github.py) and by `selfcheck --github`.
 
 from __future__ import annotations
 
+import grp
 import os
 import pwd
 import stat
@@ -40,13 +41,30 @@ def _primary_gid(account: str) -> int | None:
         return None
 
 
+def _members(gid: int) -> set[str]:
+    """Every account in a group: its listed members and every account whose primary group it
+    is (the group file lists only the former)."""
+    try:
+        listed = set(grp.getgrgid(gid).gr_mem)
+    except KeyError:
+        listed = set()
+    return listed | {p.pw_name for p in pwd.getpwall() if p.pw_gid == gid}
+
+
 def key_file(path: Path, owner: int) -> Check:
     check = private_file(path, owner)
     return Check("reader key", check.ok, check.detail)
 
 
-def shared_with_web_app(path: Path, client: str, gid_of: Callable[[str], int | None]) -> Check:
-    """The snapshot folder: the web app's group may read it, nobody else may."""
+def shared_with_web_app(
+    path: Path,
+    client: str,
+    gid_of: Callable[[str], int | None],
+    members_of: Callable[[int], set[str]] = _members,
+) -> Check:
+    """The snapshot folder: the web app's group may read it, nobody else may. The group must
+    hold the web app's account alone (Codex's review of 1cc6cf8: any other member could read
+    the snapshot through it)."""
     name = "snapshot folder shared with the web app only"
     gid = gid_of(client)
     try:
@@ -57,6 +75,9 @@ def shared_with_web_app(path: Path, client: str, gid_of: Callable[[str], int | N
         return Check(name, False, "not a real folder")
     if gid is None or info.st_gid != gid:
         return Check(name, False, f"its group isn't {client}'s")
+    others = sorted(members_of(gid) - {client})
+    if others:
+        return Check(name, False, f"its group has other members: {', '.join(others)}")
     if info.st_mode & 0o007:
         return Check(name, False, "other accounts can reach it")
     if info.st_mode & 0o050 != 0o050:
@@ -77,6 +98,7 @@ def fetcher_checks(
     account_of: Callable[[int], str | None] = _account_of,
     opener: Callable[[str], int] | None = None,
     gid_of: Callable[[str], int | None] = _primary_gid,
+    members_of: Callable[[int], set[str]] = _members,
 ) -> list[Check]:
     uid = os.geteuid() if uid is None else uid
     trusted = {0, uid}
@@ -94,7 +116,7 @@ def fetcher_checks(
         key_file(cfg.key, uid),
         protected_above(cfg.key, trusted),
         own_folder(cfg.snapshot_dir, uid, "snapshot folder"),
-        shared_with_web_app(cfg.snapshot_dir, cfg.client_account, gid_of),
+        shared_with_web_app(cfg.snapshot_dir, cfg.client_account, gid_of, members_of),
         protected_above(cfg.snapshot_dir, trusted),
     ]
     results += [cannot_read(p, opener) for p in cfg.forbidden_paths]
