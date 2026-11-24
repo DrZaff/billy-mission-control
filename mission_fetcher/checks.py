@@ -51,6 +51,34 @@ def _members(gid: int) -> set[str]:
     return listed | {p.pw_name for p in pwd.getpwall() if p.pw_gid == gid}
 
 
+ACL_ATTRIBUTES = ("system.posix_acl_access", "system.posix_acl_default")
+
+
+def _has_acl(path: str) -> bool:
+    """Whether a POSIX ACL is set on `path` (Linux keeps them as extended attributes). A file
+    system without extended attributes can't hold one."""
+    try:
+        names = os.listxattr(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return any(name in ACL_ATTRIBUTES for name in names)
+
+
+def no_acls(folder: Path, has_acl: Callable[[str], bool] = _has_acl) -> Check:
+    """No ACL on the snapshot folder or anything in it, so its mode bits and group alone say
+    who can read the snapshot (Codex's review of bf76866: a named ACL could let another
+    account in, and a default one pass that on to every new snapshot)."""
+    name = "no ACLs on the snapshot folder or its files"
+    try:
+        entries = [str(folder)] + [e.path for e in os.scandir(folder)]
+    except OSError:
+        return Check(name, False, "unreadable")
+    found = [os.path.basename(p) or p for p in entries if has_acl(p)]
+    if found:
+        return Check(name, False, "ACL on " + ", ".join(found[:5]) + " (remove with setfacl -b)")
+    return Check(name, True, "none")
+
+
 def key_file(path: Path, owner: int) -> Check:
     check = private_file(path, owner)
     return Check("reader key", check.ok, check.detail)
@@ -117,6 +145,7 @@ def fetcher_checks(
         protected_above(cfg.key, trusted),
         own_folder(cfg.snapshot_dir, uid, "snapshot folder"),
         shared_with_web_app(cfg.snapshot_dir, cfg.client_account, gid_of, members_of),
+        no_acls(cfg.snapshot_dir),
         protected_above(cfg.snapshot_dir, trusted),
     ]
     results += [cannot_read(p, opener) for p in cfg.forbidden_paths]

@@ -25,6 +25,7 @@ from mission_control.config import (
 REPO = re.compile(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}")
 LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
 CHECK_NAME = re.compile(r"[^\x00-\x1f\x7f]{1,100}")
+APP_SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,99}")
 MAX_REPOS = 4
 
 __all__ = ["ConfigError", "FetcherConfig", "RepoSettings", "parse_fetcher"]
@@ -34,6 +35,10 @@ __all__ = ["ConfigError", "FetcherConfig", "RepoSettings", "parse_fetcher"]
 class RepoSettings:
     required_checks: tuple[str, ...]
     clinical_paths: tuple[str, ...]
+    # The GitHub App whose check runs count, by its slug (for GitHub Actions: "github-actions").
+    # A same-named check from any other app never satisfies a required one (Codex's review of
+    # bf76866).
+    checks_app: str
 
 
 @dataclass(frozen=True)
@@ -55,7 +60,12 @@ def _login(value: Any, name: str) -> str:
 
 
 def _repo_settings(name: str, value: Any) -> RepoSettings:
-    d = _keys(value, {"required_checks", "clinical_paths"}, f"repos.{name}")
+    d = _keys(value, {"required_checks", "clinical_paths", "checks_app"}, f"repos.{name}")
+    app = d["checks_app"]
+    _req(
+        isinstance(app, str) and APP_SLUG.fullmatch(app) is not None,
+        f"repos.{name}.checks_app must be a GitHub App's slug, such as github-actions",
+    )
     checks = d["required_checks"]
     _req(
         isinstance(checks, list)
@@ -72,7 +82,7 @@ def _repo_settings(name: str, value: Any) -> RepoSettings:
     )
     for pattern in paths:
         fnmatch.translate(pattern)  # a pattern fnmatch can't read fails here, not at runtime
-    return RepoSettings(required_checks=tuple(checks), clinical_paths=tuple(paths))
+    return RepoSettings(required_checks=tuple(checks), clinical_paths=tuple(paths), checks_app=app)
 
 
 def parse_fetcher(text: str) -> FetcherConfig:

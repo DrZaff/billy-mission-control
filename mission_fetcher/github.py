@@ -36,7 +36,10 @@ EXPECTED_PERMISSIONS = {
     "pull_requests": "read",
     "statuses": "read",
 }
-TOKEN_SHAPE = re.compile(r"ghs_[A-Za-z0-9_]{20,250}")
+# Any token GitHub issues, as long as it is safe in a header: printable, no spaces, bounded. Its
+# format is GitHub's to change (newer installation tokens are longer and contain dots: Codex's
+# review of bf76866); what the token may do is checked from GitHub's answer, not its shape.
+TOKEN_SHAPE = re.compile(r"[\x21-\x7e]{20,4096}")
 
 Response = tuple[int, dict[str, str], bytes]
 Transport = Callable[[str, str, dict[str, str], bytes | None], Response]

@@ -13,6 +13,7 @@ import threading
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -49,8 +50,16 @@ def config_data(base: Path, **over) -> dict:
         "owner": OWNER,
         "clinicians": [OWNER],
         "repos": {
-            REPO_A: {"required_checks": ["lint", "test"], "clinical_paths": ["evidence/*"]},
-            REPO_B: {"required_checks": ["lint"], "clinical_paths": []},
+            REPO_A: {
+                "required_checks": ["lint", "test"],
+                "clinical_paths": ["evidence/*"],
+                "checks_app": "github-actions",
+            },
+            REPO_B: {
+                "required_checks": ["lint"],
+                "clinical_paths": [],
+                "checks_app": "github-actions",
+            },
         },
         "forbidden_paths": [str(base / "publisher.pem")],
     }
@@ -75,6 +84,7 @@ def pr_node(
     closed_at=None,
     merged=False,
     files_total=None,
+    checks_app="github-actions",
 ):
     node = {
         "number": number,
@@ -100,6 +110,7 @@ def pr_node(
                             "totalCount": 1,
                             "nodes": [
                                 {
+                                    "app": {"slug": checks_app},
                                     "checkRuns": {
                                         "totalCount": len(checks),
                                         "nodes": [
@@ -110,7 +121,7 @@ def pr_node(
                                             }
                                             for c in checks
                                         ],
-                                    }
+                                    },
                                 }
                             ],
                         },
@@ -351,6 +362,16 @@ class ReadOnlyApp(Base):
         self.refused("token-not-read-only", step="token")
         self.assertEqual(self.fake.revoked, 1)
 
+    def test_current_and_legacy_token_formats_are_accepted(self):
+        # Codex's review of bf76866 (blocking): newer installation tokens are longer and have
+        # dots, and the old ghs_ pattern refused them, so every refresh would fail.
+        for token in ("ghs_" + "T" * 36, "ghs_" + "a" * 60 + "." + "b" * 300 + "." + "c" * 80):
+            with self.subTest(length=len(token)):
+                self.assertTrue(gh.TOKEN_SHAPE.fullmatch(token))
+        for bad in ("short", "has space " * 4, "line\nbreak" * 4, "x" * 5000):
+            with self.subTest(bad=bad[:12]):
+                self.assertIsNone(gh.TOKEN_SHAPE.fullmatch(bad))
+
     def test_tls_never_writes_a_key_log(self):
         # Codex's review of f772122 (blocking): create_default_context() reads SSLKEYLOGFILE.
         keylog = self.base / "keys.log"
@@ -513,6 +534,37 @@ class Refresh(Base):
                 self.assertEqual(item["task"]["pull_request"]["checks"][0]["name"], ran)
                 self.assertIn(flag, tasks.derive(self.task_of(item)).flags)
 
+    def test_only_the_configured_apps_checks_count(self):
+        # Codex's review of bf76866 (blocking): a same-named check from another app could pass a
+        # required check.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        for app, flag in (
+            ("github-actions", tasks.Flag.CHECKS_PASSED),
+            ("someone-elses-app", tasks.Flag.CHECKS_MISSING),
+        ):
+            with self.subTest(app=app):
+                self.fake.prs[REPO_A]["open"] = []
+                self.fake.prs[REPO_A]["closed"] = [
+                    pr_node(
+                        1,
+                        state="MERGED",
+                        merged=True,
+                        closed_at=recent,
+                        issue=issue_node(10),
+                        checks_app=app,
+                    )
+                ]
+                item = self.run_refresh()["items"][0]
+                self.assertIn(flag, tasks.derive(self.task_of(item)).flags)
+
+    def test_a_failed_refresh_says_when_the_token_outlived_it(self):
+        # Codex's review of bf76866: a failed revoke was reported only on success.
+        self.fake.fail["/graphql"] = (502, {}, b"")
+        self.fake.fail["/installation/token"] = (500, {}, b"")
+        with self.assertRaises(gh.FetchError) as caught:
+            self.run_refresh()
+        self.assertEqual(caught.exception.code, "http-502+token-not-revoked")
+
     def test_the_size_limit_is_measured_as_written(self):
         # Codex's review of 1cc6cf8: it measured compact JSON, but the file is indented.
         written = len(snapshot.encode(self.run_refresh()))
@@ -666,6 +718,18 @@ class RefresherFiles(Base):
         self.assertEqual(self.make(lambda: NOW.timestamp()).run(), b"failed:write\n")
         self.assertEqual(os.listdir(elsewhere), [])
 
+    def test_a_short_write_never_leaves_a_truncated_file(self):
+        # Codex's review of bf76866: os.write may write less than asked.
+        real_write = os.write
+
+        def dribble(fd, data):
+            return real_write(fd, bytes(data[:7]))  # a few bytes at a time
+
+        with mock.patch.object(snapshot.os, "write", side_effect=dribble):
+            self.assertEqual(self.make(lambda: NOW.timestamp()).run(), server.OK)
+        written = snapshot.read_json(self.cfg.snapshot_dir, snapshot.SNAPSHOT)
+        self.assertEqual(len(written["items"]), 3)
+
     def test_a_token_that_could_not_be_revoked_is_reported(self):
         # Codex's review of 1cc6cf8: a good refresh said "ok" while the token stayed valid.
         self.fake.fail["/installation/token"] = (500, {}, b"")
@@ -802,6 +866,36 @@ class StartupChecks(Base):
         os.chmod(folder, 0o2750)
         wrong_group = ("web-account", lambda a: self.gid + 1, lambda g: {"web-account"})
         self.assertFalse(shared_with_web_app(folder, *wrong_group).ok)
+
+    def test_an_acl_on_the_folder_or_a_file_fails(self):
+        # Codex's review of bf76866 (blocking): a named ACL could let another account read the
+        # snapshot; a default ACL would pass that on to every new file.
+        from mission_fetcher.checks import no_acls
+
+        folder = self.cfg.snapshot_dir
+        (folder / "snapshot.json").write_text("{}")
+        self.assertTrue(no_acls(folder).ok)
+        for marked in (str(folder), str(folder / "snapshot.json")):
+            with self.subTest(marked=marked):
+                check = no_acls(folder, has_acl=lambda p, m=marked: p == m)
+                self.assertFalse(check.ok)
+                self.assertIn("setfacl -b", check.detail)
+
+    def test_a_real_acl_is_seen(self):
+        # A real ACL, written through the kernel's attribute (setfacl may not be installed).
+        import struct
+
+        from mission_fetcher.checks import no_acls
+
+        folder = self.cfg.snapshot_dir
+        u = 0xFFFFFFFF
+        entries = [(0x01, 7, u), (0x02, 5, 65534), (0x04, 5, u), (0x10, 5, u), (0x20, 0, u)]
+        acl = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *e) for e in entries)
+        try:
+            os.setxattr(folder, "system.posix_acl_access", acl)
+        except OSError:
+            self.skipTest("this file system or account can't set an ACL")
+        self.assertFalse(no_acls(folder).ok)
 
     def test_the_group_holds_the_web_app_alone(self):
         # Codex's review of 1cc6cf8 (blocking): any other member could read the snapshot.

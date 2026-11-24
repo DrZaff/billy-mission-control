@@ -73,7 +73,10 @@ fragment pr on PullRequest {
   commits(last: 1) {
     nodes { commit { oid checkSuites(first: $suites) {
       totalCount
-      nodes { checkRuns(first: $runs) { totalCount nodes { name status conclusion } } }
+      nodes {
+        app { slug }
+        checkRuns(first: $runs) { totalCount nodes { name status conclusion } }
+      }
     } } }
   }
   closingIssuesReferences(first: $issues) {
@@ -229,7 +232,10 @@ def _reviews(pr: dict) -> list[dict]:
     return out
 
 
-def _checks(pr: dict, head: str) -> list[dict]:
+def _checks(pr: dict, head: str, app: str) -> list[dict]:
+    """The head commit's check runs from the configured app only. A same-named run from any
+    other app is left out, so it can never satisfy a required check (Codex's review of
+    bf76866)."""
     commits = _list(_obj(pr.get("commits")).get("nodes"))
     if not commits:
         return []
@@ -238,7 +244,11 @@ def _checks(pr: dict, head: str) -> list[dict]:
         raise _Incomplete()
     out = []
     for suite in _connection(commit.get("checkSuites"), MAX_SUITES):
-        for run in _connection(_obj(suite).get("checkRuns"), MAX_RUNS):
+        suite = _obj(suite)
+        suite_app = suite.get("app")
+        if not isinstance(suite_app, dict) or suite_app.get("slug") != app:
+            continue
+        for run in _connection(suite.get("checkRuns"), MAX_RUNS):
             r = _obj(run)
             status = CHECK_STATUS.get(r.get("status"), "queued")  # waiting, pending: not done
             conclusion = r.get("conclusion")
@@ -328,7 +338,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
     for key, read in (
         ("files", lambda: _files(pr)),
         ("reviews", lambda: _reviews(pr)),
-        ("checks", lambda: _checks(pr, head)),
+        ("checks", lambda: _checks(pr, head, settings.checks_app)),
     ):
         try:
             pull[key] = read()
@@ -389,7 +399,6 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
     repos = sorted(cfg.repos)
     installation = github.installation(cfg.owner, repos)
     token = github.token(installation)
-    revoked = False
     try:
         github.repositories(token, repos)
         items, truncated = [], []
@@ -400,8 +409,14 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
             items += repo_list
             if more:
                 truncated.append(repo)
-    finally:
+    except BaseException as error:
+        # The refresh failed, whatever the reason: revoke the token, and say too if it
+        # outlived the refresh (Codex's review of bf76866).
         revoked = github.revoke(token)
+        if isinstance(error, FetchError) and not revoked:
+            raise FetchError(error.code + "+token-not-revoked") from None
+        raise
+    revoked = github.revoke(token)
     snapshot = {
         "token_revoked": revoked,
         "version": VERSION,
@@ -444,7 +459,9 @@ def write_json(folder: Path, name: str, data: dict) -> None:
                 # review of f772122), rather than write one the web app can't read.
                 if os.fstat(fd).st_gid != group:
                     raise OSError("the new file didn't inherit the folder's group")
-                os.write(fd, text)
+                view = memoryview(text)
+                while view:  # os.write may write less than asked (Codex's review of bf76866)
+                    view = view[os.write(fd, view) :]
                 os.fsync(fd)
                 os.fchmod(fd, 0o640)
             finally:
