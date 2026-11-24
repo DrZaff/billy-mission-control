@@ -121,6 +121,9 @@ class Refresher:
             )
         except OSError:
             reply, status["result"], status["reason"] = b"failed:write\n", "failed", "write"
+        except Exception:  # noqa: BLE001 - a surprise fails this refresh, never the service
+            # (Codex's review of 23bfb61: one escaped and stopped the fetcher).
+            reply, status["result"], status["reason"] = b"failed:internal\n", "failed", "internal"
         else:
             reply, status["result"], status["reason"] = OK, "ok", None
             if snapshot.get("token_revoked") is not True:

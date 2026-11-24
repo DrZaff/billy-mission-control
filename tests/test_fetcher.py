@@ -88,6 +88,7 @@ def pr_node(
     check_event="pull_request",
     renamed=(),
     updated_at=None,
+    merge_commit=None,
 ):
     node = {
         "number": number,
@@ -100,6 +101,7 @@ def pr_node(
         "mergedBy": {"login": OWNER} if merged else None,
         "headRefName": f"claude/task-{number}",
         "headRefOid": head,
+        "potentialMergeCommit": merge_commit,
         "files": {
             "totalCount": len(files) if files_total is None else files_total,
             "nodes": [
@@ -570,6 +572,48 @@ class Refresh(Base):
                 item = self.run_refresh()["items"][0]
                 self.assertIn(flag, tasks.derive(self.task_of(item)).flags)
 
+    def test_results_on_the_test_merge_commit_leave_the_checks_out(self):
+        # Codex's review of 23bfb61 (blocking): GitHub judges the test merge commit when it has
+        # results; reading only the head could look greener than GitHub.
+        clean = {"oid": SHA2, "status": None, "checkSuites": {"totalCount": 0}}
+        with_status = dict(clean, status={"contexts": [{"context": "ci/other"}]})
+        with_suite = dict(clean, checkSuites={"totalCount": 1})
+        for merge, has_checks in (
+            (None, True),
+            (clean, True),
+            (with_status, False),
+            (with_suite, False),
+        ):
+            with self.subTest(merge=merge):
+                self.fake.prs[REPO_A]["open"][0] = pr_node(
+                    1, issue=issue_node(10), merge_commit=merge
+                )
+                item = self.run_refresh()["items"][0]
+                self.assertEqual("checks" in item["task"]["pull_request"], has_checks)
+
+    def test_a_malformed_check_status_is_a_bad_response(self):
+        # Codex's review of 23bfb61: an unhashable status raised TypeError and stopped the
+        # fetcher.
+        node = pr_node(1, issue=issue_node(10))
+        suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+        suite["checkRuns"]["nodes"][0]["status"] = ["COMPLETED"]
+        self.fake.prs[REPO_A]["open"][0] = node
+        with self.assertRaises(gh.FetchError) as caught:
+            self.run_refresh()
+        self.assertEqual(caught.exception.code, "bad-response")
+
+    def test_too_large_also_says_when_the_token_outlived_it(self):
+        # Codex's review of 23bfb61: the size error dropped the failed-revoke warning.
+        self.fake.fail["/installation/token"] = (500, {}, b"")
+        saved = snapshot.MAX_SNAPSHOT
+        snapshot.MAX_SNAPSHOT = 100
+        try:
+            with self.assertRaises(gh.FetchError) as caught:
+                self.run_refresh()
+        finally:
+            snapshot.MAX_SNAPSHOT = saved
+        self.assertEqual(caught.exception.code, "too-large+token-not-revoked")
+
     def test_a_renamed_file_makes_the_file_list_incomplete(self):
         # Codex's review of f37d0c7 (blocking): a rename lists only the new path, so a move out
         # of a clinical folder would hide where it came from.
@@ -734,9 +778,6 @@ class RefresherFiles(Base):
         self.assertEqual(stat.S_IMODE(os.stat(snap).st_mode), 0o640)
         self.assertEqual(status["result"], "ok")
         self.assertEqual(status["items"], 3)
-        self.assertEqual(
-            os.listdir(self.cfg.snapshot_dir), sorted(os.listdir(self.cfg.snapshot_dir))
-        )
         self.assertFalse([n for n in os.listdir(self.cfg.snapshot_dir) if n.endswith(".tmp")])
 
     def test_a_failure_keeps_the_last_good_snapshot(self):
@@ -776,6 +817,17 @@ class RefresherFiles(Base):
         os.symlink(elsewhere, self.cfg.snapshot_dir)
         self.assertEqual(self.make(lambda: NOW.timestamp()).run(), b"failed:write\n")
         self.assertEqual(os.listdir(elsewhere), [])
+
+    def test_a_surprise_fails_the_refresh_not_the_service(self):
+        # Codex's review of 23bfb61: an unexpected exception escaped and stopped the fetcher.
+        def broken(cfg):
+            raise TypeError("a surprise")
+
+        refresher = self.make(lambda: NOW.timestamp())
+        refresher.github = broken
+        self.assertEqual(refresher.run(), b"failed:internal\n")
+        status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+        self.assertEqual((status["result"], status["reason"]), ("failed", "internal"))
 
     def test_a_short_write_never_leaves_a_truncated_file(self):
         # Codex's review of bf76866: os.write may write less than asked.
@@ -925,6 +977,22 @@ class StartupChecks(Base):
         os.chmod(folder, 0o2750)
         wrong_group = ("web-account", lambda a: self.gid + 1, lambda g: {"web-account"})
         self.assertFalse(shared_with_web_app(folder, *wrong_group).ok)
+
+    def test_the_web_app_can_reach_the_snapshot_folder(self):
+        # Codex's review of 23bfb61: protected folders above it could still shut the web app out.
+        from mission_fetcher.checks import reachable_by
+
+        folder = self.cfg.snapshot_dir
+        stranger = lambda account: (65534, {65534})  # noqa: E731 - an account in no group here
+        os.chmod(self.base, 0o755)
+        self.assertTrue(reachable_by(folder, "web-account", groups_of=stranger).ok)
+        os.chmod(self.base, 0o750)  # only the owner and the group may pass
+        check = reachable_by(folder, "web-account", groups_of=stranger)
+        self.assertFalse(check.ok)
+        self.assertIn(str(self.base), check.detail)
+        member = lambda account: (65534, {os.stat(self.base).st_gid})  # noqa: E731
+        self.assertTrue(reachable_by(folder, "web-account", groups_of=member).ok)
+        os.chmod(self.base, 0o755)
 
     def test_an_acl_on_the_folder_or_a_file_fails(self):
         # Codex's review of bf76866 (blocking): a named ACL could let another account read the

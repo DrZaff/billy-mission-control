@@ -66,6 +66,11 @@ fragment pr on PullRequest {
   number title state isDraft merged closedAt
   mergedBy { login }
   headRefName headRefOid
+  potentialMergeCommit {
+    oid
+    status { contexts { context } }
+    checkSuites(first: 1) { totalCount }
+  }
   updatedAt
   files(first: $files) { totalCount nodes { path changeType } }
   reviews(last: $reviews) {
@@ -245,6 +250,17 @@ def _checks(pr: dict, head: str, app: str) -> list[dict]:
     """The head commit's check runs from the configured app only. A same-named run from any
     other app is left out, so it can never satisfy a required check (Codex's review of
     bf76866)."""
+    # When GitHub has results for the test merge commit, it judges that commit, not the head.
+    # Such results aren't read here, so the checks are left out and the model shows UNKNOWN,
+    # rather than look greener than GitHub (Codex's review of 23bfb61).
+    merge = pr.get("potentialMergeCommit")
+    if merge is not None:
+        merge = _obj(merge)
+        merge_status = merge.get("status")
+        if merge_status is not None and _list(_obj(merge_status).get("contexts")):
+            raise _Incomplete()
+        if _int(_obj(merge.get("checkSuites")).get("totalCount")) > 0:
+            raise _Incomplete()
     commits = _list(_obj(pr.get("commits")).get("nodes"))
     if not commits:
         return []
@@ -266,7 +282,10 @@ def _checks(pr: dict, head: str, app: str) -> list[dict]:
             continue
         for run in _connection(suite.get("checkRuns"), MAX_RUNS):
             r = _obj(run)
-            status = CHECK_STATUS.get(r.get("status"), "queued")  # waiting, pending: not done
+            raw_status = r.get("status")
+            if not isinstance(raw_status, str):
+                raise _bad()  # Codex's review of 23bfb61: an unhashable one raised TypeError
+            status = CHECK_STATUS.get(raw_status, "queued")  # waiting, pending: not done
             conclusion = r.get("conclusion")
             if conclusion is not None and not isinstance(conclusion, str):
                 raise _bad()
@@ -434,6 +453,17 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
             items += repo_list
             if more:
                 truncated.append(repo)
+        snapshot = {
+            "version": VERSION,
+            "fetched_at": now.astimezone(UTC).isoformat(),
+            "repos": repos,
+            "truncated": truncated,
+            "items": items,
+        }
+        # Measured exactly as it will be written and read (Codex's review of 1cc6cf8), inside
+        # the try so a failed revoke is reported with it too (Codex's review of 23bfb61).
+        if len(encode(dict(snapshot, token_revoked=False))) > MAX_SNAPSHOT:
+            raise FetchError("too-large")
     except BaseException as error:
         # The refresh failed, whatever the reason: revoke the token, and say too if it
         # outlived the refresh (Codex's review of bf76866).
@@ -441,18 +471,7 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
         if isinstance(error, FetchError) and not revoked:
             raise FetchError(error.code + "+token-not-revoked") from None
         raise
-    revoked = github.revoke(token)
-    snapshot = {
-        "token_revoked": revoked,
-        "version": VERSION,
-        "fetched_at": now.astimezone(UTC).isoformat(),
-        "repos": repos,
-        "truncated": truncated,
-        "items": items,
-    }
-    # Measured exactly as it will be written and read (Codex's review of 1cc6cf8).
-    if len(encode(snapshot)) > MAX_SNAPSHOT:
-        raise FetchError("too-large")
+    snapshot["token_revoked"] = github.revoke(token)
     return snapshot
 
 

@@ -79,6 +79,41 @@ def no_acls(folder: Path, has_acl: Callable[[str], bool] = _has_acl) -> Check:
     return Check(name, True, "none")
 
 
+def _groups_of(account: str) -> tuple[int, set[int]] | None:
+    try:
+        entry = pwd.getpwnam(account)
+    except KeyError:
+        return None
+    return entry.pw_uid, set(os.getgrouplist(account, entry.pw_gid))
+
+
+def reachable_by(
+    path: Path, account: str, groups_of: Callable[[str], tuple[int, set[int]] | None] = _groups_of
+) -> Check:
+    """The web app's account can pass through every folder above the snapshot folder (Codex's
+    review of 23bfb61: protected folders can still shut it out)."""
+    name = f"{account} can reach the snapshot folder"
+    ids = groups_of(account)
+    if ids is None:
+        return Check(name, False, "no such account")
+    uid, gids = ids
+    for parent in path.parents:
+        try:
+            info = os.stat(parent)
+        except OSError:
+            return Check(name, False, f"{parent} is unreadable")
+        mode = info.st_mode
+        if info.st_uid == uid:
+            ok = mode & 0o100
+        elif info.st_gid in gids:
+            ok = mode & 0o010
+        else:
+            ok = mode & 0o001
+        if not ok:
+            return Check(name, False, f"it can't pass through {parent}")
+    return Check(name, True, "yes")
+
+
 def key_file(path: Path, owner: int) -> Check:
     check = private_file(path, owner)
     return Check("reader key", check.ok, check.detail)
@@ -127,6 +162,7 @@ def fetcher_checks(
     opener: Callable[[str], int] | None = None,
     gid_of: Callable[[str], int | None] = _primary_gid,
     members_of: Callable[[int], set[str]] = _members,
+    groups_of: Callable[[str], tuple[int, set[int]] | None] = _groups_of,
 ) -> list[Check]:
     uid = os.geteuid() if uid is None else uid
     trusted = {0, uid}
@@ -147,6 +183,7 @@ def fetcher_checks(
         shared_with_web_app(cfg.snapshot_dir, cfg.client_account, gid_of, members_of),
         no_acls(cfg.snapshot_dir),
         protected_above(cfg.snapshot_dir, trusted),
+        reachable_by(cfg.snapshot_dir, cfg.client_account, groups_of),
     ]
     results += [cannot_read(p, opener) for p in cfg.forbidden_paths]
     return results
