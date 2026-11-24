@@ -634,6 +634,62 @@ class Policies(unittest.TestCase):
             ["/enroll/begin", "/enroll/complete", "/signin/begin", "/signin/complete"],
         )
 
+    def test_the_script_tells_the_owner_which_failure_it_is(self):
+        # A4c: with the sign-in store down, the page said "Add a passkey first", and a second
+        # press after a successful enrollment read like a failure. Codex's review of fce4cc8:
+        # each step must map each status to its own message, never fall through to another
+        # step's (a 403 read as "no passkey"; a 429 after the code was spent said "try again").
+        js = (ROOT / "mission_control" / "static" / "passkey.js").read_text(encoding="utf-8")
+        tables = {}
+        for step in ("enroll/begin", "enroll/complete", "signin/begin", "signin/complete"):
+            after = js.split(f'post("/{step}"', 1)[1]
+            table = after.split("explain(", 1)[1].split("}));", 1)[0]
+            tables[step] = dict(re.findall(r"^\s*(\d{3}|other): (.+?),?$", table, re.M | re.S))
+        for step, table in tables.items():
+            self.assertIn("other", table, step)
+            self.assertTrue(table["503"].startswith("UNAVAILABLE"), step)
+            self.assertIn("429", table, step)
+        # "No passkey" only when the server said so (400 at sign-in begin), never for others.
+        self.assertIn("No passkey is set up yet", tables["signin/begin"]["400"])
+        self.assertEqual(tables["signin/begin"]["other"], "RELOAD")
+        self.assertEqual(js.count("No passkey is set up yet"), 1)
+        self.assertNotIn("Add a passkey first", js)
+        # Once enrollment has begun, the code is spent: every outcome asks for a new one.
+        for status, message in tables["enroll/complete"].items():
+            self.assertIn("NEW_CODE", message, status)
+        # ...including a cancelled Face ID (between creating the passkey and sending it).
+        cancelled = js.split("navigator.credentials.create", 1)[1].split('post("/enroll/complete"')[
+            0
+        ]
+        self.assertIn("NEW_CODE", cancelled)
+        self.assertIn('"InvalidStateError"', js)  # this device already has a passkey
+        # The form goes as soon as begin succeeds, before any other way out (Codex, 91d698b:
+        # a dropped connection at completion left it up, inviting a retry with a spent code).
+        self.assertEqual(js.count("finishEnroll();"), 1)
+        after_begin = js.split('post("/enroll/begin"', 1)[1]
+        self.assertLess(
+            after_begin.index("finishEnroll();"), after_begin.index("credentials.create")
+        )
+        # A dropped completion: the passkey may have been added, so the page doesn't guess.
+        dropped = js.split('post("/enroll/complete"', 1)[1].split("if (done.ok)", 1)[0]
+        self.assertIn("catch (error)", dropped)
+        self.assertIn('may " +\n        "or may not have been added', dropped)
+        # One ceremony at a time (Codex, 0c4fa76): a second tap is ignored while one runs.
+        guard = js.split("function guard(task)", 1)[1].split("\n  }\n", 1)[0]
+        self.assertIn("if (busy) return;", guard)
+        self.assertLess(guard.index("if (busy) return;"), guard.index("task()"))
+        self.assertIn("busy = false;", guard.split(".finally(", 1)[1])
+        # A 503 at begin: the code may already be spent (Codex, 0c4fa76).
+        self.assertIn("The code may be used up", tables["enroll/begin"]["503"])
+        # Begin's 400 also covers "two passkeys already" (Codex, 91d698b), where the next step
+        # is to revoke one: the server issues no new code at the limit (Codex, 5fadcd2).
+        begin_400 = js.split('post("/enroll/begin"', 1)[1].split("400:", 1)[1].split("429:")[0]
+        self.assertIn("shows two passkeys", begin_400)
+        self.assertLess(begin_400.index("revoke one"), begin_400.index("make a new one"))
+        self.assertIn("Otherwise", begin_400)
+        css = (ROOT / "mission_control" / "static" / "app.css").read_text(encoding="utf-8")
+        self.assertIn("form#enroll[hidden]", css)  # its display: grid would override hidden
+
     def test_the_rules_are_the_issues(self):
         self.assertEqual(auth_module.MAX_CREDENTIALS, 2)
         self.assertEqual(CODE_TTL, 600)

@@ -340,6 +340,62 @@ class StopHelper(unittest.TestCase):
         self.assertTrue(self.marker.exists())
         self.assertEqual(lines, ["stop helper: stopped"])
 
+    def test_a_stalled_journal_never_holds_back_any_stop(self):
+        # Codex's reviews of fce4cc8 and 91d698b (blocking): with each log line written on the
+        # helper's only request loop, a stalled journal held back the confirmation, and then
+        # every later stop request. The helper's log now never waits (LineLog).
+        path = self.base / "stop.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        listener.listen(4)
+        self.addCleanup(listener.close)
+        release = threading.Event()
+        self.addCleanup(release.set)
+        written = []
+
+        def stalled_journal(line: str) -> None:
+            release.wait(30)
+            written.append(line)
+
+        log = stopper.LineLog(write=stalled_journal)
+
+        def three_requests() -> None:
+            for _ in range(3):
+                stopper.serve(listener, self.control, UID, UID, log=log, once=True)
+
+        thread = threading.Thread(target=three_requests, daemon=True)
+        thread.start()
+        for attempt in range(3):
+            self.assertTrue(stopper.request_stop(path, frozenset({UID}), timeout=2), attempt)
+        self.assertTrue(self.marker.exists())
+        self.assertEqual(written, [])  # the journal was stalled the whole time
+        release.set()
+        thread.join(5)
+        deadline = time.monotonic() + 5
+        while len(written) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(written, ["stop helper: stopped"] * 3)  # in order, once it recovers
+
+    def test_a_stalled_journal_drops_lines_rather_than_wait(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        log = stopper.LineLog(write=lambda line: release.wait(30), backlog=2)
+        started = time.monotonic()
+        for i in range(1000):
+            log(f"line {i}")
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_a_broken_stdout_never_stops_the_helper(self):
+        class Broken(io.StringIO):
+            def write(self, text):
+                raise BrokenPipeError
+
+            def flush(self):
+                raise BrokenPipeError
+
+        with mock.patch("sys.stdout", Broken()):
+            stopper._print_line("stop helper: stopped")  # no exception
+
     def test_request_stop_is_false_when_the_helper_is_unreachable(self):
         self.assertFalse(
             stopper.request_stop(self.base / "missing.sock", frozenset({UID}), timeout=0.5)
@@ -347,6 +403,44 @@ class StopHelper(unittest.TestCase):
 
 
 # ---------------------------------------------------------------- events
+
+
+class StopHelperLog(unittest.TestCase):
+    """A4c: under systemd, stdout is a pipe. The helper's "stop helper: stopped" line sat in
+    Python's buffer and never reached the journal while the helper kept running."""
+
+    def test_each_log_line_leaves_the_process_at_once(self):
+        path = tmpdir(self) / "s.sock"
+        script = (
+            "import socket, sys, time\n"
+            "from pathlib import Path\n"
+            "from mission_control import stopper\n"
+            "l = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+            f"l.bind({str(path)!r}); l.listen(1)\n"
+            "print('listening', flush=True)\n"
+            "stopper.serve(l, Path('/nonexistent'), 0, -1, once=True)\n"  # default log
+            "time.sleep(30)\n"  # still running, as the real helper is
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            # As systemd starts it: without this, a developer's or CI's setting would hide the
+            # buffering this test is about.
+            env={k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"},
+        )
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        self.assertEqual(proc.stdout.readline().strip(), "listening")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.connect(str(path))
+            conn.recv(64)  # refused: wrong account
+        got: list[str] = []
+        reader = threading.Thread(target=lambda: got.append(proc.stdout.readline()), daemon=True)
+        reader.start()
+        reader.join(5)
+        self.assertTrue(got and got[0].startswith("stop helper: refused"), got)
 
 
 class EventsLog(unittest.TestCase):

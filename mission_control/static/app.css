@@ -296,6 +296,11 @@ form#enroll {
   max-width: 320px;
 }
 
+/* After a passkey is added, passkey.js hides the form (its code is spent). */
+form#enroll[hidden] {
+  display: none;
+}
+
 form#enroll input {
   min-height: 44px;
   padding: 0 10px;
