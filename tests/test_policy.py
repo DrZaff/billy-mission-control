@@ -94,10 +94,20 @@ class App(unittest.TestCase):
             bad = {m for m in imported_modules(path) if m in FORBIDDEN_IMPORTS}
             self.assertEqual(bad, set(), path.name)
 
-    def test_sockets_are_unix_only(self):
-        # No internet address families, name lookups or connection helpers anywhere in the app.
-        banned = {"AF_INET", "AF_INET6", "create_connection", "getaddrinfo", "gethostbyname"}
+    def test_the_app_never_imports_the_fetcher(self):
+        # Phase A5a (issue #16): the fetcher is the only part with network access, in its own
+        # package and process. The web app reads its snapshot file and never imports it.
         for path in sorted((ROOT / "mission_control").rglob("*.py")):
+            uses = {m for m in imported_modules(path) if m.split(".")[0] == "mission_fetcher"}
+            self.assertEqual(uses, set(), path.name)
+
+    def test_sockets_are_unix_only(self):
+        # No internet address families, name lookups or connection helpers anywhere in the app,
+        # or in the fetcher's own code (its one HTTPS client is http.client, in github.py).
+        banned = {"AF_INET", "AF_INET6", "create_connection", "getaddrinfo", "gethostbyname"}
+        paths = list((ROOT / "mission_control").rglob("*.py"))
+        paths += list((ROOT / "mission_fetcher").rglob("*.py"))
+        for path in sorted(paths):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
             names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
@@ -114,6 +124,41 @@ class App(unittest.TestCase):
                         isinstance(first, ast.Attribute) and first.attr == "AF_UNIX",
                         (path.name, node.lineno),
                     )
+
+    def test_only_the_fetchers_github_module_reaches_the_network(self):
+        # Owner's decision for A5a (issues #15 and #16): one module may make outbound calls,
+        # with http.client and ssl only, and nothing else in the fetcher may.
+        network = {"http.client", "ssl"}
+        for path in sorted((ROOT / "mission_fetcher").rglob("*.py")):
+            modules = imported_modules(path)
+            allowed = network if path.name == "github.py" else set()
+            self.assertEqual((modules & FORBIDDEN_IMPORTS) - allowed, set(), path.name)
+
+    def test_the_fetcher_talks_to_api_github_com_only(self):
+        tree = ast.parse((ROOT / "mission_fetcher" / "github.py").read_text(encoding="utf-8"))
+        hosts = [
+            node.value.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "HOST" for t in node.targets)
+        ]
+        self.assertEqual(hosts, ["api.github.com"])
+        connections = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("HTTPSConnection", "HTTPConnection")
+        ]
+        self.assertEqual(len(connections), 1)
+        call = connections[0]
+        self.assertEqual(call.func.attr, "HTTPSConnection")
+        self.assertEqual(ast.unparse(call.args[0]), "HOST")
+        self.assertEqual(ast.unparse(call.args[1]), "443")
+        # No redirects or proxy settings: nothing reads the environment.
+        names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        self.assertNotIn("environ", names)
+        self.assertNotIn("getenv", names)
 
     def test_the_stop_helper_cannot_remove_a_marker(self):
         tree = ast.parse((ROOT / "mission_control" / "stopper.py").read_text(encoding="utf-8"))

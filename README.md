@@ -51,6 +51,16 @@ python3 -m mission_control passkey enroll|list|revoke ID|reset --config FILE   #
 
 The config files live only on the server; `config.example.json` and `stopper.example.json` show their shape with placeholder paths. `serve` and `stopper` refuse to start unless every check passes, and accept only a socket that systemd hands them (no TCP port).
 
+### The fetcher (phase A5a; installed by the owner, never by an agent)
+
+```sh
+python3 -m mission_fetcher serve --config FILE                # from its own systemd socket unit
+python3 -m mission_fetcher selfcheck [--github] --config FILE # start-up checks; --github checks the App too
+python3 -m mission_fetcher fetch-now --config FILE            # one refresh, for installing
+```
+
+The only part with network access: its own package and account, the only one that can read the read-only GitHub App's key. It reads `api.github.com` only, checks on every refresh that the App is still read-only and limited to the configured repositories, and writes a snapshot that only the web app's account can read. The web app asks it to refresh over a local socket, at most once a minute, and never imports it. `fetcher.example.json` shows its config's shape.
+
 CI (`.github/workflows/ci.yml`) runs the same two commands, as the **lint** and **test** checks, on every pull request.
 
 ## Layout
@@ -70,6 +80,8 @@ CI (`.github/workflows/ci.yml`) runs the same two commands, as the **lint** and 
 | `mission_control/views.py` | The screens: server-rendered HTML, every state and flag in words, everything escaped |
 | `mission_control/demo.py`, `demo.json` | Demo 0: synthetic tasks and the placeholder command templates, validated on load |
 | `mission_control/static/app.css` | The one stylesheet: one column on phones, light and dark |
+| `mission_fetcher/` | The fetcher (A5a): `github.py`, the only module that talks to the network (api.github.com only); `snapshot.py`, GitHub's answers into the task model's input; `server.py`, the refresh socket; `checks.py`, its start-up checks |
+| `fetcher.example.json` | The fetcher's config shape, with placeholder paths |
 | `mission_control/tasks.py` | The task-state model (A2): pure functions deriving a task's state from GitHub-shaped data and Billy's run records |
 | `tests/fixtures/tasks/` | Synthetic task examples with their expected states, for the model's tests |
 | `tests/` | App, screens, service, server, credential scanner and repository-policy tests |

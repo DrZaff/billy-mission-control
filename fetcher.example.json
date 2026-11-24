@@ -1,0 +1,20 @@
+{
+  "account": "mc-fetcher",
+  "client_account": "mission-control",
+  "app_id": 1234567,
+  "key": "/CHANGE-ME/reader-key.pem",
+  "snapshot_dir": "/CHANGE-ME/snapshot",
+  "owner": "example-owner",
+  "clinicians": ["example-owner"],
+  "repos": {
+    "example-owner/example-site": {
+      "required_checks": ["Data, build, links and secrets", "Pages open without errors"],
+      "clinical_paths": ["evidence/*", "faq/*", "blog/posts/*", "course-*.html", "ai-vs-physician.html"]
+    },
+    "example-owner/example-tools": {
+      "required_checks": ["lint", "test"],
+      "clinical_paths": []
+    }
+  },
+  "forbidden_paths": ["/CHANGE-ME/publisher-key.pem", "/CHANGE-ME/agent-credentials"]
+}
