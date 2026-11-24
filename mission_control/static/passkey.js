@@ -136,12 +136,15 @@
       return say("The connection dropped before Mission Control answered. " + MAYBE_ADDED +
         NEW_CODE);
     }
-    if (done.ok) return say("Passkey added. You can sign in now.");
-    // A refusal is known to come from the app itself only when it carries the app's own body,
-    // {"ok": false}; each of those means nothing was saved. Anything else (a gateway's 502 or
-    // 503, say) may arrive after the app saved it, so the page doesn't guess (Codex, 785bcf2
-    // and 0fad454: a status number alone can't tell the app's 503 from a gateway's).
-    if (!(done.data && done.data.ok === false)) {
+    // An answer is known to be the app's own only when it carries the app's own body: {"ok":
+    // true} for a saved passkey, {"ok": false} for a refusal, after which nothing was saved.
+    // Anything else (a gateway's page, whatever its status) may arrive after the app saved it,
+    // so the page doesn't guess (Codex, 785bcf2, 0fad454 and 3859457: a status number alone
+    // can't tell the app's answer from a gateway's, a 200 included).
+    if (done.ok && done.data && done.data.ok === true) {
+      return say("Passkey added. You can sign in now.");
+    }
+    if (done.ok || !(done.data && done.data.ok === false)) {
       return say("Mission Control didn't answer normally. " + MAYBE_ADDED + NEW_CODE);
     }
     say(explain(done, {

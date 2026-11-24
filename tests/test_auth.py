@@ -676,7 +676,7 @@ class Policies(unittest.TestCase):
             after_begin.index("finishEnroll();"), after_begin.index("credentials.create")
         )
         # A dropped completion: the passkey may have been added, so the page doesn't guess.
-        dropped = js.split('post("/enroll/complete"', 1)[1].split("if (done.ok)", 1)[0]
+        dropped = js.split('post("/enroll/complete"', 1)[1].split("if (done.ok &&", 1)[0]
         self.assertIn("catch (error)", dropped)
         self.assertIn("MAYBE_ADDED", dropped)
         # Completion (Codex, 785bcf2): only the app's own statuses mean nothing was saved; any
@@ -688,8 +688,11 @@ class Policies(unittest.TestCase):
             self.assertNotIn("MAYBE_ADDED", complete[status], status)
         # The definite messages are used only for the app's own refusals, which carry
         # {"ok": false}; a gateway's 503 has no such body (Codex, 0fad454).
-        handled = js.split('post("/enroll/complete"', 1)[1].split("if (done.ok)", 1)[1]
-        check = "if (!(done.data && done.data.ok === false))"
+        handled = js.split('post("/enroll/complete"', 1)[1].split("} catch (error) {", 1)[1]
+        # Success only with the app's own {"ok": true}; a gateway's 200 page is not proof.
+        self.assertIn("if (done.ok && done.data && done.data.ok === true)", handled)
+        self.assertNotIn('if (done.ok) return say("Passkey added', js)
+        check = "if (done.ok || !(done.data && done.data.ok === false))"
         self.assertIn(check, handled)
         self.assertLess(handled.index(check), handled.index("explain(done"))
         self.assertIn("MAYBE_ADDED", handled.split(check, 1)[1].split("}", 1)[0])
