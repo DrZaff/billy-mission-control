@@ -84,7 +84,9 @@
           "old, or two passkeys are already set up (check passkey list on the server). " +
           "Make a new code there.",
         429: "Too many tries. Wait a minute, then try again.",
-        503: UNAVAILABLE,
+        // The server may have spent the code before its store failed (Codex, 0c4fa76).
+        503: UNAVAILABLE + " The code may be used up: if it's refused once this works again, " +
+          "make a new one on the server.",
         other: RELOAD,
       }));
     }
@@ -179,14 +181,23 @@
     }
   }
 
+  // One ceremony at a time: a second tap while one is under way is ignored, so a later
+  // answer (a code refused as reused) can't overwrite the first one's (Codex, 0c4fa76).
   function guard(task) {
+    let busy = false;
     return function (event) {
       if (event) event.preventDefault();
+      if (busy) return;
       if (!window.PublicKeyCredential) return say("This browser doesn't support passkeys.");
+      busy = true;
       say("Waiting for your passkey…");
-      task().catch(function () {
-        say("Cancelled, or the passkey didn't respond. Try again.");
-      });
+      task()
+        .catch(function () {
+          say("Cancelled, or the passkey didn't respond. Try again.");
+        })
+        .finally(function () {
+          busy = false;
+        });
     };
   }
 

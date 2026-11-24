@@ -674,6 +674,13 @@ class Policies(unittest.TestCase):
         dropped = js.split('post("/enroll/complete"', 1)[1].split("if (done.ok)", 1)[0]
         self.assertIn("catch (error)", dropped)
         self.assertIn('may " +\n        "or may not have been added', dropped)
+        # One ceremony at a time (Codex, 0c4fa76): a second tap is ignored while one runs.
+        guard = js.split("function guard(task)", 1)[1].split("\n  }\n", 1)[0]
+        self.assertIn("if (busy) return;", guard)
+        self.assertLess(guard.index("if (busy) return;"), guard.index("task()"))
+        self.assertIn("busy = false;", guard.split(".finally(", 1)[1])
+        # A 503 at begin: the code may already be spent (Codex, 0c4fa76).
+        self.assertIn("The code may be used up", tables["enroll/begin"]["503"])
         # Begin's 400 also covers "two passkeys already" (Codex, 91d698b).
         begin_400 = js.split('post("/enroll/begin"', 1)[1].split("429:", 1)[0]
         self.assertIn("two passkeys are already set up", begin_400)
