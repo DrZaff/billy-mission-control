@@ -57,7 +57,7 @@
 
   // Once enrollment has begun, the code is spent, whatever happens next: the form goes away
   // so it can't be sent again (a second press was refused as a reused code and read like a
-  // failure, in A4c), and every message after that point asks for a new code.
+  // failure, in A4c).
   function finishEnroll() {
     const form = document.getElementById("enroll");
     if (form) form.hidden = true;
@@ -70,48 +70,64 @@
   }
 
   async function enroll(code) {
-    const begin = await post("/enroll/begin", { code: code });
+    let begin;
+    try {
+      begin = await post("/enroll/begin", { code: code });
+    } catch (error) {
+      return say("Couldn't reach Mission Control. Check that Tailscale is on, then try again. " +
+        "If the code is then refused, make a new one on the server.");
+    }
     if (!begin.ok) {
       // The code is spent only when this step succeeds, so it may be tried again here.
       return say(explain(begin, {
-        400: "That code didn't work: it was mistyped, used already, or more than 10 minutes " +
-          "old. Make a new one on the server.",
+        400: "That code didn't work: it was mistyped, used already or more than 10 minutes " +
+          "old, or two passkeys are already set up (check passkey list on the server). " +
+          "Make a new code there.",
         429: "Too many tries. Wait a minute, then try again.",
         503: UNAVAILABLE,
         other: RELOAD,
       }));
     }
-    const o = begin.data.options;
-    const publicKey = Object.assign({}, o, {
-      challenge: fromB64url(o.challenge),
-      user: Object.assign({}, o.user, { id: fromB64url(o.user.id) }),
-      excludeCredentials: descriptors(o.excludeCredentials),
-    });
+    // From here on the code is spent, whatever happens, so the form goes now: every way out
+    // below asks for a new code, or says the passkey was added (Codex, A4c).
+    finishEnroll();
     let credential;
     try {
+      const o = begin.data.options;
+      const publicKey = Object.assign({}, o, {
+        challenge: fromB64url(o.challenge),
+        user: Object.assign({}, o.user, { id: fromB64url(o.user.id) }),
+        excludeCredentials: descriptors(o.excludeCredentials),
+      });
       credential = await navigator.credentials.create({ publicKey: publicKey });
     } catch (error) {
       // The browser lists this device's passkey as already added (excludeCredentials).
-      finishEnroll();
       if (error && error.name === "InvalidStateError") {
         return say("This device already has a passkey for Mission Control. Nothing was " +
           "added; sign in with the one you have.");
       }
       return say("Cancelled, or the passkey didn't respond. Nothing was added. " + NEW_CODE);
     }
-    const done = await post("/enroll/complete", {
-      ticket: begin.data.ticket,
-      credential: {
-        id: credential.id,
-        rawId: toB64url(credential.rawId),
-        type: credential.type,
-        response: {
-          clientDataJSON: toB64url(credential.response.clientDataJSON),
-          attestationObject: toB64url(credential.response.attestationObject),
+    let done;
+    try {
+      done = await post("/enroll/complete", {
+        ticket: begin.data.ticket,
+        credential: {
+          id: credential.id,
+          rawId: toB64url(credential.rawId),
+          type: credential.type,
+          response: {
+            clientDataJSON: toB64url(credential.response.clientDataJSON),
+            attestationObject: toB64url(credential.response.attestationObject),
+          },
         },
-      },
-    });
-    finishEnroll();
+      });
+    } catch (error) {
+      // The server may have added it before the connection dropped: say so, don't guess.
+      return say("The connection dropped before Mission Control answered, so the passkey may " +
+        "or may not have been added. Try signing in. If that fails and passkey list on the " +
+        "server doesn't show it: " + NEW_CODE);
+    }
     if (done.ok) return say("Passkey added. You can sign in now.");
     say(explain(done, {
       429: "Too many tries. Nothing was added. Wait a minute. " + NEW_CODE,

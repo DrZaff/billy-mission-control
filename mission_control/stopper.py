@@ -13,9 +13,11 @@ the web app can ask for a stop but never clear one. Only the owner clears it, on
 from __future__ import annotations
 
 import os
+import queue
 import socket
 import stat
 import struct
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -26,6 +28,7 @@ REFUSED = b"refused\n"
 FAILED = b"error\n"
 TIMEOUT = 5.0
 MAX_REQUEST = 16
+LOG_BACKLOG = 100  # log lines held while the journal is stalled; later ones are dropped
 
 
 def peer_uid(conn: socket.socket) -> int | None:
@@ -118,14 +121,43 @@ def handle(conn: socket.socket, control_dir: Path, owner: int, client_uid: int) 
         return "error: connection"
 
 
-def log_line(text: str) -> None:
-    """One line for the helper's log, flushed at once. Under systemd, stdout is a pipe, and
-    Python holds unflushed lines in a buffer: a stop could be done but not yet in the journal.
-    A broken log never stops the helper: the marker is the record that matters."""
+def _print_line(text: str) -> None:
+    """Print one line, flushed at once. Under systemd, stdout is a pipe, and Python holds
+    unflushed lines in a buffer: a stop could be done but not yet in the journal (A4c). A
+    broken stdout is ignored: the marker is the record that matters."""
     try:
         print(text, flush=True)
     except (OSError, ValueError):
         pass
+
+
+class LineLog:
+    """The helper's log. A call queues the line and returns at once; one writer thread prints
+    the lines in order. The request loop never waits on the journal (Codex, A4c): if it stalls,
+    up to `backlog` lines wait, newer ones are dropped, and stops are still answered."""
+
+    def __init__(self, write: Callable[[str], None] = _print_line, backlog: int = LOG_BACKLOG):
+        self._write = write
+        self._lines: queue.Queue[str] = queue.Queue(maxsize=backlog)
+        self._start = threading.Lock()
+        self._writer: threading.Thread | None = None
+
+    def __call__(self, text: str) -> None:
+        with self._start:
+            if self._writer is None:
+                self._writer = threading.Thread(target=self._drain, daemon=True)
+                self._writer.start()
+        try:
+            self._lines.put_nowait(text)
+        except queue.Full:
+            pass
+
+    def _drain(self) -> None:
+        while True:
+            self._write(self._lines.get())
+
+
+log_line = LineLog()
 
 
 def serve(
@@ -138,8 +170,9 @@ def serve(
 ) -> None:
     """Answer requests one at a time. Each connection has a short timeout, so a stuck client
     holds the helper for at most TIMEOUT seconds. The connection is closed before the log line
-    is written: the app confirms a stop only at the end of the connection, so a slow or stuck
-    log must never hold back a confirmation (Codex, A4c)."""
+    is handed over: the app confirms a stop only at the end of the connection. With the default
+    log, handing a line over never waits either (LineLog), so a stalled journal never holds
+    back this confirmation or the next request (Codex, A4c)."""
     while True:
         conn, _ = listener.accept()
         with conn:

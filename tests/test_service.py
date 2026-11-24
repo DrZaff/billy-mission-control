@@ -340,38 +340,52 @@ class StopHelper(unittest.TestCase):
         self.assertTrue(self.marker.exists())
         self.assertEqual(lines, ["stop helper: stopped"])
 
-    def test_a_stuck_log_never_holds_back_the_confirmation(self):
-        # Codex's review of fce4cc8 (blocking): the log line was written before the connection
-        # closed, and the app confirms only at the end of the connection. A stalled journal
-        # turned a stop that was done into "could NOT be confirmed".
+    def test_a_stalled_journal_never_holds_back_any_stop(self):
+        # Codex's reviews of fce4cc8 and 91d698b (blocking): with each log line written on the
+        # helper's only request loop, a stalled journal held back the confirmation, and then
+        # every later stop request. The helper's log now never waits (LineLog).
         path = self.base / "stop.sock"
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(str(path))
-        listener.listen(1)
+        listener.listen(4)
         self.addCleanup(listener.close)
         release = threading.Event()
         self.addCleanup(release.set)
-        logged = []
+        written = []
 
-        def stuck_log(line: str) -> None:
-            release.wait(10)
-            logged.append(line)
+        def stalled_journal(line: str) -> None:
+            release.wait(30)
+            written.append(line)
 
-        thread = threading.Thread(
-            target=stopper.serve,
-            args=(listener, self.control, UID, UID),
-            kwargs={"log": stuck_log, "once": True},
-            daemon=True,
-        )
+        log = stopper.LineLog(write=stalled_journal)
+
+        def three_requests() -> None:
+            for _ in range(3):
+                stopper.serve(listener, self.control, UID, UID, log=log, once=True)
+
+        thread = threading.Thread(target=three_requests, daemon=True)
         thread.start()
-        self.assertTrue(stopper.request_stop(path, frozenset({UID}), timeout=2))
+        for attempt in range(3):
+            self.assertTrue(stopper.request_stop(path, frozenset({UID}), timeout=2), attempt)
         self.assertTrue(self.marker.exists())
-        self.assertEqual(logged, [])  # the log was still stuck when the stop was confirmed
+        self.assertEqual(written, [])  # the journal was stalled the whole time
         release.set()
         thread.join(5)
-        self.assertEqual(logged, ["stop helper: stopped"])
+        deadline = time.monotonic() + 5
+        while len(written) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(written, ["stop helper: stopped"] * 3)  # in order, once it recovers
 
-    def test_a_broken_log_never_stops_the_helper(self):
+    def test_a_stalled_journal_drops_lines_rather_than_wait(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        log = stopper.LineLog(write=lambda line: release.wait(30), backlog=2)
+        started = time.monotonic()
+        for i in range(1000):
+            log(f"line {i}")
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_a_broken_stdout_never_stops_the_helper(self):
         class Broken(io.StringIO):
             def write(self, text):
                 raise BrokenPipeError
@@ -380,7 +394,7 @@ class StopHelper(unittest.TestCase):
                 raise BrokenPipeError
 
         with mock.patch("sys.stdout", Broken()):
-            stopper.log_line("stop helper: stopped")  # no exception
+            stopper._print_line("stop helper: stopped")  # no exception
 
     def test_request_stop_is_false_when_the_helper_is_unreachable(self):
         self.assertFalse(

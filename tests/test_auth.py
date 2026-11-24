@@ -663,7 +663,20 @@ class Policies(unittest.TestCase):
         ]
         self.assertIn("NEW_CODE", cancelled)
         self.assertIn('"InvalidStateError"', js)  # this device already has a passkey
-        self.assertEqual(js.count("finishEnroll();"), 2)  # once creation starts, either way
+        # The form goes as soon as begin succeeds, before any other way out (Codex, 91d698b:
+        # a dropped connection at completion left it up, inviting a retry with a spent code).
+        self.assertEqual(js.count("finishEnroll();"), 1)
+        after_begin = js.split('post("/enroll/begin"', 1)[1]
+        self.assertLess(
+            after_begin.index("finishEnroll();"), after_begin.index("credentials.create")
+        )
+        # A dropped completion: the passkey may have been added, so the page doesn't guess.
+        dropped = js.split('post("/enroll/complete"', 1)[1].split("if (done.ok)", 1)[0]
+        self.assertIn("catch (error)", dropped)
+        self.assertIn('may " +\n        "or may not have been added', dropped)
+        # Begin's 400 also covers "two passkeys already" (Codex, 91d698b).
+        begin_400 = js.split('post("/enroll/begin"', 1)[1].split("429:", 1)[0]
+        self.assertIn("two passkeys are already set up", begin_400)
         css = (ROOT / "mission_control" / "static" / "app.css").read_text(encoding="utf-8")
         self.assertIn("form#enroll[hidden]", css)  # its display: grid would override hidden
 
