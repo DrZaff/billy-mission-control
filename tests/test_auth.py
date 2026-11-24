@@ -681,9 +681,12 @@ class Policies(unittest.TestCase):
         self.assertIn("busy = false;", guard.split(".finally(", 1)[1])
         # A 503 at begin: the code may already be spent (Codex, 0c4fa76).
         self.assertIn("The code may be used up", tables["enroll/begin"]["503"])
-        # Begin's 400 also covers "two passkeys already" (Codex, 91d698b).
-        begin_400 = js.split('post("/enroll/begin"', 1)[1].split("429:", 1)[0]
-        self.assertIn("two passkeys are already set up", begin_400)
+        # Begin's 400 also covers "two passkeys already" (Codex, 91d698b), where the next step
+        # is to revoke one: the server issues no new code at the limit (Codex, 5fadcd2).
+        begin_400 = js.split('post("/enroll/begin"', 1)[1].split("400:", 1)[1].split("429:")[0]
+        self.assertIn("shows two passkeys", begin_400)
+        self.assertLess(begin_400.index("revoke one"), begin_400.index("make a new one"))
+        self.assertIn("Otherwise", begin_400)
         css = (ROOT / "mission_control" / "static" / "app.css").read_text(encoding="utf-8")
         self.assertIn("form#enroll[hidden]", css)  # its display: grid would override hidden
 

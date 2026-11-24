@@ -80,9 +80,11 @@
     if (!begin.ok) {
       // The code is spent only when this step succeeds, so it may be tried again here.
       return say(explain(begin, {
-        400: "That code didn't work: it was mistyped, used already or more than 10 minutes " +
-          "old, or two passkeys are already set up (check passkey list on the server). " +
-          "Make a new code there.",
+        // Two passkeys already: the server issues no new code until one is revoked (Codex,
+        // 5fadcd2), so the two causes get different next steps.
+        400: "That code didn't work. If passkey list on the server shows two passkeys, " +
+          "revoke one there first. Otherwise the code was mistyped, used already or more " +
+          "than 10 minutes old: make a new one on the server.",
         429: "Too many tries. Wait a minute, then try again.",
         // The server may have spent the code before its store failed (Codex, 0c4fa76).
         503: UNAVAILABLE + " The code may be used up: if it's refused once this works again, " +
