@@ -51,6 +51,11 @@
   const NEW_CODE = "The one-time code is used up. Make a new one on the server, then reload " +
     "this page.";
 
+  // The outcome of a completed enrollment isn't known: the server may have saved the passkey
+  // before the answer was lost.
+  const MAYBE_ADDED = "The passkey may or may not have been added. Try signing in. If that " +
+    "fails and passkey list on the server doesn't show it: ";
+
   function explain(result, cases) {
     return cases[result.status] || cases.other;
   }
@@ -128,15 +133,29 @@
       });
     } catch (error) {
       // The server may have added it before the connection dropped: say so, don't guess.
-      return say("The connection dropped before Mission Control answered, so the passkey may " +
-        "or may not have been added. Try signing in. If that fails and passkey list on the " +
-        "server doesn't show it: " + NEW_CODE);
+      return say("The connection dropped before Mission Control answered. " + MAYBE_ADDED +
+        NEW_CODE);
     }
-    if (done.ok) return say("Passkey added. You can sign in now.");
+    // An answer is known to be the app's own only when it carries the app's own body: {"ok":
+    // true} for a saved passkey, {"ok": false} for a refusal, after which nothing was saved.
+    // Anything else (a gateway's page, whatever its status) may arrive after the app saved it,
+    // so the page doesn't guess (Codex, 785bcf2, 0fad454 and 3859457: a status number alone
+    // can't tell the app's answer from a gateway's, a 200 included).
+    if (done.ok && done.data && done.data.ok === true) {
+      return say("Passkey added. You can sign in now.");
+    }
+    if (done.ok || !(done.data && done.data.ok === false)) {
+      return say("Mission Control didn't answer normally. " + MAYBE_ADDED + NEW_CODE);
+    }
     say(explain(done, {
+      // 400 includes a racing enrollment that took the last of the two slots: the server
+      // issues no new code at the limit, so that case comes first (Codex, 785bcf2).
+      400: "The passkey was not added. If passkey list on the server shows two passkeys, " +
+        "revoke one there first. Otherwise: " + NEW_CODE,
+      403: "The passkey was not added. " + NEW_CODE,
       429: "Too many tries. Nothing was added. Wait a minute. " + NEW_CODE,
       503: UNAVAILABLE + " Nothing was added; once it works again: " + NEW_CODE,
-      other: "The passkey was not added. " + NEW_CODE,
+      other: "Mission Control didn't answer normally. " + MAYBE_ADDED + NEW_CODE,
     }));
   }
 

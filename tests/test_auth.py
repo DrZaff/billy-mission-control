@@ -644,7 +644,12 @@ class Policies(unittest.TestCase):
         for step in ("enroll/begin", "enroll/complete", "signin/begin", "signin/complete"):
             after = js.split(f'post("/{step}"', 1)[1]
             table = after.split("explain(", 1)[1].split("}));", 1)[0]
-            tables[step] = dict(re.findall(r"^\s*(\d{3}|other): (.+?),?$", table, re.M | re.S))
+            table = "\n".join(line for line in table.splitlines() if "//" not in line)
+            # Each status's whole message, however many lines it spans, up to the next status.
+            found = re.findall(
+                r"^\s*(\d{3}|other): (.*?)(?=^\s*(?:\d{3}|other): |\Z)", table, re.M | re.S
+            )
+            tables[step] = {k: " ".join(v.split()).rstrip(",") for k, v in found}
         for step, table in tables.items():
             self.assertIn("other", table, step)
             self.assertTrue(table["503"].startswith("UNAVAILABLE"), step)
@@ -671,9 +676,29 @@ class Policies(unittest.TestCase):
             after_begin.index("finishEnroll();"), after_begin.index("credentials.create")
         )
         # A dropped completion: the passkey may have been added, so the page doesn't guess.
-        dropped = js.split('post("/enroll/complete"', 1)[1].split("if (done.ok)", 1)[0]
+        dropped = js.split('post("/enroll/complete"', 1)[1].split("if (done.ok &&", 1)[0]
         self.assertIn("catch (error)", dropped)
-        self.assertIn('may " +\n        "or may not have been added', dropped)
+        self.assertIn("MAYBE_ADDED", dropped)
+        # Completion (Codex, 785bcf2): only the app's own statuses mean nothing was saved; any
+        # other (a gateway's 502) may come after the save, so it doesn't guess either way.
+        complete = tables["enroll/complete"]
+        self.assertEqual(set(complete), {"400", "403", "429", "503", "other"})
+        self.assertIn("MAYBE_ADDED", complete["other"])
+        for status in ("400", "403", "429", "503"):
+            self.assertNotIn("MAYBE_ADDED", complete[status], status)
+        # The definite messages are used only for the app's own refusals, which carry
+        # {"ok": false}; a gateway's 503 has no such body (Codex, 0fad454).
+        handled = js.split('post("/enroll/complete"', 1)[1].split("} catch (error) {", 1)[1]
+        # Success only with the app's own {"ok": true}; a gateway's 200 page is not proof.
+        self.assertIn("if (done.ok && done.data && done.data.ok === true)", handled)
+        self.assertNotIn('if (done.ok) return say("Passkey added', js)
+        check = "if (done.ok || !(done.data && done.data.ok === false))"
+        self.assertIn(check, handled)
+        self.assertLess(handled.index(check), handled.index("explain(done"))
+        self.assertIn("MAYBE_ADDED", handled.split(check, 1)[1].split("}", 1)[0])
+        # ...and a 400 may be a racing enrollment that took the last slot: revoke one first.
+        self.assertIn("shows two passkeys", complete["400"])
+        self.assertLess(complete["400"].index("revoke one"), complete["400"].index("NEW_CODE"))
         # One ceremony at a time (Codex, 0c4fa76): a second tap is ignored while one runs.
         guard = js.split("function guard(task)", 1)[1].split("\n  }\n", 1)[0]
         self.assertIn("if (busy) return;", guard)
