@@ -435,15 +435,15 @@ def _distinct(nodes: list) -> bool:
     """Whether no row repeats another. A repeated row may stand where GitHub omitted one (a
     changes request, a label's removal, a failing check), so a counted list with a repeat is
     never whole (Codex's review of caf31c9). Rows are told apart by GitHub's own node id, so
-    two real rows that look alike are never taken for a repeat (Codex's review of 0dc0f8b); a
-    row without one is compared whole."""
+    two real rows that look alike are never taken for a repeat (Codex's review of 0dc0f8b)."""
 
-    def key(n: Any) -> str:
-        if isinstance(n, dict) and isinstance(n.get("id"), str):
-            return "id:" + n["id"]
-        return "row:" + json.dumps(n, sort_keys=True)
-
-    return len({key(n) for n in nodes}) == len(nodes)
+    # Every row is asked for its id, and GitHub always gives one: a row without one (or with
+    # an odd one) is never compared by its content, which a copy of an id'd row would pass
+    # (Codex's review of 2084eb4).
+    ids = [n.get("id") if isinstance(n, dict) else None for n in nodes]
+    if not all(isinstance(i, str) and 0 < len(i) <= 200 for i in ids):
+        return False
+    return len(set(ids)) == len(ids)
 
 
 def _whole(conn: dict, nodes: list, cap: int) -> bool:
@@ -742,24 +742,36 @@ def _checks(
         complete = False
     # The head's own row, wherever it is: with several, a later one may be the head, and its
     # failures still count (Codex's review of cc29d6e).
-    rows = [_obj(_obj(c).get("commit")) for c in commits]
-    heads = [c for c in rows if _sha(c.get("oid")) == head]
+    # Every row naming the head is read, and a malformed sibling only makes the list partial:
+    # it never stops the head's own row being read (Codex's review of 2084eb4).
+    heads = []
+    for row in commits:
+        try:
+            commit = _obj(_obj(row).get("commit"))
+            oid = _sha(commit.get("oid"))
+        except FetchError:
+            complete = False
+            continue
+        if oid == head:
+            heads.append(commit)
     if not heads:
         raise _Incomplete()  # results for another commit: none of them apply
-    commit = heads[0]
     if len(heads) > 1:
         complete = False
     run_ids: set[str] = set()
-    try:
-        suites_conn = _obj(commit.get("checkSuites"))
-        suites = _list(suites_conn.get("nodes"))
-    except FetchError:
-        suites, complete = [], False
-    else:
+    suites: list = []
+    for commit in heads:
+        try:
+            suites_conn = _obj(commit.get("checkSuites"))
+            nodes = _list(suites_conn.get("nodes"))
+        except FetchError:
+            complete = False
+            continue
         # A count that can't be read only makes the list partial: what GitHub did give,
         # a failure among it, is still read (Codex's review of 6e22a60).
-        if not _whole(suites_conn, suites, MAX_SUITES):
+        if not _whole(suites_conn, nodes, MAX_SUITES):
             complete = False
+        suites += nodes
     for suite in suites:
         if not isinstance(suite, dict):
             complete = False
@@ -890,8 +902,11 @@ def _checks(
                     "conclusion": conclusion.lower() if conclusion else None,
                 }
             )
-    cautions, statuses_complete = _status_cautions(commit, head, required, now, expiry)
-    return out + cautions, complete and statuses_complete
+    for commit in heads:
+        cautions, statuses_complete = _status_cautions(commit, head, required, now, expiry)
+        out += cautions
+        complete = complete and statuses_complete
+    return out, complete
 
 
 def _required_name(name: str, required: tuple[str, ...]) -> str | None:

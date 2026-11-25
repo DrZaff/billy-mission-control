@@ -4,6 +4,7 @@ No network: every response is synthetic, and the App's key is generated at run t
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import tempfile
@@ -206,7 +207,32 @@ def answer_for(node, query: str):
             and str(r["author"].get("login")).lower() == login.lower()  # as GitHub matches
         ]
         node[alias] = {"totalCount": totals.get(login, len(mine)), "nodes": mine}
-    return node
+    return with_ids(node)
+
+
+COUNTED = re.compile(r"checkSuites|checkRuns|timelineItems|rv\d+")
+
+
+def with_ids(value):
+    """A copy where every row of a counted list has a node id, as GitHub always gives one: a
+    row's own id if it has one, else one made from its content, so identical rows (a repeat)
+    share an id, as GitHub's would."""
+    if isinstance(value, list):
+        return [with_ids(v) for v in value]
+    if not isinstance(value, dict):
+        return value
+    out = {k: with_ids(v) for k, v in value.items()}
+    for key, conn in out.items():
+        if (
+            COUNTED.fullmatch(key)
+            and isinstance(conn, dict)
+            and isinstance(conn.get("nodes"), list)
+        ):
+            for row in conn["nodes"]:
+                if isinstance(row, dict) and "id" not in row:
+                    content = json.dumps(row, sort_keys=True).encode()
+                    row["id"] = "N_" + hashlib.sha256(content).hexdigest()[:16]
+    return out
 
 
 class FakeGitHub:

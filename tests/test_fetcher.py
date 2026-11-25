@@ -4063,6 +4063,50 @@ class CodexReviewOfCc29d6e(PreReviewOf07c3480):
         self.assertTrue(snapshot._listing(REPO_A, data, NOW)[1])
 
 
+class CodexReviewOf2084eb4(PreReviewOf07c3480):
+    def test_a_row_without_an_id_is_never_told_apart_by_its_content(self):
+        # Blocking: an approval with an id and the same approval without one were two reviews.
+        review = review_node(OWNER, "APPROVED")
+        node = pr_node(1, issue=issue_node(10), files=("evidence/a.json",), reviews=(review,))
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"rv0:" in body:
+                answer = json.loads(data)
+                for pr in answer["data"]["repository"].values():
+                    if pr and "rv0" in pr and pr["rv0"]["nodes"]:
+                        row = pr["rv0"]["nodes"][0]
+                        copy = {k: v for k, v in row.items() if k != "id"}
+                        pr["rv0"] = {"totalCount": 2, "nodes": [row, copy]}
+                        seen.append(1)
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        seen = []
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        self.assertIsNone(self.item_for(node, github)["task"]["pull_request"]["reviews"])
+        self.assertTrue(seen)
+
+    def test_every_head_row_is_read_and_a_bad_sibling_never_stops_it(self):
+        # Blocking: a malformed row before the head's stopped the reading; of two head rows,
+        # only the first was read. Either could discard a reported failure.
+        node = pr_node(1, issue=issue_node(10))
+        head_row = node["commits"]["nodes"][0]
+        failing = json.loads(json.dumps(head_row))
+        failing["commit"]["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][0]["conclusion"] = (
+            "FAILURE"
+        )
+        broken = {"commit": {"oid": "not a sha"}}
+        for rows in ([broken, failing], [head_row, failing]):
+            with self.subTest(first=rows[0]["commit"]["oid"][:5]):
+                node["commits"]["nodes"] = rows
+                item = self.item_for(node)
+                pull = item["task"]["pull_request"]
+                self.assertFalse(pull.get("checks_complete", True))
+                self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now
