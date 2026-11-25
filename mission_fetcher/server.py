@@ -99,6 +99,20 @@ def _snapshot_at(value) -> str | None:
     return value if parsed.tzinfo is not None else None
 
 
+def _last_refresh(previous: dict) -> dict | None:
+    """The last refresh's outcome from the previous status, carried over only in its own shape:
+    short text, never anything else (the file is trusted only as far as it is checked)."""
+    value = previous.get("last_refresh")
+    if not isinstance(value, dict) or set(value) != {"result", "reason", "at"}:
+        return None
+    if value["result"] not in ("ok", "failed"):
+        return None
+    for key in ("reason", "at"):
+        if value[key] is not None and not (isinstance(value[key], str) and len(value[key]) <= 64):
+            return None
+    return dict(value)
+
+
 class Refresher:
     """Runs refreshes, at most one every MIN_INTERVAL seconds, and keeps the status file."""
 
@@ -214,6 +228,9 @@ class Refresher:
             "attempt_epoch": now,
             "attempt_at": stamp.isoformat(),
             "snapshot_at": _snapshot_at(previous.get("snapshot_at")),
+            # The last refresh's outcome, kept apart so a selfcheck never erases it (audit of
+            # 24973b8).
+            "last_refresh": _last_refresh(previous),
             "result": "running",
             "reason": None,
         }
@@ -226,7 +243,17 @@ class Refresher:
             # recorded attempt as a refresh, though it writes no snapshot (audit of e58b933).
             try:
                 self.results = work()
-                reply, status["result"] = OK, "selfcheck"
+                failed = [c for c in self.results if not c.ok]
+                if failed:
+                    # A failing selfcheck is a failure on record, never a neutral "selfcheck"
+                    # (audit of 24973b8: it overwrote "not-read-only").
+                    reason = "selfcheck-failed"
+                    if any(c.name == "token revoked" for c in failed):
+                        reason += "+token-not-revoked"
+                    reply = f"failed:{reason}\n".encode()
+                    status["result"], status["reason"] = "failed", reason
+                else:
+                    reply, status["result"] = OK, "selfcheck"
             except FetchError as error:
                 reply, status["result"], status["reason"] = (
                     f"failed:{error.code}\n".encode(),
@@ -274,6 +301,11 @@ class Refresher:
                 reply, status["reason"] = b"ok:token-not-revoked\n", "token-not-revoked"
             status["snapshot_at"] = snapshot["fetched_at"]
             status["items"] = len(snapshot["items"])
+        status["last_refresh"] = {
+            "result": status["result"],
+            "reason": status["reason"],
+            "at": status["attempt_at"],
+        }
         try:
             write_json(self.cfg.snapshot_dir, STATUS, status)
         except OSError:

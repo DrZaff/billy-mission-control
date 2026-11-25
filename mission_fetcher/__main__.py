@@ -6,7 +6,8 @@
 
 Each refuses to start unless every start-up check passes (checks.py). `--github` also checks
 the App on GitHub: the five read-only permissions, exactly the configured repositories, and a
-read-only token, which is revoked straight away.
+read-only token, which is revoked straight away. It runs like a refresh, under the same lock and
+one-minute floor, and records its attempt in the status file: wait a minute before `fetch-now`.
 """
 
 from __future__ import annotations
@@ -89,10 +90,10 @@ def main(argv: list[str] | None = None) -> int:
             os.umask(0o077)
             refresher = Refresher(cfg)
             reply = refresher.run(lambda: github_checks(cfg, github_for(cfg))).decode().strip()
-            if reply == "ok":
-                results += refresher.results
-            else:
-                # Too soon, busy or failed: said, never skipped (audit of e58b933).
+            results += refresher.results
+            if not refresher.results:
+                # Too soon, busy or failed before any check: said, never skipped (audits of
+                # e58b933 and 24973b8).
                 results.append(Check("GitHub checks", False, reply))
         print(report(results))
         failed = failures(results)

@@ -56,6 +56,7 @@ The config files live only on the server; `config.example.json` and `stopper.exa
 ```sh
 python3 -m mission_fetcher serve --config FILE                # from its own systemd socket unit
 python3 -m mission_fetcher selfcheck [--github] --config FILE # start-up checks; --github checks the App too
+# (--github counts as that minute's one GitHub attempt: wait a minute before fetch-now)
 python3 -m mission_fetcher fetch-now --config FILE            # one refresh, for installing
 ```
 

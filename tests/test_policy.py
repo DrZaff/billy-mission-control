@@ -145,6 +145,31 @@ class App(unittest.TestCase):
             allowed = network if path.name == "github.py" else set()
             self.assertEqual((modules & FORBIDDEN_IMPORTS) - allowed, set(), path.name)
 
+    def test_no_connection_or_socket_comes_in_another_way(self):
+        # Audit of 24973b8: a from-imported HTTPSConnection, a second subclass, or `from socket
+        # import socket` got past the attribute-only checks.
+        paths = sorted((ROOT / "mission_control").rglob("*.py"))
+        paths += sorted((ROOT / "mission_fetcher").rglob("*.py"))
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.level == 0:
+                    self.assertNotIn(
+                        node.module,
+                        ("socket", "http", "http.client", "ssl"),
+                        (path.name, node.lineno),
+                    )
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    self.assertNotIn(
+                        node.func.id,
+                        ("HTTPSConnection", "HTTPConnection", "socket"),
+                        (path.name, node.lineno),
+                    )
+                if isinstance(node, ast.ClassDef):
+                    bases = " ".join(ast.unparse(b) for b in node.bases)
+                    if "HTTPSConnection" in bases or "HTTPConnection" in bases:
+                        self.assertEqual((path.name, node.name), ("github.py", "_Connection"))
+
     def test_the_fetcher_talks_to_api_github_com_only(self):
         tree = ast.parse((ROOT / "mission_fetcher" / "github.py").read_text(encoding="utf-8"))
         hosts = [

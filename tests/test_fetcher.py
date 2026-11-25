@@ -3305,6 +3305,17 @@ class AuditOfE58b933(Base):
     guards no test exercised."""
 
     def test_the_trust_store_never_comes_from_the_environment(self):
+        # Real files at the variables' paths (audit of 24973b8: with paths that didn't exist,
+        # code reading the variables passed too).
+        other_ca = self.base / "other-ca.pem"
+        other_ca.write_text(
+            KEY.public_key()
+            .public_bytes(
+                serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            .decode()
+        )
+        (self.base / "other-certs").mkdir()
         loaded = []
         real = __import__("ssl").SSLContext.load_verify_locations
 
@@ -3331,8 +3342,12 @@ class AuditOfE58b933(Base):
         paths = gh.ssl.get_default_verify_paths()
         self.assertEqual(len(loaded), 1)
         cafile, capath = loaded[0]
-        self.assertIn(cafile, (paths.openssl_cafile, None))
-        self.assertIn(capath, (paths.openssl_capath, None))
+        self.assertEqual(
+            cafile, paths.openssl_cafile if os.path.isfile(paths.openssl_cafile) else None
+        )
+        self.assertEqual(
+            capath, paths.openssl_capath if os.path.isdir(paths.openssl_capath) else None
+        )
         self.assertNotIn(str(self.base), f"{cafile}{capath}")
 
     def test_a_dripping_handshake_is_cut_off_and_leaves_no_thread(self):
@@ -3481,3 +3496,95 @@ class AuditOfE58b933(Base):
         data["repos"][REPO_A]["required_checks"] = []
         with self.assertRaises(fconfig.ConfigError):
             fconfig.parse_fetcher(json.dumps(data))
+
+
+class AuditOf24973b8(Base):
+    def test_the_connection_hands_its_socket_over_before_the_handshake(self):
+        import socket as so
+
+        listener = so.socket(so.AF_INET, so.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(2)
+        self.addCleanup(listener.close)
+        port = listener.getsockname()[1]
+        seen = []
+
+        def handshake(sock):
+            seen.append(sock in held)  # already reachable by the watchdog
+            raise OSError("stop here")
+
+        held, expired = [], __import__("threading").Event()
+        conn = gh._Connection(held, expired, "127.0.0.1", port, timeout=2, context=gh.tls_context())
+        with mock.patch.object(gh.ssl.SSLSocket, "do_handshake", handshake):
+            with self.assertRaises(OSError):
+                conn.connect()
+        conn.close()
+        self.assertEqual(seen, [True])
+        # Past the limit already: no handshake at all.
+        held, expired = [], __import__("threading").Event()
+        expired.set()
+        conn = gh._Connection(held, expired, "127.0.0.1", port, timeout=2, context=gh.tls_context())
+        with mock.patch.object(
+            gh.ssl.SSLSocket,
+            "do_handshake",
+            side_effect=AssertionError("handshake after the limit"),
+        ):
+            with self.assertRaises(TimeoutError):
+                conn.connect()
+        conn.close()
+
+    def selfcheck(self, transport):
+        from mission_fetcher import __main__ as entry
+        from mission_fetcher.checks import Check
+
+        github = gh.GitHub(APP_ID, KEY, transport=transport, clock=lambda: NOW.timestamp())
+        with (
+            mock.patch.object(entry, "read_config", return_value="{}"),
+            mock.patch.object(entry, "parse_fetcher", return_value=self.cfg),
+            mock.patch.object(entry, "fetcher_checks", return_value=[Check("all", True, "yes")]),
+            mock.patch("mission_fetcher.server.github_for", return_value=github),
+            mock.patch.object(entry.os, "umask"),
+            mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out,
+        ):
+            code = entry.main(["selfcheck", "--github", "--config", "x"])
+        return code, out.getvalue()
+
+    def test_the_github_selfcheck_goes_through_the_refresher(self):
+        fake = FakeGitHub()
+        first = []
+
+        def transport(method, path, headers, body):
+            if not first:  # the attempt is on record before the first request
+                first.append(snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS))
+            return fake(method, path, headers, body)
+
+        code, out = self.selfcheck(transport)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(first[0]["result"], "running")
+        status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+        self.assertEqual(status["result"], "selfcheck")
+        code, out = self.selfcheck(transport)  # within the minute
+        self.assertEqual(code, 1)
+        self.assertIn("too-soon", out)
+
+    def test_a_failing_selfcheck_is_a_failure_on_record(self):
+        fake = FakeGitHub()
+        fake.permissions = dict(gh.EXPECTED_PERMISSIONS, contents="write")
+        previous = {
+            "boot_id": None,
+            "attempt_since_boot": 0,
+            "attempt_epoch": 0,
+            "attempt_at": NOW.isoformat(),
+            "snapshot_at": None,
+            "result": "failed",
+            "reason": "not-read-only",
+            "last_refresh": {"result": "failed", "reason": "not-read-only", "at": NOW.isoformat()},
+        }
+        snapshot.write_json(self.cfg.snapshot_dir, snapshot.STATUS, previous)
+        with mock.patch.object(server, "boot_clock", return_value=(None, 10_000.0)):
+            code, out = self.selfcheck(fake)
+        self.assertEqual(code, 1, out)
+        status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+        self.assertEqual(status["result"], "failed")
+        self.assertTrue(status["reason"].startswith("selfcheck-failed"))
+        self.assertEqual(status["last_refresh"]["reason"], "not-read-only")  # never erased
