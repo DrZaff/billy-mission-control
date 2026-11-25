@@ -120,7 +120,7 @@ class Words(unittest.TestCase):
     def test_each_task_shows_its_state_in_words_and_attention_in_text(self):
         for e in DEMO.entries:
             _, _, body = call(APP, f"/tasks/{e.id}")
-            self.assertIn(views.STATE_WORDS[e.status.state].replace("'", "&#x27;"), body, e.id)
+            self.assertIn(views.state_words(e.status).replace("'", "&#x27;"), body, e.id)
             for flag in e.status.flags:
                 self.assertIn(views.FLAG_WORDS[flag].replace("'", "&#x27;"), body, (e.id, flag))
             self.assertEqual("Needs you:" in body, views.needs_you(e.status), e.id)
@@ -321,7 +321,10 @@ class CodexReviewOfDc58125(unittest.TestCase):
             }
         )
         state, body = detail(raw)
-        self.assertEqual(state, State.UNKNOWN)  # the head's reviews now disagree
+        # The head's reviews now disagree, and that uses a fix round too (Codex's review of
+        # 84df535): never merge-ready either way.
+        self.assertIn(state, (State.UNKNOWN, State.AWAITING_OWNER))
+        self.assertIn("fix rounds used up", body)
         self.assertNotEqual(path_row(body, "Clinician"), "done")
 
     def test_clinician_approved_needs_the_normal_path(self):
@@ -398,6 +401,63 @@ class CodexReviewOfCaa5552(unittest.TestCase):
             self.assertEqual(state, expected)
             self.assertNotEqual(path_row(body, "Authorised"), "done", expected)
 
+    def test_unread_run_records_never_show_a_review_or_a_clinical_no(self):
+        # Codex's review of 9537b08: a merge with no run records read, and a file list not
+        # known, must show neither "review: done"/"never passed" nor "clinical: no".
+        e = DEMO.entry("example-tools-60")
+        body = views.task_detail(DEMO, e)
+        self.assertEqual(e.status.state, State.MERGED)
+        self.assertEqual(path_row(body, "Review"), "?")
+        self.assertNotIn("never passed review", body)
+        self.assertIn("clinical: not known", body)
+        # Unverified checks are "?", never "not yet" (Codex's review of b7d568e).
+        self.assertEqual(path_row(body, "Checks"), "?")
+
+    def test_unread_reviews_never_show_a_clinician_approval(self):
+        # Codex's review of 72607b3 (blocking): MERGED alone was taken as proof.
+        raw = entry("example-site-919")
+        raw["task"]["pull_request"]["reviews"] = None
+        state, body = detail(raw)
+        self.assertNotEqual(path_row(body, "Clinician"), "done")
+        self.assertNotIn("approved this commit", body)
+
+    def test_an_open_clinical_pr_with_unread_reviews_claims_nothing(self):
+        # Codex's review of 9fb21c8: it said no clinician had approved.
+        raw = entry("example-site-919")
+        pull = raw["task"]["pull_request"]
+        pull.update(state="open", merged=False, merged_by=None, reviews=None)
+        pull.pop("merged_at", None)
+        raw["task"]["issue"]["state"] = "open"
+        state, body = detail(raw)
+        self.assertEqual(path_row(body, "Clinician"), "?")
+        self.assertNotIn("approval of this commit needed", body)
+        # Nor does the Flags list say so (Codex's review of dc1eb14).
+        self.assertNotIn("No clinician has approved", body)
+
+    def test_unreadable_task_data_never_says_clinical_no(self):
+        # Codex's review of 7faf35a.
+        raw = entry("example-tools-62")
+        raw["task"] = None
+        state, body = detail(raw)
+        self.assertEqual(state, State.UNKNOWN)
+        self.assertIn("clinical: not known", body)
+
+    def test_an_unidentifiable_merger_is_an_unsafe_merge_on_the_path(self):
+        # Codex's review of 48929aa.
+        e = DEMO.entry("example-tools-64")
+        body = views.task_detail(DEMO, e)
+        self.assertIn(Flag.MERGER_UNKNOWN, e.status.flags)
+        self.assertEqual(path_row(body, "Owner"), "!")
+
+    def test_a_merge_with_no_linked_issue_never_shows_authorisation(self):
+        # Codex's review of 72607b3 (blocking): MERGED is reachable with ISSUE_NOT_LINKED.
+        raw = entry("example-site-921")
+        raw["task"]["issue"] = None
+        raw["task"]["runs"] = None  # as the fetcher sends it
+        state, body = detail(raw)
+        self.assertEqual(state, State.MERGED)
+        self.assertNotEqual(path_row(body, "Authorised"), "done")
+
     def test_an_unreviewed_merge_says_so(self):
         e = DEMO.entry("example-tools-57")
         body = views.task_detail(DEMO, e)
@@ -411,7 +471,7 @@ class CodexReviewOfCaa5552(unittest.TestCase):
                 self.assertIn(e.status.state, (State.AWAITING_OWNER, State.MERGED), e.id)
                 self.assertNotIn(Flag.FIX_ROUNDS_EXHAUSTED, e.status.flags, e.id)
             if path_row(body, "Authorised") == "done":
-                self.assertIn(e.status.state, views.AUTHORISED_STATES, e.id)
+                self.assertIn(e.status.underlying, views.AUTHORISED_STATES, e.id)
             if path_row(body, "Review") == "done":
                 self.assertIsNotNone(e.status.reviewed_sha, e.id)
             if path_row(body, "Owner") == "done":
@@ -500,3 +560,274 @@ class ReadOnlyAndErrors(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FableReviewOf0cf099cScreens(unittest.TestCase):
+    """The view never says the opposite of the model (independent review of 0cf099c)."""
+
+    def test_the_owner_row_matches_the_state(self):
+        expected = {
+            State.UNSAFE: ("!",),
+            State.CLOSED: ("-",),
+            State.NOT_LINKED: ("-",),
+            State.UNKNOWN: ("?",),
+            State.MERGED: ("done",),
+        }
+        for e in DEMO.entries:
+            body = views.task_detail(DEMO, e)
+            row = path_row(body, "Owner")
+            if e.status.underlying in expected:
+                self.assertIn(row, expected[e.status.underlying], e.id)
+                self.assertNotIn("approve and merge, later", body, e.id)
+
+    def test_no_file_list_is_never_clinical_no(self):
+        for e in DEMO.entries:
+            body = views.task_detail(DEMO, e)
+            if e.status.pr is None:
+                self.assertNotIn("clinical: no<", body, e.id)
+
+    def test_unverified_states_never_read_as_a_negative(self):
+        for e in DEMO.entries:
+            words = views.state_words(e.status)
+            if Flag.CHECKS_UNVERIFIED in e.status.flags:
+                self.assertNotIn("not all passed", words, e.id)
+            if Flag.RUNS_UNVERIFIED in e.status.flags:
+                self.assertNotIn("waiting for review", words, e.id)
+                self.assertIsNone(DEMO.command(e), e.id)
+
+    def test_stale_or_missing_checks_are_pending_not_alarms(self):
+        for e in DEMO.entries:
+            body = views.task_detail(DEMO, e)
+            if e.status.flags & {Flag.CHECKS_STALE, Flag.CHECKS_MISSING}:
+                self.assertEqual(path_row(body, "Checks"), "...", e.id)
+
+
+class CodexReviewOf0e2139fScreens(unittest.TestCase):
+    def test_a_closed_pr_with_unknown_files_never_says_clinical_no(self):
+        raw = entry("example-tools-60")
+        pull = raw["task"]["pull_request"]
+        pull.update(merged=False, merged_by=None, files=None)
+        pull.pop("merged_at", None)
+        state, body = detail(raw)
+        self.assertEqual(state, State.CLOSED)
+        self.assertIn("clinical: not known", body)
+
+
+class AuditOf42a3721Screens(unittest.TestCase):
+    def test_a_closed_prs_rows_never_contradict_it(self):
+        raw = entry("example-site-919")
+        pull = raw["task"]["pull_request"]
+        pull.update(merged=False, merged_by=None, checks=None)
+        pull.pop("merged_at", None)
+        raw["task"]["runs"] = None
+        state, body = detail(raw)
+        self.assertEqual(state, State.CLOSED)
+        self.assertNotIn("not yet", body)
+        self.assertNotIn("needed, later", body)
+        self.assertIn("not judged: closed", body)
+
+
+class AuditOf80e8fb3Screens(unittest.TestCase):
+    def test_no_command_is_offered_when_billys_records_are_not_read(self):
+        raw = entry("example-site-901")
+        raw["task"]["runs"] = None
+        demo = load(json.dumps(with_tasks(raw)))
+        e = demo.entries[0]
+        self.assertIn(Flag.RUNS_UNVERIFIED, e.status.flags)
+        self.assertIsNone(demo.command(e))
+
+
+class AuditOf8c62413Screens(unittest.TestCase):
+    def test_an_open_pr_with_no_linked_issue_is_an_alert(self):
+        raw = entry("example-tools-62")
+        demo = load(json.dumps(with_tasks(raw)))
+        e = demo.entries[0]
+        self.assertEqual(e.status.state, State.NOT_LINKED)
+        self.assertEqual(views.section(e.status), "alerts")
+
+    def test_no_issue_and_pr_in_a_repository_share_a_number(self):
+        # GitHub numbers issues and PRs from one sequence (audit of 8c62413).
+        data = json.loads(DEMO_FILE.read_text(encoding="utf-8"))
+        issues: dict[str, set[int]] = {}
+        pulls: dict[str, set[int]] = {}
+        branches: set[tuple[str, str]] = set()
+        for item in data["tasks"]:
+            t = item["task"]
+            repo = t["repo"]
+            if isinstance(t.get("issue"), dict):
+                issues.setdefault(repo, set()).add(t["issue"]["number"])
+            pull = t.get("pull_request")
+            if isinstance(pull, dict):
+                pulls.setdefault(repo, set()).add(pull["number"])
+            branch = t.get("branch")
+            if isinstance(branch, dict):
+                # And each task has its own branch.
+                key = (repo, branch["name"])
+                self.assertNotIn(key, branches, item["id"])
+                branches.add(key)
+        for repo in issues:
+            self.assertEqual(issues[repo] & pulls.get(repo, set()), set(), repo)
+
+
+class CodexReviewOfCae7658Screens(unittest.TestCase):
+    def test_the_checks_row_claims_nothing_github_enforced(self):
+        raw = entry("example-site-931")
+        state, body = detail(raw)
+        self.assertTrue(load(json.dumps(with_tasks(raw))).entries[0].status.merged)
+        self.assertIn("not judged after a merge", body)
+        self.assertNotIn("enforced", body)
+
+    def entry(self):
+        raw = entry("example-site-931")
+        for r in raw["task"]["runs"]:
+            r.pop("files", None)  # nothing known to be clinical
+        return raw
+
+    def test_a_clinician_row_whenever_the_files_may_be_clinical(self):
+        raw = self.entry()
+        pull = raw["task"]["pull_request"]
+        pull.update(state="open", merged=False, merged_by=None, files=["site/a.html"])
+        pull.pop("merged_at")
+        pull["files_complete"] = False
+        pull["reviews"] = []
+        state, body = detail(raw)
+        self.assertIn("clinical: not known", body)
+        self.assertIn("Clinician", body)
+        self.assertIn("approval of this commit needed", body)
+        # Merged, with no known clinical file and the reviews read: not known, never "later".
+        raw = self.entry()
+        raw["task"]["pull_request"].update(files=["site/a.html"], files_complete=False)
+        state, body = detail(raw)
+        self.assertIn("not known: the files couldn&#x27;t all be read", body)
+        self.assertNotIn("needed, later", body)
+
+
+class FableAuditOfB5ac6ddScreens(unittest.TestCase):
+    def merged_entry(self):
+        raw = entry("example-site-931")
+        for r in raw["task"]["runs"]:
+            r.pop("files", None)
+        return raw
+
+    def test_a_withdrawn_merge_reads_consistently(self):
+        raw = self.merged_entry()
+        raw["task"]["issue"]["state"] = "closed"
+        raw["task"]["issue"]["timeline"].append(
+            {"event": "closed", "actor": "example-owner", "at": "2026-11-14T16:30:00+00:00"}
+        )
+        state, body = detail(raw)
+        self.assertEqual(state, State.UNSAFE)
+        self.assertNotIn("never", body)  # neither "never authorised" nor "never passed review"
+        self.assertIn(
+            "withdrawn by the time of the merge: agent:ready removed or the issue closed", body
+        )
+        self.assertIn("not judged: no authorisation covers Billy&#x27;s records", body)
+
+    def test_an_approval_shows_even_when_the_files_may_be_clinical(self):
+        raw = self.merged_entry()
+        pull = raw["task"]["pull_request"]
+        pull.update(state="open", merged=False, merged_by=None, files=["site/a.html"])
+        pull.pop("merged_at")
+        pull["files_complete"] = False
+        state, body = detail(raw)
+        self.assertIn("A clinician approved this commit", body)
+        self.assertIn("approved this commit</span>", body)
+        self.assertNotIn("approval of the final commit needed", body)
+
+
+class CodexReviewOf4f8c1e9Screens(unittest.TestCase):
+    def test_disagreeing_reviews_of_the_merged_commit_are_never_not_yet(self):
+        raw = entry("example-site-931")
+        runs = raw["task"]["runs"]
+        review = next(r for r in runs if r["step"] == "review")
+        clash = dict(
+            review,
+            verdict="changes_needed",
+            findings=[{"severity": "blocking"}],
+            at="2026-11-14T16:01:00+00:00",
+        )
+        runs.insert(runs.index(review) + 1, clash)
+        state, body = detail(raw)
+        self.assertEqual(state, State.UNSAFE)
+        self.assertIn("reviews disagree", body)
+        self.assertIn("the reviews of this commit disagree", body)
+        self.assertNotIn("not yet", body)
+
+
+class FableAuditOfFe4d72dScreens(unittest.TestCase):
+    def rows(self, raw):
+        demo = load(json.dumps(with_tasks(raw)))
+        return views._path(demo.entries[0]), demo.entries[0]
+
+    def test_rows_say_what_each_state_establishes(self):
+        body, _ = self.rows(entry("example-tools-59"))  # never authorised
+        self.assertIn("<span>no</span>", body)
+        body, _ = self.rows(entry("example-site-935"))
+        self.assertIn("not known: a review can&#x27;t be placed", body)
+        body, _ = self.rows(entry("example-site-939"))
+        self.assertIn("not known: the issue&#x27;s closings and reopenings don&#x27;t add up", body)
+        body, _ = self.rows(entry("example-tools-62"))
+        self.assertIn("not shown: no linked issue to show it", body)
+
+    def test_disagreeing_reviews_of_an_open_head_say_so(self):
+        raw = entry("example-site-931")
+        pull = raw["task"]["pull_request"]
+        pull.update(state="open", merged=False, merged_by=None)
+        pull.pop("merged_at")
+        runs = raw["task"]["runs"]
+        review = next(r for r in runs if r["step"] == "review")
+        runs.insert(
+            runs.index(review) + 1,
+            dict(
+                review,
+                verdict="changes_needed",
+                findings=[{"severity": "blocking"}],
+                at="2026-11-14T16:01:00+00:00",
+            ),
+        )
+        body, e = self.rows(raw)
+        self.assertEqual(e.status.state, State.UNKNOWN)
+        self.assertIn("the reviews of this commit disagree", body)
+
+    def test_a_paused_task_shows_where_it_stands(self):
+        raw = entry("example-site-931")
+        paused = copy.deepcopy(raw)
+        paused["task"]["paused"] = True
+        pull = paused["task"]["pull_request"]
+        pull.update(state="open", merged=False, merged_by=None)
+        pull.pop("merged_at")
+        unpaused = copy.deepcopy(paused)
+        unpaused["task"]["paused"] = False
+        body_p, e_p = self.rows(paused)
+        body_u, e_u = self.rows(unpaused)
+        self.assertEqual(e_p.status.state, State.PAUSED)
+        self.assertEqual(body_p, body_u)
+        self.assertEqual(views.section(e_p.status), views.section(e_u.status))
+
+
+class FableAuditOfCa7faa9Screens(unittest.TestCase):
+    def test_the_not_linked_header_never_contradicts_its_reason(self):
+        for task_id in ("example-tools-62", "example-tools-68"):
+            state, body = detail(entry(task_id))
+            self.assertEqual(state, State.NOT_LINKED)
+            self.assertIn("Not on Billy&#x27;s path now (see why)", body)
+            self.assertNotIn("decide on GitHub", body)
+
+    def test_an_unknown_merge_is_not_called_unsafe(self):
+        state, body = detail(entry("example-site-939"))
+        self.assertEqual(state, State.UNKNOWN)
+        self.assertIn("whether it was safe isn&#x27;t known", body)
+        self.assertNotIn("merged unsafely", body)
+
+    def test_the_withdrawn_row_reads_the_same_open_or_merged(self):
+        state, body = detail(entry("example-tools-66"))
+        self.assertEqual(state, State.UNSAFE)
+        self.assertIn("withdrawn: agent:ready removed or the issue closed", body)
+
+
+class CodexReviewOf980b8b9Screens(unittest.TestCase):
+    def test_a_merge_while_the_issue_was_closed_says_so(self):
+        state, body = detail(entry("example-site-941"))
+        self.assertEqual(state, State.UNSAFE)
+        self.assertIn("yes, but its issue was closed when it was merged", body)
+        self.assertIn("Merged while its issue was closed", body)

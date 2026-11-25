@@ -103,7 +103,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -203,7 +204,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -849,7 +851,8 @@
        "status": "in_progress",
        "conclusion": null
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -1027,7 +1030,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -1124,7 +1128,8 @@
        "status": "completed",
        "conclusion": "failure"
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -1545,7 +1550,8 @@
       "site/footer.html"
      ],
      "reviews": [],
-     "checks": []
+     "checks": [],
+     "from_fork": false
     }
    }
   },
@@ -1642,7 +1648,9 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "merged_at": "2026-11-14T16:45:00+00:00",
+     "from_fork": false
     }
    }
   },
@@ -1742,7 +1750,9 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "merged_at": "2026-11-14T17:05:00+00:00",
+     "from_fork": false
     }
    }
   },
@@ -1817,7 +1827,9 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "merged_at": "2026-11-14T18:00:00+00:00",
+     "from_fork": false
     }
    }
   },
@@ -1957,7 +1969,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -1991,6 +2004,12 @@
        "actor": "example-owner",
        "at": "2026-11-14T09:00:00+00:00",
        "label": "agent:ready"
+      },
+      {
+       "event": "closed",
+       "actor": "example-owner",
+       "at": "2026-11-14T17:25:00+00:00",
+       "closer_pr": 922
       }
      ]
     },
@@ -2054,7 +2073,218 @@
        "status": "completed",
        "conclusion": "success"
       }
+     ],
+     "merged_at": "2026-11-14T17:25:00+00:00",
+     "from_fork": false
+    }
+   }
+  },
+  {
+   "id": "example-site-939",
+   "title": "About page forwards home (issue closed, closing not on record)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 939,
+     "state": "closed",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
      ]
+    },
+    "branch": {
+     "name": "claude/about-redirect",
+     "head": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/about-redirect",
+      "sha": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9",
+      "at": "2026-11-14T16:10:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/about-redirect",
+      "sha": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9",
+      "at": "2026-11-14T16:20:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-e9e9e9e",
+      "sha": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9",
+      "at": "2026-11-14T16:25:00+00:00",
+      "pr": 940
+     }
+    ],
+    "pull_request": {
+     "number": 940,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ],
+     "merged_at": "2026-11-14T17:25:00+00:00",
+     "from_fork": false
+    }
+   }
+  },
+  {
+   "id": "example-site-941",
+   "title": "Footer year (merged while its issue was closed)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 941,
+     "state": "closed",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      },
+      {
+       "event": "closed",
+       "actor": "example-owner",
+       "at": "2026-11-14T10:00:00+00:00",
+       "closer_pr": null
+      },
+      {
+       "event": "authorized",
+       "actor": "example-owner",
+       "at": "2026-11-14T11:00:00+00:00"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/footer-year",
+     "head": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/footer-year",
+      "sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+      "at": "2026-11-14T16:10:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/footer-year",
+      "sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+      "at": "2026-11-14T16:20:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-f4f4f4f",
+      "sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+      "at": "2026-11-14T16:25:00+00:00",
+      "pr": 942
+     }
+    ],
+    "pull_request": {
+     "number": 942,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ],
+     "merged_at": "2026-11-14T17:25:00+00:00",
+     "from_fork": false
     }
    }
   },
@@ -2088,6 +2318,11 @@
        "actor": "example-owner",
        "at": "2026-11-14T09:00:00+00:00",
        "label": "agent:ready"
+      },
+      {
+       "event": "closed",
+       "actor": "example-owner",
+       "at": "2026-11-14T17:00:00+00:00"
       }
      ]
     },
@@ -2129,7 +2364,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -2220,7 +2456,702 @@
        "status": "completed",
        "conclusion": "success"
       }
+     ],
+     "merged_at": "2026-11-14T17:55:00+00:00",
+     "from_fork": false
+    }
+   }
+  },
+  {
+   "id": "example-tools-60",
+   "title": "Footer link colour (merged; issue link, files, reviews and checks not verified here)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": null,
+    "branch": {
+     "name": "claude/footer-link-colour",
+     "head": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9"
+    },
+    "runs": null,
+    "pull_request": {
+     "number": 61,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9",
+     "files": null,
+     "reviews": null,
+     "checks": null,
+     "merged_at": "2026-11-14T10:00:00+00:00",
+     "from_fork": false
+    }
+   }
+  },
+  {
+   "id": "example-tools-62",
+   "title": "Typo in the about page (no authorised issue linked)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": null,
+    "branch": {
+     "name": "claude/about-typo",
+     "head": "d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0"
+    },
+    "runs": [],
+    "pull_request": {
+     "number": 62,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0",
+     "files": [
+      "site/about.html"
+     ],
+     "reviews": [],
+     "checks": [],
+     "from_fork": false
+    }
+   }
+  },
+  {
+   "id": "example-tools-64",
+   "title": "Footer spacing (merged by an account that can't be identified)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 63,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
      ]
+    },
+    "branch": {
+     "name": "claude/footer-spacing",
+     "head": "e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/footer-spacing",
+      "sha": "e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1",
+      "at": "2026-11-14T16:40:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-tools",
+      "branch": "claude/footer-spacing",
+      "sha": "e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1",
+      "at": "2026-11-14T16:50:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-tools",
+      "branch": "agent/pub-e8f9a0b",
+      "sha": "e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1",
+      "at": "2026-11-14T16:55:00+00:00",
+      "pr": 64
+     }
+    ],
+    "pull_request": {
+     "number": 64,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": null,
+     "head_sha": "e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1",
+     "files": [
+      "site/footer.css"
+     ],
+     "reviews": [],
+     "checks": null,
+     "merged_at": "2026-11-14T17:55:00+00:00",
+     "from_fork": false
+    }
+   }
+  },
+  {
+   "id": "example-tools-66",
+   "title": "Old menu link (its issue is closed, but the pull request is open)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 65,
+     "state": "closed",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      },
+      {
+       "event": "closed",
+       "actor": "example-owner",
+       "at": "2026-11-14T12:00:00+00:00"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/old-menu-link",
+     "head": "f9a0b1c2f9a0b1c2f9a0b1c2f9a0b1c2f9a0b1c2"
+    },
+    "runs": [],
+    "pull_request": {
+     "number": 66,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "f9a0b1c2f9a0b1c2f9a0b1c2f9a0b1c2f9a0b1c2",
+     "files": [
+      "site/menu.html"
+     ],
+     "reviews": [],
+     "checks": [],
+     "from_fork": false
+    }
+   }
+  },
+  {
+   "id": "example-site-931",
+   "title": "Evidence table: corrected study row (clinician approved)",
+   "risk": "high",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 931,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/evidence-corrected",
+     "head": "abababababababababababababababababababab"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/evidence-corrected",
+      "sha": "abababababababababababababababababababab",
+      "at": "2026-11-14T15:50:00+00:00",
+      "status": "finished",
+      "files": [
+       "evidence/ai-vs-human.json"
+      ]
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/evidence-corrected",
+      "sha": "abababababababababababababababababababab",
+      "at": "2026-11-14T16:00:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-abababa",
+      "sha": "abababababababababababababababababababab",
+      "at": "2026-11-14T16:05:00+00:00",
+      "pr": 932
+     }
+    ],
+    "pull_request": {
+     "number": 932,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "abababababababababababababababababababab",
+     "files": [
+      "evidence/ai-vs-human.json"
+     ],
+     "reviews": [
+      {
+       "user": "example-clinician",
+       "user_type": "User",
+       "state": "APPROVED",
+       "commit_id": "abababababababababababababababababababab",
+       "at": "2026-11-14T16:35:00+00:00"
+      }
+     ],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "abababababababababababababababababababab",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "abababababababababababababababababababab",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ],
+     "merged_at": "2026-11-14T17:05:00+00:00",
+     "from_fork": false
+    }
+   }
+  },
+  {
+   "id": "example-tools-68",
+   "title": "Typo fix from a fork (claims an authorised issue)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 67,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/fork-typo",
+     "head": "f1e2d3c4f1e2d3c4f1e2d3c4f1e2d3c4f1e2d3c4"
+    },
+    "runs": [],
+    "pull_request": {
+     "number": 68,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "f1e2d3c4f1e2d3c4f1e2d3c4f1e2d3c4f1e2d3c4",
+     "files": [
+      "site/about.html"
+     ],
+     "reviews": [],
+     "checks": [],
+     "from_fork": true
+    }
+   }
+  },
+  {
+   "id": "example-site-933",
+   "title": "Glossary page (authorisation withdrawn)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 933,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      },
+      {
+       "event": "unlabeled",
+       "label": "agent:ready",
+       "actor": "example-owner",
+       "at": "2026-11-15T09:00:00+00:00"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/glossary-page",
+     "head": "efefefefefefefefefefefefefefefefefefefef"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/glossary-page",
+      "sha": "efefefefefefefefefefefefefefefefefefefef",
+      "at": "2026-11-14T16:10:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/glossary-page",
+      "sha": "efefefefefefefefefefefefefefefefefefefef",
+      "at": "2026-11-14T16:20:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-efefefe",
+      "sha": "efefefefefefefefefefefefefefefefefefefef",
+      "at": "2026-11-14T16:25:00+00:00",
+      "pr": 934
+     }
+    ],
+    "pull_request": {
+     "number": 934,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "efefefefefefefefefefefefefefefefefefefef",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "efefefefefefefefefefefefefefefefefefefef",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "efefefefefefefefefefefefefefefefefefefef",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ],
+     "from_fork": false
+    }
+   }
+  },
+  {
+   "id": "example-site-937",
+   "title": "Settings copy (checks couldn't be read)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 937,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/settings-copy",
+     "head": "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/settings-copy",
+      "sha": "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
+      "at": "2026-11-14T09:10:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/settings-copy",
+      "sha": "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
+      "at": "2026-11-14T09:20:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-e7e7e7e",
+      "sha": "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
+      "at": "2026-11-14T09:25:00+00:00",
+      "pr": 938
+     }
+    ],
+    "pull_request": {
+     "number": 938,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": null,
+     "from_fork": false
+    }
+   }
+  },
+  {
+   "id": "example-site-935",
+   "title": "Evidence row (a clinician's review was dismissed)",
+   "risk": "high",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 935,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/evidence-dismissed",
+     "head": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/evidence-dismissed",
+      "sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "at": "2026-11-14T15:50:00+00:00",
+      "status": "finished",
+      "files": [
+       "evidence/ai-vs-human.json"
+      ]
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/evidence-dismissed",
+      "sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "at": "2026-11-14T16:00:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-cdcdcdc",
+      "sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "at": "2026-11-14T16:05:00+00:00",
+      "pr": 936
+     }
+    ],
+    "pull_request": {
+     "number": 936,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+     "files": [
+      "evidence/ai-vs-human.json"
+     ],
+     "reviews": [
+      {
+       "user": "example-clinician",
+       "user_type": "User",
+       "state": "DISMISSED",
+       "commit_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+       "at": "2026-11-14T16:30:00+00:00"
+      }
+     ],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ],
+     "merged_at": "2026-11-14T17:05:00+00:00",
+     "from_fork": false
     }
    }
   }
