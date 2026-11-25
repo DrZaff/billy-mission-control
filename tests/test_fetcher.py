@@ -134,6 +134,7 @@ def pr_node(
                                                 "name": c,
                                                 "status": "COMPLETED",
                                                 "conclusion": "SUCCESS",
+                                                "completedAt": "2026-11-23T00:00:00Z",
                                             }
                                             for c in checks
                                         ],
@@ -1785,6 +1786,63 @@ class Refresh(Base):
         state = tasks.derive(self.task_of(item))
         self.assertEqual(state.state, tasks.State.UNSAFE)
         self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+
+    # ------------------------------------------------ Codex's review of 5d06878
+
+    def test_an_old_success_never_passes_a_required_check(self):
+        for done, passed in (
+            ("2026-11-23T00:00:00Z", True),
+            ("2026-11-10T00:00:00Z", False),
+            (None, False),
+        ):
+            with self.subTest(done=done):
+                node = pr_node(1, issue=issue_node(10))
+                suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+                for check in suite["checkRuns"]["nodes"]:
+                    check["completedAt"] = done
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                flags = tasks.derive(self.reviewed(item)).flags
+                self.assertEqual(tasks.Flag.CHECKS_PASSED in flags, passed)
+
+    def test_a_review_after_the_merge_never_discards_the_evidence(self):
+        merged_at = (NOW - timedelta(days=1)).isoformat()
+        later = review_node(at=(NOW - timedelta(hours=1)).isoformat())
+        later["commit"] = None  # its commit is gone
+        node = pr_node(
+            1,
+            state="MERGED",
+            merged=True,
+            closed_at=merged_at,
+            issue=issue_node(10),
+            files=("evidence/a.json",),
+            reviews=[later],
+        )
+        node["mergedAt"] = merged_at
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        item = self.run_refresh()["items"][0]
+        self.assertEqual(item["task"]["pull_request"]["reviews"], [])
+        state = tasks.derive(self.task_of(item))
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+
+    def test_a_known_unsafe_merge_is_shown_even_when_all_was_read_lite(self):
+        recent = (NOW - timedelta(days=1)).isoformat()
+        merge = pr_node(9, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
+        merge["mergedBy"] = {"login": "someone-else"}
+        self.fake.prs[REPO_A]["closed"] = [merge]
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            if path == "/graphql" and b"files(" in body:
+                return 502, {}, b""
+            return real(method, path, headers, body)
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        snap = snapshot.refresh(self.cfg, github, NOW)  # not held back
+        item = next(i for i in snap["items"] if i["number"] == 9)
+        self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNSAFE)
 
     def test_a_dismissed_review_on_a_merged_pr_is_not_known(self):
         # Codex's review of 9fb21c8 (blocking): GitHub gives a review's current state with its

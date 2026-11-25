@@ -263,7 +263,7 @@ _HEAVY_FIELDS = """
       nodes {
         app { slug }
         workflowRun { event }
-        checkRuns(first: $runs) { totalCount nodes { name status conclusion } }
+        checkRuns(first: $runs) { totalCount nodes { name status conclusion completedAt } }
       }
     } } }
   }
@@ -499,12 +499,17 @@ def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) 
         is_bot = isinstance(author, dict) and author.get("__typename") == "Bot"
         if is_bot or _login(author) not in clinicians:
             continue
+        submitted = n.get("submittedAt")
+        if submitted is None:
+            raise _Incomplete()  # a review that can't be placed in time: no guess
+        if merged_at is not None and datetime.fromisoformat(_time(submitted)) > merged_at:
+            # Submitted after the merge: it can't bear on the merge, so nothing about it (a
+            # missing commit, a later dismissal) may discard the rest (Codex's reviews of
+            # 84df535 and 5d06878).
+            continue
         if merged_at is not None and state == "DISMISSED":
-            # Submitted after the merge, it was dismissed after it too, so it can't bear on
-            # the merge: only one submitted by then is "not known" (Codex's review of 84df535).
-            submitted = n.get("submittedAt")
-            if submitted is None or datetime.fromisoformat(_time(submitted)) <= merged_at:
-                raise _Incomplete()
+            # Dismissed some time after a submission before the merge: not placeable.
+            raise _Incomplete()
         commit = n.get("commit")
         if commit is None or n.get("submittedAt") is None:
             raise _Incomplete()  # a review whose commit is gone can't be placed: no guess
@@ -520,7 +525,12 @@ def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) 
     return out
 
 
-def _checks(pr: dict, head: str, app: str, required: tuple[str, ...]) -> list[dict]:
+CHECK_FRESH = timedelta(days=7)
+
+
+def _checks(
+    pr: dict, head: str, app: str, required: tuple[str, ...], now: datetime | None = None
+) -> list[dict]:
     """The head commit's check runs from the configured app only. A same-named run from any
     other app is left out, so it can never satisfy a required check (Codex's review of
     bf76866)."""
@@ -566,6 +576,15 @@ def _checks(pr: dict, head: str, app: str, required: tuple[str, ...]) -> list[di
             conclusion = r.get("conclusion")
             if conclusion is not None and not isinstance(conclusion, str):
                 raise _bad()
+            if status == "completed" and conclusion == "SUCCESS":
+                # A success counts only while fresh: GitHub needs one within the past seven
+                # days, so an old one (or one with no time) is no result here (Codex's review of
+                # 5d06878: it passed a required check indefinitely).
+                done = r.get("completedAt")
+                if done is None or now is None:
+                    continue
+                if datetime.fromisoformat(_time(done)) < now - CHECK_FRESH:
+                    continue
             out.append(
                 {
                     "name": _exact(r.get("name")),
@@ -662,7 +681,9 @@ def _event(event: Any) -> dict:
     }
 
 
-def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
+def _item(
+    repo: str, cfg: FetcherConfig, node: Any, lite: bool = False, now: datetime | None = None
+) -> dict:
     """One pull request as a snapshot item. `lite`: read without its files, reviews and checks
     (it was too large to read whole), which are then "not known"."""
     pr = _obj(node)
@@ -725,7 +746,9 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
         parts.append(
             (
                 "checks",
-                lambda: _checks(pr, head, settings.checks_app, tuple(settings.required_checks)),
+                lambda: _checks(
+                    pr, head, settings.checks_app, tuple(settings.required_checks), now
+                ),
             )
         )
     else:
@@ -983,7 +1006,7 @@ def repo_items(
         try:
             if node is UNREADABLE:
                 raise _bad()
-            item = _item(repo, cfg, node, lite)
+            item = _item(repo, cfg, node, lite, now)
             if item["number"] != number:
                 raise _bad()
         except (FetchError, TypeError, ValueError, AttributeError, KeyError, OverflowError):
@@ -996,7 +1019,13 @@ def repo_items(
         # closed before the window (possible only if the list was wrong) does not.
         if item["closed_at"] is None or datetime.fromisoformat(item["closed_at"]) >= since:
             items.append(item)
-    if len(details) > 1 and all(lite for _, _, lite in details):
+    unsafe_known = any(
+        _model_reads(i["task"]) and derive(dict(i["task"], paused=False)).state is State.UNSAFE
+        for i in items
+    )
+    # Unless what was read shows a known unsafe merge: that must be shown, not held back with
+    # the last snapshot (Codex's review of 5d06878).
+    if len(details) > 1 and all(lite for _, _, lite in details) and not unsafe_known:
         # Every pull request read without its files, reviews and checks is no per-PR problem
         # either: fail, keeping the last good snapshot, rather than replace known results with
         # "not known" under an "ok" (Fable's pre-review of 8152df0).
