@@ -18,8 +18,9 @@ stop marker itself. `runs` is null, "not read": phase A5 starts with GitHub data
 #15, 2026-11-24), and an empty list would claim no review ever happened.
 
 Each item's `checks_fresh_until` is when its first counted pass stops being fresh (GitHub needs
-one within seven days). After that time the web app must treat the item's checks as not known
-(A5b): a snapshot is read long after it is written, so freshness is judged when it is read.
+one within seven days). After that time the web app must count none of the item's passes: its
+checks are then not verified, and a failure still fails (A5b; Codex's review of 1e0f9b0). A
+snapshot is read long after it is written, so freshness is judged when it is read.
 """
 
 from __future__ import annotations
@@ -618,9 +619,9 @@ def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) 
 
 CHECK_FRESH = timedelta(days=7)
 # Freshness changes with time, and a snapshot is read long after it is written: each item says
-# when its counted passes stop being fresh (checks_fresh_until), and a reader treats its checks
-# as not known after that (A5b). The time a snapshot takes to be written then never matters
-# (Codex's reviews of 05062fc, a34154f, d9a70f4 and 28d71fe; owner's decision, 2026-11-25).
+# when its counted passes stop being fresh (checks_fresh_until), and a reader counts none of
+# them after that, failures still failing (A5b). The time a snapshot takes to be written then
+# never matters (Codex's reviews of 05062fc to 28d71fe; owner's decision, 2026-11-25).
 
 
 def _checks(
@@ -763,18 +764,18 @@ def _checks(
                     complete = False
                     continue
                 try:
-                    finished = datetime.fromisoformat(_time(done))
-                except FetchError:
-                    # An odd time: this one result is unknown, the rest still counts (Codex's
-                    # review of 0e2139f: it discarded failures already read).
+                    stale_at = datetime.fromisoformat(_time(done)) + CHECK_FRESH
+                except (FetchError, OverflowError):
+                    # An odd time, or one too late to add a week to: this one result is
+                    # unknown, the rest still counts (Codex's reviews of 0e2139f and 1e0f9b0).
                     complete = False
                     continue
-                if finished < now - CHECK_FRESH:
+                if stale_at < now:
                     complete = False
                     continue
                 if key != name:
                     continue  # a pass under another case of the name: never counted
-                expiry.append(finished + CHECK_FRESH)
+                expiry.append(stale_at)
             out.append(
                 {
                     "name": key,
@@ -875,13 +876,13 @@ def _status_cautions(
         if state == "SUCCESS":
             created = context.get("createdAt")
             try:
-                at = datetime.fromisoformat(_time(created)) if created is not None else None
-            except FetchError:
-                at = None
-            if at is None or now is None or at < now - CHECK_FRESH:
+                stale_at = datetime.fromisoformat(_time(created)) + CHECK_FRESH
+            except (FetchError, OverflowError):
+                stale_at = None
+            if stale_at is None or now is None or stale_at < now:
                 complete = False
             elif expiry is not None:
-                expiry.append(at + CHECK_FRESH)  # the passes stand only while it is fresh
+                expiry.append(stale_at)  # the passes stand only while it is fresh
             continue
         pending = state in ("PENDING", "EXPECTED")
         out.append(
@@ -1041,7 +1042,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
                 pull["checks_complete"] = False  # a failure in it still fails; it never passes
         except (_Incomplete, *_SHAPE):
             pull["checks"] = None
-    # When the first counted pass stops being fresh: after it the checks are not known.
+    # When the first counted pass stops being fresh: after it no pass counts; failures do.
     fresh_until = None
     if pull["checks"] is not None and expiry:
         fresh_until = min(expiry).astimezone(UTC).isoformat()

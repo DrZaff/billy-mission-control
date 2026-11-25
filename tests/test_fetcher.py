@@ -4342,6 +4342,24 @@ class ChecksFreshUntil(CodexReviewOf099ef9b):
         expected = (soon + snapshot.CHECK_FRESH).astimezone(UTC).isoformat()
         self.assertEqual(item["checks_fresh_until"], expected)
 
+    def test_a_time_too_late_to_date_never_discards_a_known_failure(self):
+        # Codex's review of 1e0f9b0 (blocking): adding a week overflowed, and the whole check
+        # list, a failure GitHub reported among it, became "not known".
+        node = pr_node(1, issue=issue_node(10))
+        runs = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["checkRuns"]
+        runs["nodes"][0]["completedAt"] = "9999-12-31T23:00:00Z"
+        runs["nodes"][1]["conclusion"] = "FAILURE"
+        item = self.item_for(node)
+        pull = item["task"]["pull_request"]
+        self.assertIsNotNone(pull["checks"])
+        self.assertFalse(pull.get("checks_complete", True))
+        self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
+        # A status the same.
+        node = pr_node(1, issue=issue_node(10), statuses=[("lint", "SUCCESS")])
+        status = node["commits"]["nodes"][0]["commit"]["status"]["contexts"][0]
+        status["createdAt"] = "9999-12-31T23:00:00Z"
+        self.assertFalse(self.item_for(node)["task"]["pull_request"].get("checks_complete", True))
+
     def test_no_checks_read_means_no_date(self):
         merged_at = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(1, state="MERGED", merged=True, closed_at=merged_at, issue=issue_node(10))
