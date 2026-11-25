@@ -2049,7 +2049,8 @@ class FableAuditOfCa7faa9(unittest.TestCase):
         s = derive(value)
         self.assertEqual(s.state, State.UNKNOWN)
         self.assertIn(Flag.CLOSURE_UNPLACED, s.flags)
-        self.assertIn("Authorise again", s.reasons[0])
+        self.assertIn("Check the issue's history", s.reasons[0])
+        self.assertEqual(s.reviewed_sha, A)  # its passing review is still shown
 
     def test_a_closing_and_an_authorisation_in_one_second_withdraw(self):
         # Within one second a closing sorts after an authorisation, whatever the input order.
@@ -2117,3 +2118,98 @@ class FableAuditOfCa7faa9(unittest.TestCase):
         at = _time("2026-01-01T10:20:00.200000+00:00:00.500000", "at")
         self.assertEqual(at, datetime(2026, 1, 1, 10, 19, 59, tzinfo=UTC))
         self.assertEqual((at.microsecond, at.utcoffset().total_seconds()), (0, 0))
+
+
+class FableAuditOfBfda232(unittest.TestCase):
+    def ev(self, kind, minute, **extra):
+        return {"event": kind, "actor": OWNER, "at": t(minute), **extra}
+
+    def test_a_record_in_the_authorisations_own_second_never_counts(self):
+        timeline = [{"event": "authorized", "actor": OWNER, "at": t(2)}]
+        s = derive(
+            task(
+                issue={"number": 7, "state": "open", "timeline": timeline},
+                runs=[run("build", minute=2), passed(minute=2), published(minute=2)],
+                pull_request=pr(),
+            )
+        )
+        self.assertNotEqual(s.state, State.AWAITING_OWNER)
+        self.assertIn(Flag.RECORD_BEFORE_AUTHORIZATION, s.flags)
+        self.assertIsNone(s.reviewed_sha)
+
+    def test_never_authorised_is_said_so_whatever_the_closings(self):
+        for merged in (False, True):
+            over = {"state": "closed", "merged": True, "merged_by": OWNER, "merged_at": t(20)}
+            s = derive(
+                task(
+                    issue={"number": 7, "state": "open", "timeline": [self.ev("reopened", 1)]},
+                    runs=[run("build"), passed(), published()],
+                    pull_request=pr(**(over if merged else {})),
+                )
+            )
+            self.assertEqual(s.state, State.UNSAFE, merged)
+            self.assertNotIn(Flag.CLOSURE_UNPLACED, s.flags)
+            self.assertIn("never authorised", " ".join(s.reasons))
+
+    def test_a_closed_pr_is_calm_on_closings_that_dont_add_up(self):
+        from mission_control import views
+
+        s = derive(
+            task(
+                issue={"number": 7, "state": "closed", "timeline": [labeled()]},
+                runs=[run("build")],
+                pull_request=pr(state="closed"),
+            )
+        )
+        self.assertEqual(s.state, State.CLOSED)
+        self.assertIn(Flag.CLOSURE_UNPLACED, s.flags)
+        self.assertFalse(s.needs_attention)
+        self.assertEqual(views.section(s), "done")
+
+    def test_one_seconds_closing_and_reopening_read_alike_in_any_order(self):
+        over = {"state": "closed", "merged": True, "merged_by": OWNER, "merged_at": t(20)}
+        results = set()
+        for pair in (
+            (self.ev("closed", 25), self.ev("reopened", 25)),
+            (self.ev("reopened", 25), self.ev("closed", 25)),
+        ):
+            s = derive(
+                task(
+                    issue={"number": 7, "state": "open", "timeline": [labeled(), *pair]},
+                    runs=[run("build"), passed(), published()],
+                    pull_request=pr(**over),
+                )
+            )
+            results.add(s.state)
+        self.assertEqual(results, {State.MERGED})
+
+    def test_a_fork_pr_is_never_told_to_reopen_the_issue(self):
+        timeline = [self.ev("closed", 0), {"event": "authorized", "actor": OWNER, "at": t(1)}]
+        value = pr()
+        value["from_fork"] = True
+        s = derive(
+            task(
+                issue={"number": 7, "state": "closed", "timeline": timeline},
+                runs=[run("build"), passed(), published()],
+                pull_request=value,
+            )
+        )
+        self.assertEqual(s.state, State.NOT_LINKED)
+        self.assertIn(Flag.FROM_FORK, s.flags)
+        self.assertNotIn("reopen", " ".join(s.reasons))
+
+    def test_a_builds_files_in_the_merges_own_second_still_count(self):
+        # Clinical files reported at the merge's second may be the merged ones: they count.
+        s = derive(
+            task(
+                runs=[run("build", minute=20, files=["evidence/a.json"]), passed(), published()],
+                pull_request=pr(
+                    state="closed",
+                    merged=True,
+                    merged_by=OWNER,
+                    merged_at=t(20),
+                    files=("app.py",),
+                ),
+            )
+        )
+        self.assertIn(Flag.CLINICAL, s.flags)

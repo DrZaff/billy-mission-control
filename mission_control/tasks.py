@@ -174,8 +174,8 @@ class Flag(StrEnum):
     # Opened from a fork: Billy never publishes from one, whatever the PR's issue link says
     # (Fable's pre-review of 8152df0: a stranger's "Fixes #N" PR looked like Billy's work).
     FROM_FORK = "from_fork"
-    # The owner authorised the task, then it was withdrawn: agent:ready removed, or (for a
-    # merge) the issue closed before it (with UNAUTHORIZED_WORK).
+    # The owner authorised the task, then it was withdrawn: agent:ready removed, or the issue
+    # closed (with UNAUTHORIZED_WORK).
     AUTHORIZATION_WITHDRAWN = "authorization_withdrawn"
     # A merge's clinician approval can't be judged: a clinician's review was dismissed, and
     # GitHub doesn't say when (before or after the merge). The reviews were read.
@@ -244,6 +244,7 @@ ATTENTION_FLAGS = frozenset(
 CALM_WHEN_CLOSED = frozenset(
     {
         Flag.ISSUE_NOT_LINKED,
+        Flag.CLOSURE_UNPLACED,
         Flag.FROM_FORK,
         Flag.FILES_UNVERIFIED,
         Flag.REVIEWS_UNVERIFIED,
@@ -736,7 +737,9 @@ def _closure_unplaced(task: _Task, until: datetime | None) -> bool:
     it) and end on the issue's current state; and a closing in the merge's own second must be
     GitHub's, by the merged PR itself (closer_pr), or it may have come first."""
     state = "open"
-    for e in sorted(task.timeline, key=lambda e: e.at):
+    # Within one second a closing sorts first, whatever the input order (Fable's audit of
+    # bfda232).
+    for e in sorted(task.timeline, key=lambda e: (e.at, e.kind != "closed")):
         if e.kind == "closed":
             if state == "closed":
                 return True  # closed twice: a reopening is missing
@@ -925,7 +928,9 @@ def derive(raw: Any) -> TaskStatus:
 
     since, last_owner_action, withdrawn = _authorization(task, flags, merged_at)
     # The issue's closings don't add up: whether it was closed while authorised isn't known.
-    unplaced = task.issue_known and _closure_unplaced(task, merged_at)
+    # Only an authorisation in effect can be in doubt; none, or a withdrawn one, is said as such
+    # (Fable's audit of bfda232: "never authorised" beside "not known").
+    unplaced = task.issue_known and since is not None and _closure_unplaced(task, merged_at)
     if unplaced:
         flags.add(Flag.CLOSURE_UNPLACED)
     if pr and pr.from_fork:
@@ -938,7 +943,9 @@ def derive(raw: Any) -> TaskStatus:
 
     # Only records from within the owner's current authorisation are this task's work. Earlier
     # records (before it began, or from a withdrawn one) never count, and are reported.
-    current = [r for r in runs if since is not None and r.at >= since]
+    # A record in the authorisation's own second may have come just before it: it never counts,
+    # as a pass in the merge's own second never does (Fable's audit of bfda232).
+    current = [r for r in runs if since is not None and r.at > since]
     if since is not None and len(current) < len(runs):
         flags.add(Flag.RECORD_BEFORE_AUTHORIZATION)
     if since is None and not task.issue_known and pr and pr.merged:
@@ -1124,7 +1131,18 @@ def derive(raw: Any) -> TaskStatus:
         return status(
             State.UNKNOWN,
             "The issue's closings and reopenings don't add up, so whether your authorisation "
-            "still stands isn't known. Authorise again (agent:ready) if it should.",
+            "still stands isn't known. Check the issue's history on GitHub.",
+            head,
+            head if runs_known and verdicts.get(head) == {"pass"} else None,
+        )
+    if pr and pr.open and pr.from_fork:
+        # Never on the way to a merge: GitHub's own results are shown, and the owner decides
+        # on GitHub (Codex's review of 9dbb868), and
+        # never told to reopen an issue (Fable's audit of bfda232).
+        return status(
+            State.NOT_LINKED,
+            "Opened from a fork: not Billy's work, whatever its issue link says. Review it on "
+            "GitHub.",
             head,
         )
     if issue_closed and since is not None:
@@ -1136,15 +1154,6 @@ def derive(raw: Any) -> TaskStatus:
             head,
             # A passing review of its head is still shown (Fable's audit of ca7faa9).
             head if runs_known and verdicts.get(head) == {"pass"} else None,
-        )
-    if pr and pr.open and pr.from_fork:
-        # Never on the way to a merge: GitHub's own results are shown, and the owner decides
-        # on GitHub (Codex's review of 9dbb868).
-        return status(
-            State.NOT_LINKED,
-            "Opened from a fork: not Billy's work, whatever its issue link says. Review it on "
-            "GitHub.",
-            head,
         )
     if since is None and not task.issue_known:
         return status(
@@ -1158,8 +1167,8 @@ def derive(raw: Any) -> TaskStatus:
         if runs or pr or head is not None:
             flags.add(Flag.UNAUTHORIZED_WORK)
             if withdrawn:
-                # The owner did authorise it, then removed the label (Fable's review of
-                # 0cf099c: this read as "never authorised").
+                # The owner did authorise it, then the label was removed or the issue closed
+                # (Fable's review of 0cf099c: this read as "never authorised").
                 flags.add(Flag.AUTHORIZATION_WITHDRAWN)
                 return status(
                     State.UNSAFE,
