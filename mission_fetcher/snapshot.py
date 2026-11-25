@@ -615,6 +615,9 @@ def _reviews(
 
 
 CHECK_FRESH = timedelta(days=7)
+# A success counts only if it stays fresh for the whole refresh, which can run until the
+# deadline after `now` (Codex's review of 05062fc: one that expired during it still passed).
+FRESH_UNTIL = CHECK_FRESH - timedelta(seconds=REFRESH_DEADLINE)
 
 
 def _checks(
@@ -748,7 +751,7 @@ def _checks(
                     # review of 0e2139f: it discarded failures already read).
                     complete = False
                     continue
-                if finished < now - CHECK_FRESH:
+                if finished < now - FRESH_UNTIL:
                     continue
                 if key != name:
                     continue  # a pass under another case of the name: never counted
@@ -849,7 +852,7 @@ def _status_cautions(
                 at = datetime.fromisoformat(_time(created)) if created is not None else None
             except FetchError:
                 at = None
-            if at is None or now is None or at < now - CHECK_FRESH:
+            if at is None or now is None or at < now - FRESH_UNTIL:
                 complete = False
             continue
         pending = state in ("PENDING", "EXPECTED")
@@ -1151,10 +1154,11 @@ def _details(
         # unreadable; one deleted since the list is gone from the next refresh's list.
         return [(n, repository.get(f"p{i}") or UNREADABLE, lite) for i, n in enumerate(batch)]
 
-    # At most about six requests per pull request: splitting to one, asking again, reading
-    # it lite, a retry without the pieces in error, then its core (after a heavy lite read or
-    # retry too).
-    budget = [6 * len(numbers) + 2]
+    # A sound bound (Codex's review of 05062fc): a batch of b pull requests is split only when
+    # its own read fails, so at most 2b - 1 reads in all; a lone one is then read once more,
+    # lite, and with its core only (3 more); and each pull request's Retry is resolved once,
+    # where its answer came, with one retry and then its core (2 more). At most 7 each.
+    budget = [7 * len(numbers) + 2]
 
     def fetch_raw(batch: list[int], omit: frozenset, lite) -> list:
         if budget[0] <= 0:
@@ -1162,28 +1166,24 @@ def _details(
         budget[0] -= 1
         return fetch(batch, omit, lite)
 
-    def fetch_counted(batch: list[int], omit: frozenset, lite) -> list:
-        return resolve(fetch_raw(batch, omit, lite))
-
     def resolve(entries: list) -> list:
-        """Each Retry asked for again once without its pieces in error; if another piece errs
-        too, then with its core only, so the budget always reaches the core read (Codex's
-        reviews of 0e2139f and 0f79663). Still nothing usable: unreadable."""
+        """Each Retry asked for again once without its pieces in error, then, if that is still
+        not usable or is too heavy, with its core only (Codex's reviews of 0e2139f, 099ef9b and
+        0f79663). Still nothing usable: unreadable. A core read GitHub can't answer fails the
+        refresh."""
         out = []
         for number, node, lite in entries:
             if isinstance(node, Retry):
-                omit, node = node.pieces, UNREADABLE
-                while True:
+                steps = [node.pieces, ALL_PIECES] if node.pieces != ALL_PIECES else [ALL_PIECES]
+                node = UNREADABLE
+                for omit in steps:
                     try:
                         ((_, got, _),) = fetch_raw([number], omit, "retry")
                     except FetchError as error:
-                        # A heavy one goes up to read(), which falls back to the lite read, then
-                        # the core only (Codex's review of 099ef9b).
+                        if error.code in HEAVY and omit != ALL_PIECES:
+                            continue
                         if not _its_own(error, 1):
                             raise
-                        got = UNREADABLE
-                    if isinstance(got, Retry) and omit != ALL_PIECES:
-                        omit = ALL_PIECES  # another piece in error: the core only
                         continue
                     if isinstance(got, dict):
                         node = got
@@ -1191,39 +1191,37 @@ def _details(
                         # just the title reads everything that matters (audit of 42a3721).
                         if omit & (LARGE | {"reviews"}):
                             lite = lite or "retry"
-                    elif omit != ALL_PIECES:
-                        omit = ALL_PIECES  # last, the core only
-                        continue
-                    break
+                        break
             out.append((number, node, lite))
         return out
 
     def read(batch: list[int], again: bool = True) -> list:
+        # Only the batch's own read decides a split: a retry's failure never splits it again,
+        # so nothing is read twice (Codex's review of 05062fc).
         try:
-            return fetch_counted(batch, frozenset(), False)
+            entries = fetch_raw(batch, frozenset(), False)
         except FetchError as error:
             if error.code not in HEAVY and not _its_own(error, len(batch)):
                 raise
             code = error.code
+        else:
+            return resolve(entries)
         if len(batch) > 1:
             half = len(batch) // 2
             return read(batch[:half]) + read(batch[half:])
         if again and code in TRANSIENT:
             return read(batch, again=False)  # once more in full before cutting it short
-        try:
-            return fetch_counted(batch, LARGE, code)
-        except FetchError as error:
-            if error.code in HEAVY:
-                # Still too heavy lite: the core only (Codex's review of 099ef9b).
-                try:
-                    return fetch_counted(batch, ALL_PIECES, code)
-                except FetchError as again:
-                    if not _its_own(again, 1):
-                        raise
-                    return [(batch[0], UNREADABLE, code)]
-            if not _its_own(error, 1):
-                raise
-            return [(batch[0], UNREADABLE, code)]
+        for omit in (LARGE, ALL_PIECES):
+            try:
+                entries = fetch_raw(batch, omit, code)
+            except FetchError as error:
+                if error.code in HEAVY and omit != ALL_PIECES:
+                    continue  # still too heavy lite: the core only (Codex's review of 099ef9b)
+                if not _its_own(error, 1):
+                    raise
+                return [(batch[0], UNREADABLE, code)]
+            return resolve(entries)
+        raise AssertionError("unreachable")  # the core read returns or raises
 
     out = []
     for i in range(0, len(numbers), BATCH):

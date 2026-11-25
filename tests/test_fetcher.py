@@ -4044,8 +4044,9 @@ class CodexReviewOf099ef9b(Base):
         item = self.run_refresh(github)["items"][0]
         self.assertIsNotNone(item["task"])
         self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNSAFE)
-        # The full read, the retry (too heavy), the lite read (too heavy), then the core.
-        self.assertEqual(len(asked), 3)
+        # After the full read: the retry (too heavy), then the core (Codex's review of 05062fc:
+        # a retry's failure never starts the reads over).
+        self.assertEqual(len(asked), 2)
         self.assertNotIn(b"closingIssuesReferences", asked[-1])
 
     def test_running_out_of_requests_has_its_own_reason(self):
@@ -4147,6 +4148,79 @@ class CodexReviewOf0f79663(CodexReviewOf099ef9b):
                 item = self.run_refresh()["items"][0]
                 flags = tasks.derive(self.reviewed(item)).flags
                 self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
+
+
+class CodexReviewOf05062fc(unittest.TestCase):
+    """Codex's review of 05062fc (blocking): a split batch could spend the request budget
+    before every pull request's core read."""
+
+    class Adversary:
+        """GitHub failing every read but the core one, each a different way."""
+
+        deadline = None
+
+        def __init__(self):
+            self.requests = 0
+
+        def graphql(self, token, query, variables):
+            self.requests += 1
+            numbers = [int(n) for n in re.findall(r"pullRequest\(number: (\d+)\)", query)]
+            if "files(" in query:
+                raise gh.FetchError("http-502")  # every full read: transient
+            if "closingIssuesReferences" in query:
+                raise gh.FetchError("too-heavy")  # every lite read and retry: too heavy
+            return {"repository": {f"p{i}": {"number": n} for i, n in enumerate(numbers)}}
+
+    def test_every_pull_request_reaches_its_core_read_within_the_budget(self):
+        github = self.Adversary()
+        numbers = list(range(1, 11))
+        got = snapshot._details(github, "token", "o", "r", numbers)
+        self.assertEqual([n for n, _, _ in got], numbers)
+        self.assertTrue(all(isinstance(node, dict) for _, node, _ in got))
+        self.assertLessEqual(github.requests, 7 * len(numbers) + 2)
+
+    def test_a_retrys_failure_never_starts_the_reads_over(self):
+        # Ten pull requests, each answered with a Retry, each retry too heavy: one batch read,
+        # then a retry and a core read each, never a split.
+        class Partial(self.Adversary):
+            def graphql(self, token, query, variables):
+                self.requests += 1
+                numbers = [int(n) for n in re.findall(r"pullRequest\(number: (\d+)\)", query)]
+                if len(numbers) > 1:
+                    data = {"repository": {f"p{i}": None for i in range(len(numbers))}}
+                    paths = tuple(("repository", f"p{i}", "title") for i in range(len(numbers)))
+                    raise gh.FetchError("graphql-error", paths, data)
+                if "closingIssuesReferences" in query:
+                    raise gh.FetchError("too-heavy")
+                return {"repository": {"p0": {"number": numbers[0]}}}
+
+        github = Partial()
+        got = snapshot._details(github, "token", "o", "r", list(range(1, 11)))
+        self.assertTrue(all(isinstance(node, dict) for _, node, _ in got))
+        self.assertEqual(github.requests, 1 + 10 * 2)
+
+
+class FreshForTheWholeRefresh(CodexReviewOf099ef9b):
+    """Codex's review of 05062fc (blocking): a result fresh when the refresh began but seven
+    days old before it ended still passed."""
+
+    def test_a_result_expiring_during_the_refresh_never_passes(self):
+        expiring = (NOW - snapshot.CHECK_FRESH + timedelta(seconds=60)).isoformat()
+        node = pr_node(1, issue=issue_node(10))
+        for r in node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["checkRuns"][
+            "nodes"
+        ]:
+            r["completedAt"] = expiring
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+        # A status the same: not known, never passed.
+        item = self.with_status(expiring)
+        self.assertFalse(item["task"]["pull_request"]["checks_complete"])
+        # Fresh for the whole refresh: passes.
+        safe = NOW - snapshot.CHECK_FRESH + timedelta(seconds=snapshot.REFRESH_DEADLINE + 60)
+        item = self.with_status(safe.isoformat())
+        self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
 
 class NoFifoAnywhere(Base):
