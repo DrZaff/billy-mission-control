@@ -198,6 +198,14 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
     for path in error.paths:
         alias = path[1]
         field = path[2] if len(path) > 2 else None
+        if field == "files" and len(path) > 3:
+            # An error inside one file's entry: GitHub nulled that entry, and the paths it did
+            # give are kept, so a clinical one among them is still found (clinical_known) before
+            # the list itself is "not known" (Codex's review of c5adbba: the whole list was
+            # discarded, hiding a clinical merge without a clinician). Files only: elsewhere a
+            # null left by an error can read as "none" (no status, no results), so those parts
+            # stay wholly "not known".
+            continue
         if isinstance(field, str) and field in OPTIONAL_FIELDS and marks.get(alias, ()) is not None:
             marks.setdefault(alias, set()).add(field)
         else:
@@ -1010,6 +1018,9 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
     # A whole refresh has a time limit: a slow but answering GitHub must not hold the lock
     # (and every later request, "busy") for long (Fable's pre-review of 8152df0).
     deadline = time.monotonic() + REFRESH_DEADLINE
+    # Every request to GitHub, the first ones included, starts only within the limit and gets
+    # only the time left (Codex's review of c5adbba); the token's revocation alone always runs.
+    github.deadline = deadline
     installation = github.installation(cfg.owner, repos)
     token = github.token(installation)
     try:

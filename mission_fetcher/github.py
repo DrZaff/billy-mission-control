@@ -12,6 +12,7 @@ HTTPS (tests/test_policy.py checks both). Everything it receives is untrusted.
 from __future__ import annotations
 
 import base64
+import contextvars
 import http.client
 import json
 import re
@@ -28,6 +29,9 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 HOST = "api.github.com"
 TIMEOUT = 15.0
 REQUEST_LIMIT = 60.0  # seconds for a whole request
+REVOKE_LIMIT = 15.0  # the token's revocation, which runs even past a refresh's limit
+# The limit for the request being made now, set by GitHub.call for the transport.
+_LIMIT: contextvars.ContextVar[float] = contextvars.ContextVar("request_limit", default=60.0)
 MAX_RESPONSE = 4 * 1024 * 1024
 # GraphQL error types GitHub gives when a query is too costly to finish.
 HEAVY_KINDS = {"RESOURCE_LIMITS_EXCEEDED", "MAX_NODE_LIMIT_EXCEEDED", "TIMEOUT"}
@@ -100,7 +104,7 @@ def https_transport(method: str, path: str, headers: dict[str, str], body: bytes
             except OSError:
                 pass
 
-    watchdog = threading.Timer(REQUEST_LIMIT, stop)
+    watchdog = threading.Timer(_LIMIT.get(), stop)
     watchdog.daemon = True
     watchdog.start()
     try:
@@ -149,6 +153,8 @@ class GitHub:
         self.key = key
         self.transport = transport
         self.clock = clock
+        # A monotonic time after which no request starts (a refresh's limit), or None.
+        self.deadline: float | None = None
 
     # ------------------------------------------------------------ requests
 
@@ -163,9 +169,20 @@ class GitHub:
         signature = self.key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
         return f"{header}.{payload}.{_b64(signature)}"
 
-    def call(self, method: str, path: str, bearer: str, payload: Any = None) -> Any:
+    def call(
+        self, method: str, path: str, bearer: str, payload: Any = None, final: bool = False
+    ) -> Any:
+        """One request. Within a refresh's limit (self.deadline), it starts only if time is
+        left and gets only that time; `final` (the token's revocation) always runs, with its
+        own short limit."""
         if not path.startswith("/") or "//" in path or "\n" in path or "\r" in path:
             raise FetchError("bad-path")
+        limit = REVOKE_LIMIT if final else REQUEST_LIMIT
+        if self.deadline is not None and not final:
+            left = self.deadline - time.monotonic()
+            if left <= 0:
+                raise FetchError("too-slow")
+            limit = min(limit, left)
         headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": "Bearer " + bearer,
@@ -176,12 +193,15 @@ class GitHub:
         if payload is not None:
             body = json.dumps(payload).encode()
             headers["Content-Type"] = "application/json"
+        token = _LIMIT.set(limit)
         try:
             status, resp_headers, data = self.transport(method, path, headers, body)
         except TimeoutError:
             raise FetchError("timeout") from None
         except OSError:
             raise FetchError("network") from None
+        finally:
+            _LIMIT.reset(token)
         if len(data) > MAX_RESPONSE:
             raise FetchError("too-large")
         if status == 429 or (status == 403 and resp_headers.get("x-ratelimit-remaining") == "0"):
@@ -297,7 +317,7 @@ class GitHub:
     def revoke(self, token: str) -> bool:
         """Revoke the installation token. Best effort: it expires within the hour anyway."""
         try:
-            self.call("DELETE", "/installation/token", token)
+            self.call("DELETE", "/installation/token", token, final=True)
         except FetchError:
             return False
         return True

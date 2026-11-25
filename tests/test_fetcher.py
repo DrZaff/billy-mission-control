@@ -937,12 +937,13 @@ class Refresh(Base):
                     "127.0.0.1", port, timeout=timeout
                 )
                 started = tm.monotonic()
-                with (
-                    mock.patch.object(gh.http.client, "HTTPSConnection", plain),
-                    mock.patch.object(gh, "REQUEST_LIMIT", 0.5),
-                ):
-                    with self.assertRaises(gh.FetchError) as caught:
-                        gh.https_transport("GET", "/x", {}, None)
+                limit = gh._LIMIT.set(0.5)  # as GitHub.call sets it for each request
+                try:
+                    with mock.patch.object(gh.http.client, "HTTPSConnection", plain):
+                        with self.assertRaises(gh.FetchError) as caught:
+                            gh.https_transport("GET", "/x", {}, None)
+                finally:
+                    gh._LIMIT.reset(limit)
                 listener.close()
                 self.assertEqual(caught.exception.code, "timeout")
                 self.assertLess(tm.monotonic() - started, 3)  # not the 5 s drip
@@ -1015,6 +1016,75 @@ class Refresh(Base):
             snapshot.MAX_SNAPSHOT = saved
         self.assertLessEqual(len(real(snap)), full // 4)
         self.assertLess(len(calls), 10)  # not one per cut list (40)
+
+    def test_an_error_inside_one_file_entry_keeps_its_clinical_siblings(self):
+        # Codex's review of c5adbba (blocking): an error on one file's entry discarded the
+        # whole list, and with it the evidence that a merged change was clinical.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(
+            1,
+            state="MERGED",
+            merged=True,
+            closed_at=recent,
+            issue=issue_node(10),
+            files=("site/a.html", "evidence/table.json", "site/b.html"),
+        )
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number:" in body and b"files(" in body:
+                answer = json.loads(data)
+                answer["data"]["repository"]["p0"]["files"]["nodes"][0] = None
+                answer["errors"] = [
+                    {
+                        "type": "SERVICE_UNAVAILABLE",
+                        "path": ["repository", "p0", "files", "nodes", 0, "path"],
+                    }
+                ]
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
+        pull = item["task"]["pull_request"]
+        self.assertIsNone(pull["files"])  # the list itself: not known
+        self.assertIs(pull["clinical_known"], True)  # but the clinical path was seen
+        state = tasks.derive(self.task_of(item))
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+
+    def test_every_request_keeps_within_the_refresh_limit(self):
+        # Codex's review of c5adbba: the installation, token and repository requests ran
+        # outside the limit, and a request could start with less time left than its own limit.
+        limits = []
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            limits.append((path, gh._LIMIT.get()))
+            return real(method, path, headers, body)
+
+        # One clock for everything (both modules use the same `time`): the refresh starts at 0,
+        # and every later look is 170 s on, 10 s before the limit.
+        clock = iter([0.0] + [170.0] * 10_000)
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        with mock.patch.object(gh.time, "monotonic", side_effect=lambda: next(clock)):
+            snapshot.refresh(self.cfg, github, NOW)
+        asked = [limit for path, limit in limits if path != "/installation/token"]
+        self.assertTrue(asked)
+        self.assertTrue(all(limit <= 10.0 for limit in asked), asked)
+        # Past the limit, nothing starts, not even the installation check; the token is still
+        # revoked.
+        limits.clear()
+        github.deadline = 180.0
+        with mock.patch.object(gh.time, "monotonic", side_effect=lambda: 500.0):
+            with self.assertRaises(gh.FetchError) as caught:
+                github.installation(OWNER, [REPO_A, REPO_B])
+            self.assertEqual(caught.exception.code, "too-slow")
+            self.assertEqual(limits, [])
+        self.assertTrue(github.revoke(TOKEN))  # revocation always runs
 
     def test_a_contradictory_merge_state_is_never_read_as_the_calmer_half(self):
         # Finding 3: state MERGED with merged false read as closed without merging.
