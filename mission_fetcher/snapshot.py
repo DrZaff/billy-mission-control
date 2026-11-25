@@ -530,10 +530,10 @@ def _reviews(
     (`rv<i>`). A part missing or cut off makes the reviews "not known". Each review is first
     placed in time, and one submitted after a merge is skipped before anything else about it is
     checked (Codex's reviews of 84df535 and 5d06878). GitHub gives a review's current state with
-    the time it was submitted, so a dismissed review of the head, submitted before the merge,
-    can't be placed: "not known". A review of another or a vanished commit is never an approval
-    of the head, so it is kept as it is (Fable's pre-review of 4945de9: an approval dismissed
-    as stale hid a clinical merge without a clinician)."""
+    the time it was submitted, so when a review was dismissed isn't known: every review is
+    kept, and the model decides "not known" only when its verdict depends on one (audit of
+    42a3721: dropping them all hid a changes request in force at the merge). A review of a
+    vanished commit is kept as one that is never the head."""
     out = []
     for i, login in enumerate(clinicians):
         if f"rv{i}" not in pr:
@@ -558,8 +558,6 @@ def _reviews(
                 raise _bad()
             commit = n.get("commit")
             commit_id = VANISHED if commit is None else _sha(_obj(commit).get("oid"))
-            if merged_at is not None and state == "DISMISSED" and commit_id == head:
-                raise _Incomplete()
             out.append(
                 {
                     "user": login,
@@ -589,6 +587,8 @@ def _checks(
     out: list[dict] = []
     # When GitHub has results for the test merge commit, it judges that commit, not the head.
     # Such results aren't read here, so the list is partial (Codex's review of 23bfb61).
+    if "potentialMergeCommit" not in pr:
+        complete = False  # left out by a retry: never read as "no test merge commit" (42a3721)
     merge = pr.get("potentialMergeCommit")
     if merge is not None:
         try:
@@ -618,17 +618,24 @@ def _checks(
             complete = False
             continue
         suite_app = suite.get("app")
-        if not isinstance(suite_app, dict) or suite_app.get("slug") != app:
+        if suite_app is None:
+            continue  # no app: never the configured one
+        slug = suite_app.get("slug") if isinstance(suite_app, dict) else None
+        if not isinstance(slug, str):
+            complete = False  # wrongly shaped: not known, never skipped silently (42a3721)
+            continue
+        if slug != app:
             continue
         # Only runs started by a pull request, a push or the merge queue can stand for a PR's
         # required checks (Codex's review of f37d0c7). Only GitHub Actions suites have a
         # workflow run; another app's checks are taken as GitHub gives them (de9a6fb).
         if app == "github-actions":
-            workflow_run = suite.get("workflowRun") or {}
-            if not isinstance(workflow_run, dict):
-                complete = False
+            workflow_run = suite.get("workflowRun")
+            event = workflow_run.get("event") if isinstance(workflow_run, dict) else None
+            if workflow_run is not None and not isinstance(event, str):
+                complete = False  # wrongly shaped: not known (audit of 42a3721)
                 continue
-            if workflow_run.get("event") not in CHECK_EVENTS:
+            if event not in CHECK_EVENTS:
                 continue
         try:
             runs_conn = _obj(suite.get("checkRuns"))
@@ -652,6 +659,8 @@ def _checks(
                 complete = False  # Codex's review of 23bfb61: an odd one raised TypeError
                 continue
             status = CHECK_STATUS.get(raw_status, "queued")  # waiting, pending: not done
+            if status == "completed" and conclusion in ("SKIPPED", "NEUTRAL"):
+                conclusion = "SUCCESS"  # GitHub counts both as satisfying a required check
             if status == "completed" and conclusion == "SUCCESS":
                 # A success counts only while fresh: GitHub needs one within the past seven
                 # days, so an old one (or one with no time) is no result here (5d06878).
@@ -971,7 +980,12 @@ def _details(
             partial = _partial(error, batch, lite)
             if partial is None:
                 raise
-            return partial
+            # A retry leaves out what this read already left out, too (audit of 42a3721: a lite
+            # read's retry asked for the large pieces again).
+            return [
+                (n, Retry(node.pieces | omit) if isinstance(node, Retry) else node, lt)
+                for n, node, lt in partial
+            ]
         repository = _obj(_obj(data).get("repository"))
         # Missing or null: never silently dropped (Codex's review of 48929aa). It is shown as
         # unreadable; one deleted since the list is gone from the next refresh's list.
@@ -997,7 +1011,7 @@ def _details(
         out = []
         for number, node, lite in entries:
             if isinstance(node, Retry):
-                omit, node, lite = node.pieces, UNREADABLE, "retry"
+                omit, node = node.pieces, UNREADABLE
                 while True:
                     try:
                         ((_, got, _),) = fetch_raw([number], omit, "retry")
@@ -1010,6 +1024,10 @@ def _details(
                         continue
                     if isinstance(got, dict):
                         node = got
+                        # Lite only if files, reviews or checks were left out: a retry without
+                        # just the title reads everything that matters (audit of 42a3721).
+                        if omit & (LARGE | {"reviews"}):
+                            lite = lite or "retry"
                     elif omit != ALL_PIECES:
                         omit = ALL_PIECES  # last, the core only
                         continue
@@ -1123,12 +1141,10 @@ def repo_items(
     )
     # Unless what was read shows a known unsafe merge: that must be shown, not held back with
     # the last snapshot (Codex's review of 5d06878).
-    lites = [lite for _, _, lite in details]
-    # A lone pull request read lite only because of a timeout or a server error is no reason
-    # to replace the last snapshot either (Fable's pre-review of 4945de9): unlike one that is
-    # too large, asking again later can read it whole.
-    only_transient = bool(lites) and all(lite in TRANSIENT for lite in lites)
-    if details and all(lites) and (len(details) > 1 or only_transient) and not unsafe_known:
+    # A lone pull request that keeps failing in full (as GitHub does for very large diffs) is
+    # shown lite after one more full try, like one that is too large: one stranger's pull
+    # request must never stall every repository (audit of 42a3721).
+    if len(details) > 1 and all(lite for _, _, lite in details) and not unsafe_known:
         # Every pull request read without its files, reviews and checks is no per-PR problem
         # either: fail, keeping the last good snapshot, rather than replace known results with
         # "not known" under an "ok" (Fable's pre-review of 8152df0).

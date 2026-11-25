@@ -1525,3 +1525,47 @@ class CodexReviewOf0e2139f(unittest.TestCase):
         self.assertEqual(s.state, State.CLOSED)
         self.assertIn(Flag.FILES_UNVERIFIED, s.flags)  # still said
         self.assertFalse(s.needs_attention)  # never an alert
+
+
+class AuditOf42a3721(unittest.TestCase):
+    def merged(self, reviews, clinicians=(CLINICIAN,)):
+        return derive(
+            task(
+                clinicians=list(clinicians),
+                runs=[run("build"), passed(), published()],
+                pull_request=pr(
+                    state="closed",
+                    merged=True,
+                    merged_by=OWNER,
+                    merged_at=t(30),
+                    files=("evidence/a.json",),
+                    reviews=reviews,
+                ),
+            )
+        )
+
+    def test_a_changes_request_in_force_decides_whatever_was_dismissed(self):
+        s = self.merged(
+            [approval(state="DISMISSED", minute=4), approval(state="CHANGES_REQUESTED", minute=6)]
+        )
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.MERGED_WITHOUT_CLINICIAN, s.flags)
+        s = self.merged(
+            [
+                approval("clinician-two", state="DISMISSED", minute=4),
+                approval(state="CHANGES_REQUESTED", minute=6),
+            ],
+            clinicians=(CLINICIAN, "clinician-two"),
+        )
+        self.assertIn(Flag.MERGED_WITHOUT_CLINICIAN, s.flags)
+
+    def test_a_later_approval_decides_whatever_was_dismissed(self):
+        s = self.merged([approval(state="DISMISSED", minute=4), approval(minute=6)])
+        self.assertEqual(s.state, State.MERGED)
+        self.assertIn(Flag.CLINICIAN_APPROVED, s.flags)
+        self.assertFalse(s.needs_attention)
+
+    def test_no_clinical_paths_means_no_file_alert(self):
+        value = task(runs=None, clinical_paths=[], pull_request=dict(pr(), files=None))
+        s = derive(value)
+        self.assertNotIn(Flag.FILES_UNVERIFIED, s.flags)

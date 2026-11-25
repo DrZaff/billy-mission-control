@@ -739,6 +739,33 @@ def _dismissal_unplaced(task: _Task, until: datetime) -> bool:
     return False
 
 
+def _head_dismissal_unplaced(task: _Task, head: str, until: datetime) -> bool:
+    """For a merge with no approval now: whether one may have existed at the merge. True when
+    a clinician's latest decisive review of the head, up to the merge, now shows as dismissed
+    (it may have been an approval dismissed later), unless a clinician's changes request was in
+    force at the merge, which blocks whatever the dismissed review was."""
+    latest_any: dict[str, list[_Review]] = {}
+    latest_head: dict[str, list[_Review]] = {}
+    for rv in task.pr.reviews or ():
+        if rv.is_bot or rv.user not in task.clinicians or rv.state not in DECISIVE:
+            continue
+        if rv.at > until:
+            continue
+        latest_any.setdefault(rv.user, []).append(rv)
+        if rv.commit == head:
+            latest_head.setdefault(rv.user, []).append(rv)
+
+    def at_latest(reviews: list[_Review]) -> list[_Review]:
+        at = max(rv.at for rv in reviews)
+        return [rv for rv in reviews if rv.at == at]
+
+    if any(
+        rv.state == "CHANGES_REQUESTED" for revs in latest_any.values() for rv in at_latest(revs)
+    ):
+        return False
+    return any(rv.state == "DISMISSED" for revs in latest_head.values() for rv in at_latest(revs))
+
+
 def _clinician_approved(task: _Task, head: str, until: datetime | None = None) -> bool:
     """A clinician's own GitHub approval of exactly this commit, not later withdrawn, with no
     clinician asking for changes to it. Bots never count, and neither does any review report
@@ -896,7 +923,7 @@ def derive(raw: Any) -> TaskStatus:
     # never claim either way (A5a). Known clinical paths in a partial list still count.
     partial = bool(pr and (pr.files is None or not pr.files_complete))
     files_unknown = partial and bool(task.clinical_paths)
-    if partial:
+    if files_unknown:  # nothing can be clinical without clinical paths (audit of 42a3721)
         flags.add(Flag.FILES_UNVERIFIED)
     maybe_clinical = Flag.CLINICAL in flags or files_unknown
 
@@ -926,6 +953,10 @@ def derive(raw: Any) -> TaskStatus:
                 flags.add(Flag.REVIEWS_UNVERIFIED)  # approved, unless a dismissal came late
             else:
                 flags.add(Flag.CLINICIAN_APPROVED)
+        elif Flag.CLINICAL in flags and _head_dismissal_unplaced(task, pr.head, merged_at):
+            # No approval now, but a dismissed review of the head may have been one at the
+            # merge, and no changes request in force rules it out (audit of 42a3721).
+            flags.add(Flag.REVIEWS_UNVERIFIED)
         elif Flag.CLINICAL in flags:
             flags.add(Flag.MERGED_WITHOUT_CLINICIAN)
             problems.append("clinical files merged without a clinician's approval of that commit")

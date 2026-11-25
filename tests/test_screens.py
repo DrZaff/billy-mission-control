@@ -611,3 +611,17 @@ class CodexReviewOf0e2139fScreens(unittest.TestCase):
         state, body = detail(raw)
         self.assertEqual(state, State.CLOSED)
         self.assertIn("clinical: not known", body)
+
+
+class AuditOf42a3721Screens(unittest.TestCase):
+    def test_a_closed_prs_rows_never_contradict_it(self):
+        raw = entry("example-site-919")
+        pull = raw["task"]["pull_request"]
+        pull.update(merged=False, merged_by=None, checks=None)
+        pull.pop("merged_at", None)
+        raw["task"]["runs"] = None
+        state, body = detail(raw)
+        self.assertEqual(state, State.CLOSED)
+        self.assertNotIn("not yet", body)
+        self.assertNotIn("needed, later", body)
+        self.assertIn("not judged: closed", body)

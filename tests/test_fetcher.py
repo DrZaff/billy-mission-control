@@ -1985,10 +1985,13 @@ class Refresh(Base):
         self.assertIsNotNone(item["task"]["pull_request"]["reviews"])
         self.assertEqual(state.state, tasks.State.UNSAFE)
         self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
-        # A dismissed review of the head, before the merge, still can't be placed.
+        # A dismissed review of the head, before the merge, may have been an approval: the
+        # model says "not known" (the reviews are kept since 42a3721).
         head_dismissed = review_node(state="DISMISSED", at=before)
         item, state = self.merged_clinical([head_dismissed])
-        self.assertIsNone(item["task"]["pull_request"]["reviews"])
+        self.assertIsNotNone(item["task"]["pull_request"]["reviews"])
+        self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, state.flags)
+        self.assertNotIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
 
     def test_a_lone_pr_is_asked_for_again_after_a_transient_error(self):
         # Finding 4: one 502 read a lone PR lite at once, under "ok".
@@ -2023,13 +2026,14 @@ class Refresh(Base):
                 return 502, {}, b""
             return real(method, path, headers, body)
 
-        # A calm one (merged by the owner): a transient-only reading never replaces the last
-        # snapshot under "ok". (A known unsafe merge would still be shown: 5d06878.)
+        # One that keeps failing in full is shown lite after the extra try, like a too-large
+        # one: a stranger's PR must never stall every repository (audit of 42a3721).
         node["mergedBy"] = {"login": OWNER}
         github = gh.GitHub(APP_ID, KEY, transport=always, clock=lambda: NOW.timestamp())
-        with self.assertRaises(gh.FetchError) as caught:
-            snapshot.refresh(self.cfg, github, NOW)
-        self.assertEqual(caught.exception.code, "too-heavy")
+        item = next(
+            i for i in snapshot.refresh(self.cfg, github, NOW)["items"] if i["repo"] == REPO_B
+        )
+        self.assertIsNone(item["task"]["pull_request"]["files"])
 
     def test_a_retry_leaves_out_only_the_pieces_in_error(self):
         # Finding 5: an error on the title nulled the PR, and the retry went straight to the
@@ -2096,6 +2100,93 @@ class Refresh(Base):
         runs[1]["completedAt"] = "not a time"  # "test" succeeded, at an odd time
         self.assert_failing(node)
 
+    # ------------------------------------------------ audit of 42a3721
+
+    def nulled_once(self, numbers, fields, when=lambda body: True):
+        """A GitHub that nulls these PRs once, for errors on these fields, then answers."""
+        real = self.fake.__call__
+        done = set()
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number:" in body and when(body):
+                answer = json.loads(data)
+                errors = []
+                for alias, node in answer["data"]["repository"].items():
+                    if node and node["number"] in numbers and node["number"] not in done:
+                        done.add(node["number"])
+                        answer["data"]["repository"][alias] = None
+                        errors += [{"type": "X", "path": ["repository", alias, *f]} for f in fields]
+                if errors:
+                    answer["errors"] = errors
+                    data = json.dumps(answer).encode()
+            return status, h, data
+
+        return gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+
+    def test_a_retry_without_the_test_merge_commit_is_never_passed(self):
+        node = pr_node(
+            1,
+            issue=issue_node(10),
+            merge_commit={"oid": "b" * 40, "status": None, "checkSuites": {"totalCount": 3}},
+        )
+        self.fake.prs[REPO_A]["open"][0] = node
+        github = self.nulled_once({1}, [["title"], ["potentialMergeCommit", "oid"]])
+        item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
+        self.assertIs(item["task"]["pull_request"]["checks_complete"], False)
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
+    def test_a_lite_reads_retry_never_asks_for_the_large_pieces_again(self):
+        self.fake.prs[REPO_A]["open"] = [
+            pr_node(1, issue=issue_node(10)),
+            pr_node(2, issue=issue_node(10)),
+        ]
+        self.fake.too_large = {1}
+        github = self.nulled_once({1}, [["title"]], when=lambda body: b"files(" not in body)
+        snap = snapshot.refresh(self.cfg, github, NOW)  # not "too-large" for every repository
+        item = next(i for i in snap["items"] if i["number"] == 1)
+        self.assertIsNone(item["task"]["pull_request"]["files"])
+
+    def test_title_only_retries_are_not_lite_reads(self):
+        self.fake.prs[REPO_A]["open"] = [
+            pr_node(1, issue=issue_node(10)),
+            pr_node(2, issue=issue_node(10)),
+        ]
+        github = self.nulled_once({1, 2}, [["title"]])
+        snap = snapshot.refresh(self.cfg, github, NOW)  # not rejected as all-lite
+        for item in snap["items"][:2]:
+            self.assertEqual(item["task"]["pull_request"]["files"], ["site/a.html"])
+
+    def test_skipped_and_neutral_required_checks_pass(self):
+        for conclusion in ("SKIPPED", "NEUTRAL"):
+            with self.subTest(conclusion):
+                node = pr_node(1, issue=issue_node(10))
+                suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+                suite["checkRuns"]["nodes"][0]["conclusion"] = conclusion
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
+    def test_a_wrongly_shaped_suite_is_never_skipped_silently(self):
+        for field, value in (
+            ("app", "github-actions"),
+            ("app", {"slug": 5}),
+            ("workflowRun", 0),
+            ("workflowRun", ""),
+            ("workflowRun", {"event": 0}),
+        ):
+            with self.subTest(field=field, value=value):
+                node, commit = self.failing_lint()
+                suites = commit["checkSuites"]
+                good = json.loads(json.dumps(suites["nodes"][0]))
+                good["checkRuns"]["nodes"][0]["conclusion"] = "SUCCESS"
+                suites["nodes"][0][field] = value  # the failing suite, wrongly shaped
+                suites["nodes"].append(good)
+                suites["totalCount"] = 2
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
     def test_a_clinical_path_of_any_length_is_clinical(self):
         # Finding 6.
         item, state = self.merged_clinical(
@@ -2126,7 +2217,9 @@ class Refresh(Base):
             )
         ]
         item = self.run_refresh()["items"][0]
-        self.assertIsNone(item["task"]["pull_request"]["reviews"])
+        # Since 42a3721 the reviews are kept, and the model says "not known" because the
+        # verdict depends on the dismissed one.
+        self.assertIsNotNone(item["task"]["pull_request"]["reviews"])
         state = tasks.derive(self.task_of(item))
         self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, state.flags)
         self.assertNotIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)

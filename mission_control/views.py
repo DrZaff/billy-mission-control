@@ -345,6 +345,8 @@ def _path(entry: Entry) -> str:
     if st.merged:
         # Never judged after a merge (owner's decision, 2026-11-25): neither passed nor not.
         rows.append(("?", "Checks", "not judged after a merge (GitHub's merge box enforced them)"))
+    elif state is State.CLOSED:
+        rows.append(("-", "Checks", "not judged: closed without merging"))
     else:
         for flag, marker in (
             (Flag.CHECKS_FAILING, "!"),
@@ -363,7 +365,9 @@ def _path(entry: Entry) -> str:
         else:
             rows.append(("-", "Checks", "not yet"))
 
-    if Flag.CLINICAL in flags:
+    if Flag.CLINICAL in flags and state is State.CLOSED and not st.merged:
+        rows.append(("-", "Clinician", "not judged: closed without merging"))
+    elif Flag.CLINICAL in flags:
         if Flag.REVIEWS_UNVERIFIED in flags:
             # Unread reviews: neither approved nor not (Codex's review of 9fb21c8).
             rows.append(("?", "Clinician", "not shown: the reviews couldn't be read"))
