@@ -202,6 +202,8 @@ class Flag(StrEnum):
     ISSUE_NOT_LINKED = "issue_not_linked"
     # A merged PR whose merger can't be identified: nothing shows the owner merged it.
     MERGER_UNKNOWN = "merger_unknown"
+    # Merged while its issue was closed (authorised after the closing, never reopened).
+    MERGED_ISSUE_CLOSED = "merged_issue_closed"
 
 
 ATTENTION_STATES = frozenset(
@@ -753,6 +755,18 @@ def _closure_unplaced(task: _Task, until: datetime | None) -> bool:
     return (state == "open") != task.issue_open
 
 
+def _closed_before(task: _Task, until: datetime) -> bool:
+    """Whether the issue was closed just before the merge, on the closings and reopenings
+    before the merge's own second (a reopening in that second may have come after it)."""
+    state = "open"
+    for e in sorted(task.timeline, key=lambda e: (e.at, e.kind != "closed")):
+        if e.at >= until:
+            break
+        if e.kind in ("closed", "reopened"):
+            state = e.kind
+    return state == "closed"
+
+
 def _checks(task: _Task, head: str, flags: set[Flag]) -> bool:
     """True only if every required check completed successfully on exactly this commit."""
     pr = task.pr
@@ -1039,6 +1053,12 @@ def derive(raw: Any) -> TaskStatus:
         elif since is None and task.issue_known:
             flags.add(Flag.UNAUTHORIZED_WORK)
             problems.append("the work was never authorised by the owner")
+        elif task.issue_known and _closed_before(task, merged_at):
+            # Authorised after the issue's closing, then merged with it still closed: an open
+            # PR there is off the path until the issue is reopened, so its merge is unsafe
+            # (Codex's review of 980b8b9).
+            flags.add(Flag.MERGED_ISSUE_CLOSED)
+            problems.append("its issue was closed when it was merged")
         # Checks are never judged after a merge: results carry no time, so a later run could
         # rewrite the verdict either way (Fable's review of 0cf099c; owner's decision,
         # 2026-11-25). The Checks row says they aren't judged and claims nothing GitHub enforced

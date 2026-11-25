@@ -823,3 +823,11 @@ class FableAuditOfCa7faa9Screens(unittest.TestCase):
         state, body = detail(entry("example-tools-66"))
         self.assertEqual(state, State.UNSAFE)
         self.assertIn("withdrawn: agent:ready removed or the issue closed", body)
+
+
+class CodexReviewOf980b8b9Screens(unittest.TestCase):
+    def test_a_merge_while_the_issue_was_closed_says_so(self):
+        state, body = detail(entry("example-site-941"))
+        self.assertEqual(state, State.UNSAFE)
+        self.assertIn("yes, but its issue was closed when it was merged", body)
+        self.assertIn("Merged while its issue was closed", body)

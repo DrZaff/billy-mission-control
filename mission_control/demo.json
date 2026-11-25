@@ -2179,6 +2179,116 @@
    }
   },
   {
+   "id": "example-site-941",
+   "title": "Footer year (merged while its issue was closed)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 941,
+     "state": "closed",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      },
+      {
+       "event": "closed",
+       "actor": "example-owner",
+       "at": "2026-11-14T10:00:00+00:00",
+       "closer_pr": null
+      },
+      {
+       "event": "authorized",
+       "actor": "example-owner",
+       "at": "2026-11-14T11:00:00+00:00"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/footer-year",
+     "head": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/footer-year",
+      "sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+      "at": "2026-11-14T16:10:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/footer-year",
+      "sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+      "at": "2026-11-14T16:20:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-f4f4f4f",
+      "sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+      "at": "2026-11-14T16:25:00+00:00",
+      "pr": 942
+     }
+    ],
+    "pull_request": {
+     "number": 942,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ],
+     "merged_at": "2026-11-14T17:25:00+00:00",
+     "from_fork": false
+    }
+   }
+  },
+  {
    "id": "example-site-923",
    "title": "Old banner (dropped)",
    "risk": "low",
