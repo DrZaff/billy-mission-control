@@ -697,8 +697,9 @@ class Refresh(Base):
         self.fake.prs[REPO_A]["open"][0] = node
         items = self.run_refresh()["items"]
         bad = next(i for i in items if i["number"] == 1)
-        self.assertIsNone(bad["task"])
-        self.assertEqual(tasks.derive(bad["task"]).state, tasks.State.UNKNOWN)
+        # Since 7faf35a only that part is "not known"; the rest of the PR is still judged.
+        self.assertIsNone(bad["task"]["pull_request"]["checks"])
+        self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, tasks.derive(self.task_of(bad)).flags)
         self.assertEqual([i["number"] for i in items], [1, 2, 3])
 
     def test_a_field_error_on_one_pr_never_stalls_the_others(self):
@@ -749,8 +750,65 @@ class Refresh(Base):
         self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10), reviews=[bad_review])
         items = self.run_refresh()["items"]
         self.assertEqual([i["number"] for i in items], [1, 2, 3])
-        self.assertIsNone(items[0]["task"])
-        self.assertIsNotNone(items[1]["task"])
+        self.assertIsNone(items[0]["task"]["pull_request"]["reviews"])  # that part: not known
+        self.assertIsNotNone(items[1]["task"]["pull_request"]["reviews"])
+
+    def test_a_query_wide_graphql_error_fails_the_refresh(self):
+        # Codex's review of 7faf35a (blocking): an error about the whole query (no place in
+        # the answer) made every pull request unreadable while the refresh reported success.
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            if path == "/graphql" and b"pullRequest(number:" in body:
+                errors = [{"type": "FORBIDDEN", "message": "x"}]
+                return 200, {}, json.dumps({"data": None, "errors": errors}).encode()
+            return real(method, path, headers, body)
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        with self.assertRaises(gh.FetchError) as caught:
+            snapshot.refresh(self.cfg, github, NOW)
+        self.assertEqual(caught.exception.code, "graphql-error")
+
+    def test_every_pr_unreadable_fails_rather_than_replacing_the_snapshot(self):
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number:" in body:
+                answer = json.loads(data)
+                answer["data"]["repository"] = {}
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        with self.assertRaises(gh.FetchError) as caught:
+            snapshot.refresh(self.cfg, github, NOW)
+        self.assertEqual(caught.exception.code, "bad-response")
+
+    def test_a_bad_issue_never_hides_a_known_unsafe_merge(self):
+        # Codex's review of 7faf35a (blocking).
+        recent = (NOW - timedelta(days=1)).isoformat()
+        issue = issue_node(10)
+        issue["state"] = ["OPEN"]  # wrongly shaped
+        node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue)
+        node["mergedBy"] = {"login": "someone-else"}
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        item = self.run_refresh()["items"][0]
+        state = tasks.derive(self.task_of(item))
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, state.flags)
+
+    def test_strange_graphql_error_types_never_raise(self):
+        # Codex's review of 7faf35a: a list or object type raised TypeError.
+        for kind in (["RATE_LIMITED"], {"a": 1}, None, 7):
+            with self.subTest(kind=kind):
+                answer = {"data": None, "errors": [{"type": kind}]}
+                fake = lambda *a, answer=answer: (200, {}, json.dumps(answer).encode())  # noqa: E731
+                github = gh.GitHub(APP_ID, KEY, transport=fake, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.graphql(TOKEN, "query { x }", {})
+                self.assertEqual(caught.exception.code, "graphql-error")
 
     def test_another_apps_checks_need_no_workflow_run(self):
         # Codex's review of de9a6fb: suites of an app other than GitHub Actions have no

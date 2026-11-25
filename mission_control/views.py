@@ -372,8 +372,8 @@ def task_detail(demo: Demo, entry: Entry) -> str:
     # A partial or unknown file list never shows "no" (Codex's review of 9537b08).
     if Flag.CLINICAL in st.flags:
         clinical = "yes"
-    elif Flag.FILES_UNVERIFIED in st.flags:
-        clinical = "not known"
+    elif Flag.FILES_UNVERIFIED in st.flags or st.state is State.UNKNOWN:
+        clinical = "not known"  # unreadable data says nothing (Codex's review of 7faf35a)
     else:
         clinical = "no"
     reasons = "".join(f"<li>{_e(r)}</li>" for r in st.reasons)

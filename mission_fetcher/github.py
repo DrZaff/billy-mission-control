@@ -50,9 +50,12 @@ Transport = Callable[[str, str, dict[str, str], bytes | None], Response]
 class FetchError(Exception):
     """A refused or failed refresh. `code` is short and safe to log or show."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, paths: tuple = ()):
         super().__init__(code)
         self.code = code
+        # For a GraphQL error: where in the answer each error is, as GitHub says (each a
+        # tuple, or None when an error names no place). Never shown or logged.
+        self.paths = paths
 
 
 def tls_context() -> ssl.SSLContext:
@@ -220,12 +223,28 @@ class GitHub:
             raise FetchError("bad-response")
         errors = answer.get("errors")
         if errors:
-            kinds = {e.get("type") for e in errors if isinstance(e, dict)}
+            if not isinstance(errors, list):
+                raise FetchError("bad-response")
+            # Only plain text types: anything else is ignored rather than raising (Codex's
+            # review of 7faf35a: a list or object type raised TypeError).
+            kinds = {
+                e.get("type")
+                for e in errors
+                if isinstance(e, dict) and isinstance(e.get("type"), str)
+            }
             if "RATE_LIMITED" in kinds:
                 raise FetchError("rate-limited")
             if kinds & HEAVY_KINDS:
                 raise FetchError("too-heavy")  # GitHub stopped the query for its cost
-            raise FetchError("graphql-error")
+            paths = tuple(
+                tuple(e["path"])
+                if isinstance(e, dict)
+                and isinstance(e.get("path"), list)
+                and all(isinstance(p, (str, int)) and not isinstance(p, bool) for p in e["path"])
+                else None
+                for e in errors
+            )
+            raise FetchError("graphql-error", paths)
         data = answer.get("data")
         if not isinstance(data, dict):
             raise FetchError("bad-response")

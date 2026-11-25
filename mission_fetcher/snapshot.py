@@ -102,6 +102,24 @@ HEAVY = {"too-large", "too-heavy", "timeout", "http-502", "http-503", "http-504"
 # de9a6fb).
 ITS_OWN = {"graphql-error", "bad-response"}
 
+
+def _its_own(error: FetchError, size: int) -> bool:
+    """Whether an error can be blamed on the pull requests asked for. A GraphQL error counts
+    only if every error GitHub gave points inside one of them (repository > pN > ...): one
+    with no place, or anywhere else, is about the whole query, such as a permission or a
+    validation error, and fails the refresh (Codex's review of 7faf35a: it made every pull
+    request unreadable while the refresh reported success)."""
+    if error.code == "bad-response":
+        return True
+    if error.code != "graphql-error" or not error.paths:
+        return False
+    aliases = {f"p{i}" for i in range(size)}
+    return all(
+        path is not None and len(path) >= 2 and path[0] == "repository" and path[1] in aliases
+        for path in error.paths
+    )
+
+
 _BASE_FIELDS = """
   number title state isDraft merged closedAt mergedAt
   mergedBy { login }
@@ -178,6 +196,12 @@ def detail_query(numbers: list[int], lite: bool = False) -> str:
 
 class _Incomplete(Exception):
     """This part of GitHub's answer can't be trusted whole: leave it out."""
+
+
+# Any sign that one optional part of a pull request's data is wrongly shaped: that part is
+# then "not known", and the rest of the pull request is still judged (Codex's review of
+# 7faf35a: an error in a merged PR's issue data threw away a known unsafe merge).
+_SHAPE = (FetchError, TypeError, ValueError, AttributeError, KeyError, OverflowError)
 
 
 def _bad() -> FetchError:
@@ -507,8 +531,9 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
         pull["files"], complete = _files(pr, tuple(settings.clinical_paths))
         if not complete:
             pull["files_complete"] = False
-    except _Incomplete:
+    except (_Incomplete, *_SHAPE):
         pull["files"] = None
+        pull.pop("files_complete", None)
     parts = [("reviews", lambda: _reviews(pr, cfg.clinicians, merged))]
     # Checks only for an open pull request. Once it is merged or closed, GitHub no longer shows
     # the test merge commit it judged, so no reading of the checks can match its verdict; the
@@ -532,11 +557,14 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
     for key, read in parts:
         try:
             pull[key] = read()
-        except _Incomplete:
+        except (_Incomplete, *_SHAPE):
             # null: "not known", so the model still judges what is known (Codex's review of
             # 198a66e: leaving the key out made the whole PR unreadable and hid its warnings).
             pull[key] = None
-    linked, issue, issue_screen = _issue(repo, pr)
+    try:
+        linked, issue, issue_screen = _issue(repo, pr)
+    except _SHAPE:
+        linked, issue, issue_screen = 0, None, None  # not known: no claim from it
     task = {
         "repo": repo,
         "owner": cfg.owner,
@@ -549,7 +577,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
     }
     try:
         task["branch"] = {"name": _exact(pr.get("headRefName")), "head": head}
-    except _Incomplete:
+    except (_Incomplete, *_SHAPE):
         task["branch"] = None  # not known; the pull request's head is still known
     # null when no readable, authorised issue is linked: the model shows an open PR as
     # NOT_LINKED and still judges a merged one (Codex's review of 3f7d3c2: leaving the key out
@@ -623,7 +651,7 @@ def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[in
         try:
             return fetch_counted(batch, False)
         except FetchError as error:
-            if error.code not in HEAVY | ITS_OWN:
+            if error.code not in HEAVY and not _its_own(error, len(batch)):
                 raise
         if len(batch) > 1:
             half = len(batch) // 2
@@ -631,7 +659,7 @@ def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[in
         try:
             return fetch_counted(batch, True)
         except FetchError as error:
-            if error.code not in ITS_OWN:
+            if not _its_own(error, 1):
                 raise
             return [(batch[0], UNREADABLE, True)]
 
@@ -668,7 +696,12 @@ def repo_items(repo: str, cfg: FetcherConfig, github: GitHub, token: str, now: d
     numbers, more = _listing(repo, listing, now)
     since = now - timedelta(days=RECENT_DAYS)
     items = []
-    for number, node, lite in _details(github, token, owner, name, numbers):
+    details = _details(github, token, owner, name, numbers)
+    if details and all(node is UNREADABLE for _, node, _ in details):
+        # Every pull request unreadable is no per-PR problem: fail, keeping the last good
+        # snapshot, rather than replace it with nothing but unreadable entries (7faf35a).
+        raise _bad()
+    for number, node, lite in details:
         try:
             if node is UNREADABLE:
                 raise _bad()

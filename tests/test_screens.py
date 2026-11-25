@@ -431,6 +431,14 @@ class CodexReviewOfCaa5552(unittest.TestCase):
         # Nor does the Flags list say so (Codex's review of dc1eb14).
         self.assertNotIn("No clinician has approved", body)
 
+    def test_unreadable_task_data_never_says_clinical_no(self):
+        # Codex's review of 7faf35a.
+        raw = entry("example-tools-62")
+        raw["task"] = None
+        state, body = detail(raw)
+        self.assertEqual(state, State.UNKNOWN)
+        self.assertIn("clinical: not known", body)
+
     def test_an_unidentifiable_merger_is_an_unsafe_merge_on_the_path(self):
         # Codex's review of 48929aa.
         e = DEMO.entry("example-tools-64")
