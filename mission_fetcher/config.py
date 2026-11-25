@@ -122,6 +122,8 @@ def parse_fetcher(text: str) -> FetcherConfig:
     settings = {}
     for name, value in repos.items():
         _req(REPO.fullmatch(name) is not None, f"repos: {name!r} is not owner/name")
+        # "." and ".." would make a different path on GitHub (audit of 7712dec).
+        _req(name.split("/")[1] not in (".", ".."), f"repos: {name!r} is not owner/name")
         settings[name] = _repo_settings(name, value)
     return FetcherConfig(
         account=account,

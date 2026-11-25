@@ -295,7 +295,9 @@ PIECES = {
       nodes {
         app { slug }
         workflowRun { event }
-        checkRuns(first: $runs) { totalCount nodes { name status conclusion completedAt } }
+        checkRuns(first: $runs, filterBy: {checkType: LATEST}) {
+          totalCount nodes { name status conclusion completedAt }
+        }
       }
     } } }
   }""").substitute(_LIMITS),

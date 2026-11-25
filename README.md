@@ -4,7 +4,7 @@ An owner-only, read-only, phone-first cockpit for the owner of the AI Medicine C
 
 **This repository is public; the cockpit is not.** The code is open, but Mission Control will run only on the owner's agent server, reachable over Tailscale with a passkey (phase A4). This repository never holds data, credentials, or details of that machine (names, addresses, configuration). Its `main` branch is protected by an enforced ruleset.
 
-**Status: phase A4b, passkey sign-in, in supervised testing only.** The A3 screens (on made-up demo data) run as a service behind Tailscale Serve (A4a): the owner's exact Tailscale login, one write action (a stop button that asks a separate stop helper to set Billy's stop marker), an append-only events log, and start-up checks that fail closed. A4b adds the second sign-in layer: every page now also needs a passkey session (the owner's iPhone, or a backup security key), with passkeys added and removed only from a shell on the server. The owner's acceptance tests (A4c) come before routine use. No real data, no outbound network calls from the app, nothing deployed by an agent.
+**Status: phase A4b, passkey sign-in, in supervised testing only.** The A3 screens (on made-up demo data) run as a service behind Tailscale Serve (A4a): the owner's exact Tailscale login, one write action (a stop button that asks a separate stop helper to set Billy's stop marker), an append-only events log, and start-up checks that fail closed. A4b adds the second sign-in layer: every page now also needs a passkey session (the owner's iPhone, or a backup security key), with passkeys added and removed only from a shell on the server. The owner's acceptance tests (A4c) come before routine use. No real data, no outbound network calls from the app, nothing deployed by an agent. Phase A5a, in review, adds the fetcher (below): a separate, read-only process that reads GitHub for the app; the screens will use its snapshot in A5b.
 
 - [Design: `docs/agents/mission-control.md`](https://github.com/DrZaff/ai-medicine-collective/blob/main/docs/agents/mission-control.md)
 - [Build plan: `docs/agents/mission-control-plan.md`](https://github.com/DrZaff/ai-medicine-collective/blob/main/docs/agents/mission-control-plan.md) (A1 is issue [#200](https://github.com/DrZaff/ai-medicine-collective/issues/200))
@@ -13,11 +13,11 @@ How agents work in this repository: [AGENTS.md](AGENTS.md). The owner's GitHub s
 
 ## Stack
 
-**Python 3.12, standard library only** (WSGI, `wsgiref`, `unittest`), with server-rendered HTML.
+**Python 3.12, standard library only** (WSGI, `wsgiref`, `unittest`), with server-rendered HTML, apart from one pinned library for passkey sign-in, `fido2`, and its dependency `cryptography`, which the fetcher also uses to sign the GitHub App's token.
 
 - **Small and maintainable on the Dell:**
   - Ubuntu 24.04 ships Python 3.12.
-  - The app has no runtime dependencies to install, update or patch.
+  - Apart from those two pinned libraries, nothing to install, update or patch.
   - Billy's existing tools are Python too.
 - **A small attack surface:** no JavaScript framework, no build step, no package tree. The page is plain HTML under a strict Content Security Policy that allows nothing to load.
 - **Easy to test:** a WSGI app is a plain function, so tests call it directly with no server and no network.

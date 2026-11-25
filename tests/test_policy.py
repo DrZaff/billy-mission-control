@@ -135,6 +135,37 @@ PROCESS_NAMES = re.compile(
     r"system|popen|posix_spawnp?|fork|forkpty|exec[lv]p?e?|spawn[lv]p?e?|startfile|killpg?"
 )
 
+# Ways to reach a module, a builtin or an object's insides without naming it in the code,
+# banned in both packages: builtins by name, and attributes anywhere.
+DYNAMIC_NAMES = (
+    "__import__",
+    "eval",
+    "exec",
+    "compile",
+    "getattr",
+    "setattr",
+    "delattr",
+    "globals",
+    "locals",
+    "vars",
+    "importlib",
+    "builtins",
+)
+DYNAMIC_ATTRIBUTES = (
+    "__import__",
+    "__dict__",
+    "__class__",
+    "__bases__",
+    "__mro__",
+    "__subclasses__",
+    "__globals__",
+    "__builtins__",
+    "__getattribute__",
+    "__code__",
+    "modules",
+    "environb",
+)
+
 CONNECTION_NAMES = ("HTTPSConnection", "HTTPConnection")
 OUTBOUND_NAMES = ("create_connection", "get_server_certificate", "open_connection", "set_tunnel")
 # A connection's destination, which nothing may set after the connection is made.
@@ -229,6 +260,49 @@ class App(unittest.TestCase):
                     self.assertIn(node.asname, (None, "os"), (path.name, node.lineno))
                 for name in names:
                     self.assertIsNone(PROCESS_NAMES.fullmatch(name), (path.name, node.lineno))
+
+    def test_nothing_is_reached_around_the_rules(self):
+        # Audit of 7712dec: __import__, sys.modules, a star import, __dict__, type(conn)(...),
+        # re-setting HOST from another module, or a fake AF_UNIX each got past the rules above,
+        # which read names and import statements.
+        paths = sorted((ROOT / "mission_control").rglob("*.py"))
+        paths += sorted((ROOT / "mission_fetcher").rglob("*.py"))
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                where = (path.name, getattr(node, "lineno", None))
+                if isinstance(node, ast.Name):
+                    self.assertNotIn(node.id, DYNAMIC_NAMES + DYNAMIC_ATTRIBUTES, where)
+                if isinstance(node, ast.Attribute):
+                    self.assertNotIn(node.attr, DYNAMIC_ATTRIBUTES, where)
+                if isinstance(node, ast.ImportFrom):
+                    self.assertNotIn("*", [a.name for a in node.names], where)
+                if isinstance(node, ast.alias):
+                    self.assertNotIn(node.name, ("importlib", "builtins"), where)
+                if isinstance(node, ast.Call):
+                    # type(x) only reads a type; type(...)(...) or type(a, b, c) makes one.
+                    if ast.unparse(node.func) == "type":
+                        self.assertEqual((len(node.args), node.keywords), (1, []), where)
+                    if isinstance(node.func, ast.Call):
+                        self.assertNotEqual(ast.unparse(node.func.func), "type", where)
+                    # Every socket is a Unix one, by socket.AF_UNIX itself, or handed over.
+                    if ast.unparse(node.func) == "socket.socket" and node.args:
+                        self.assertEqual(ast.unparse(node.args[0]), "socket.AF_UNIX", where)
+                # No module's settings are changed from outside it (github.HOST = ...).
+                targets: list[ast.AST] = []
+                if isinstance(node, ast.Assign):
+                    targets = list(node.targets)
+                if isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.Delete)):
+                    targets = node.targets if isinstance(node, ast.Delete) else [node.target]
+                for target in targets:
+                    for part in ast.walk(target):
+                        if isinstance(part, ast.Attribute):
+                            self.assertFalse(part.attr.isupper(), where)
+                # Nor rebound inside it, after it is set once at the top.
+                if isinstance(node, (ast.Global, ast.Nonlocal)):
+                    self.assertEqual(
+                        [n for n in node.names if n.isupper()], [], (path.name, node.lineno)
+                    )
 
     def test_the_app_never_imports_the_fetcher(self):
         # Phase A5a (issue #16): the fetcher is the only part with network access, in its own

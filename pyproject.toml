@@ -1,7 +1,7 @@
 [project]
 name = "billy-mission-control"
 version = "0.1.0"
-description = "Billy Mission Control: a private, read-only, phone-first cockpit (phase A4b, synthetic demo data)"
+description = "Billy Mission Control: a private, read-only, phone-first cockpit (phase A4b, synthetic demo data; A5a adds a read-only GitHub fetcher)"
 requires-python = ">=3.12"
 # One declared runtime dependency (A4b): python-fido2, for passkey sign-in, imported only by
 # mission_control/auth/passkeys.py. The fetcher (A5a) also uses `cryptography`, which fido2

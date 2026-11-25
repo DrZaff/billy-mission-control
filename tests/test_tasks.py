@@ -1694,3 +1694,23 @@ class AuditOf8c62413(unittest.TestCase):
                 self.assertNotIn(Flag.FILES_UNVERIFIED, s.flags)
                 self.assertTrue(s.needs_attention)
                 self.assertEqual(views.section(s), "alerts")
+
+
+class AuditOf7712dec(unittest.TestCase):
+    def test_unknown_or_partial_files_are_always_an_alert(self):
+        # Audit of 7712dec: nothing held FILES_UNVERIFIED among the attention flags.
+        from mission_control import views
+
+        cases = []
+        for merged in (True, False):
+            for files_over in ({"files": None}, {"files_complete": False}):
+                over = {"state": "closed", "merged": True, "merged_by": OWNER, "merged_at": t(20)}
+                value = pr(**(over if merged else {}))
+                value.update(files_over)
+                cases.append((merged, files_over, value))
+        for merged, files_over, value in cases:
+            with self.subTest(merged=merged, files=files_over):
+                s = derive(task(runs=[run("build"), passed(), published()], pull_request=value))
+                self.assertIn(Flag.FILES_UNVERIFIED, s.flags)
+                self.assertTrue(s.needs_attention)
+                self.assertEqual(views.section(s), "alerts")

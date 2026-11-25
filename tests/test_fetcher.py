@@ -383,6 +383,33 @@ class Config(Base):
             {"app_id": True},
             {"repos": {}},
             {"repos": {"not a repo": {"required_checks": ["x"], "clinical_paths": []}}},
+            {
+                "repos": {
+                    "example-org/..": {
+                        "required_checks": ["x"],
+                        "clinical_paths": [],
+                        "checks_app": "github-actions",
+                    }
+                }
+            },
+            {
+                "repos": {
+                    "example-org/.": {
+                        "required_checks": ["x"],
+                        "clinical_paths": [],
+                        "checks_app": "github-actions",
+                    }
+                }
+            },
+            {
+                "repos": {
+                    REPO_A: {
+                        "required_checks": ["x"],
+                        "clinical_paths": [],
+                        "checks_app": "Not A Slug",
+                    }
+                }
+            },
             {"repos": {REPO_A: {"required_checks": [], "clinical_paths": []}}},
             {"repos": {REPO_A: {"required_checks": ["x"]}}},
             {"owner": "bad login!"},
@@ -3860,6 +3887,40 @@ class AuditOf80e8fb3(Base):
         with self.assertRaises(gh.FetchError) as caught:
             github.installation(OWNER, [REPO_A, REPO_B])
         self.assertEqual(caught.exception.code, "several-installations")
+
+
+class AuditOf7712dec(Base):
+    """Round 11: guards that were right but that no test held in place."""
+
+    def run_refresh(self):
+        return snapshot.refresh(self.cfg, client(self.fake), NOW)
+
+    def task_of(self, item):
+        return dict(item["task"], paused=False)
+
+    def reviewed(self, item):
+        return Refresh.reviewed(self, item)
+
+    def test_an_approval_of_a_vanished_commit_never_approves_the_head(self):
+        for commit, approved in ((SHA1, True), (None, False)):
+            with self.subTest(commit=commit):
+                review = review_node(OWNER, "APPROVED")
+                review["commit"] = None if commit is None else {"oid": commit}
+                node = pr_node(
+                    1, issue=issue_node(10), files=("evidence/a.json",), reviews=(review,)
+                )
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                flags = tasks.derive(self.reviewed(item)).flags
+                self.assertEqual(tasks.Flag.CLINICIAN_APPROVED in flags, approved)
+                if not approved:
+                    self.assertIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, flags)
+
+    def test_only_the_latest_attempt_of_each_check_is_asked_for(self):
+        # A re-run that passed must not leave an earlier failed attempt showing (audit of
+        # 7712dec): GitHub is asked for the latest run of each check only.
+        query = snapshot.detail_query([1], frozenset(), [OWNER])
+        self.assertIn("checkRuns(first: 30, filterBy: {checkType: LATEST})", query)
 
 
 class AuditOf8c62413(unittest.TestCase):
