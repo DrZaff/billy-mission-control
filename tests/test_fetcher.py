@@ -150,6 +150,15 @@ def pr_node(
     return node
 
 
+def review_node(user=OWNER, state="APPROVED", at="2026-11-22T00:00:00Z", commit=SHA1, bot=False):
+    return {
+        "state": state,
+        "author": {"login": user, "__typename": "Bot" if bot else "User"},
+        "commit": {"oid": commit},
+        "submittedAt": at,
+    }
+
+
 def issue_node(number, actor=OWNER, label="agent:ready", repo=REPO_A):
     return {
         "number": number,
@@ -866,6 +875,85 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, state.flags)
         self.assertTrue(state.needs_attention)
 
+    def test_only_clinicians_reviews_are_kept(self):
+        # Codex's review of 9fb21c8 (blocking): anyone can review a public PR, and every review
+        # was kept, so ordinary review volume could push the snapshot over its limit.
+        crowd = [review_node(f"user{i}", "COMMENTED") for i in range(90)]
+        crowd += [review_node("helper[bot]", "APPROVED", bot=True), review_node()]
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10), reviews=crowd)
+        reviews = self.run_refresh()["items"][0]["task"]["pull_request"]["reviews"]
+        self.assertEqual([r["user"] for r in reviews], [OWNER])  # OWNER is the clinician here
+
+    def test_fitting_the_snapshot_drops_reviews_last_and_never_approves(self):
+        reviews = [review_node(at=f"2026-11-22T00:{i:02d}:00Z") for i in range(50)]
+        self.fake.prs[REPO_A]["open"] = [
+            pr_node(n, issue=issue_node(10), files=("evidence/a.json",), reviews=reviews)
+            for n in range(1, 5)
+        ]
+        full = len(snapshot.encode(self.run_refresh()))
+        saved = snapshot.MAX_SNAPSHOT
+        snapshot.MAX_SNAPSHOT = full - 8000  # only dropping reviews can make room
+        try:
+            snap = self.run_refresh()
+        finally:
+            snapshot.MAX_SNAPSHOT = saved
+        self.assertLessEqual(len(snapshot.encode(snap)), full - 8000)
+        dropped = [i for i in snap["items"][:4] if i["task"]["pull_request"]["reviews"] is None]
+        self.assertTrue(dropped)
+        for item in dropped:
+            flags = tasks.derive(self.task_of(item)).flags
+            self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, flags)
+            self.assertIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, flags)
+
+    def test_a_dismissed_review_on_a_merged_pr_is_not_known(self):
+        # Codex's review of 9fb21c8 (blocking): GitHub gives a review's current state with its
+        # submission time, so a dismissal after the merge looked like one before it.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        reviews = [review_node("someone"), review_node(state="DISMISSED")]
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [
+            pr_node(
+                1,
+                state="MERGED",
+                merged=True,
+                closed_at=recent,
+                issue=issue_node(10),
+                files=("evidence/a.json",),
+                reviews=reviews,
+            )
+        ]
+        item = self.run_refresh()["items"][0]
+        self.assertIsNone(item["task"]["pull_request"]["reviews"])
+        state = tasks.derive(self.task_of(item))
+        self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, state.flags)
+        self.assertNotIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+        # On an open PR the current state is what counts: it is kept.
+        self.fake.prs[REPO_A]["closed"] = []
+        self.fake.prs[REPO_A]["open"] = [
+            pr_node(1, issue=issue_node(10), reviews=[review_node(state="DISMISSED")])
+        ]
+        kept = self.run_refresh()["items"][0]["task"]["pull_request"]["reviews"]
+        self.assertEqual([r["state"] for r in kept], ["DISMISSED"])
+
+    def test_unlinked_and_unauthorised_open_prs_still_show_their_gates(self):
+        # Codex's review of 9fb21c8: early returns skipped checks and clinician approval.
+        unlinked = pr_node(1, files=("evidence/a.json",))  # no linked issue
+        suite = unlinked["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+        suite["checkRuns"]["nodes"][0]["conclusion"] = "FAILURE"
+        unauthorised = pr_node(
+            2, issue=issue_node(11, actor="someone-else"), files=("evidence/b.json",)
+        )
+        self.fake.prs[REPO_A]["open"] = [unlinked, unauthorised]
+        first, second = self.run_refresh()["items"][:2]
+        s1 = tasks.derive(self.task_of(first))
+        self.assertEqual(s1.state, tasks.State.NOT_LINKED)
+        self.assertIn(tasks.Flag.CHECKS_FAILING, s1.flags)
+        self.assertIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, s1.flags)
+        s2 = tasks.derive(self.task_of(second))
+        self.assertEqual(s2.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.CHECKS_PASSED, s2.flags)
+        self.assertIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, s2.flags)
+
     def test_a_renamed_file_makes_the_file_list_incomplete(self):
         # Codex's review of f37d0c7 (blocking): a rename lists only the new path, so a move out
         # of a clinical folder would hide where it came from.
@@ -1247,6 +1335,9 @@ class RefresherFiles(Base):
             b'{"attempt_epoch": 1, "attempt_since_boot": NaN}',
             b'{"attempt_epoch": 1, "attempt_since_boot": -5}',
             b'{"attempt_epoch": 1, "attempt_since_boot": 5, "boot_id": 7}',
+            # Too large for a float (Codex's review of 9fb21c8: OverflowError escaped).
+            b'{"attempt_epoch": 1' + b"0" * 400 + b', "attempt_since_boot": 5}',
+            b'{"attempt_epoch": 1, "attempt_since_boot": 1' + b"0" * 400 + b"}",
         ):
             with self.subTest(bad=bad):
                 (self.cfg.snapshot_dir / snapshot.STATUS).write_bytes(bad)

@@ -72,12 +72,13 @@ def _check_status(status: dict) -> None:
     malformed: ValueError, handled like unreadable JSON."""
 
     def finite(value) -> bool:
-        return (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-            and value >= 0
-        )
+        # A JSON integer can be too large for a float: compared, never converted (Codex's
+        # review of 9fb21c8: math.isfinite raised OverflowError).
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, int):
+            return 0 <= value <= 2**53
+        return isinstance(value, float) and math.isfinite(value) and 0 <= value <= 2**53
 
     boot = status.get("boot_id")
     if not finite(status.get("attempt_epoch")) or not finite(status.get("attempt_since_boot")):

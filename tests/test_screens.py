@@ -416,6 +416,17 @@ class CodexReviewOfCaa5552(unittest.TestCase):
         self.assertNotEqual(path_row(body, "Clinician"), "done")
         self.assertNotIn("approved this commit", body)
 
+    def test_an_open_clinical_pr_with_unread_reviews_claims_nothing(self):
+        # Codex's review of 9fb21c8: it said no clinician had approved.
+        raw = entry("example-site-919")
+        pull = raw["task"]["pull_request"]
+        pull.update(state="open", merged=False, merged_by=None, reviews=None)
+        pull.pop("merged_at", None)
+        raw["task"]["issue"]["state"] = "open"
+        state, body = detail(raw)
+        self.assertEqual(path_row(body, "Clinician"), "?")
+        self.assertNotIn("approval of this commit needed", body)
+
     def test_a_merge_with_no_linked_issue_never_shows_authorisation(self):
         # Codex's review of 72607b3 (blocking): MERGED is reachable with ISSUE_NOT_LINKED.
         raw = entry("example-site-921")

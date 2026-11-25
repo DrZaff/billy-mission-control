@@ -803,7 +803,19 @@ def derive(raw: Any) -> TaskStatus:
     elif (pr and not pr.open) or not task.issue_open:
         return status(State.CLOSED, "Closed without merging.", head)
 
+    def github_gates() -> None:
+        """What GitHub itself shows about an open PR, judged on every path, so an early
+        return never hides a failing check or a missing clinician approval (Codex's review of
+        9fb21c8)."""
+        if pr and pr.open:
+            _checks(task, pr.head, flags)
+            if maybe_clinical and not _clinician_approved(task, pr.head):
+                if pr.reviews is None:
+                    flags.add(Flag.REVIEWS_UNVERIFIED)
+                flags.add(Flag.CLINICAL_APPROVAL_MISSING)
+
     if since is None and not task.issue_known:
+        github_gates()
         return status(
             State.NOT_LINKED,
             "Not linked to an authorised issue: none is linked, several are, or the one "
@@ -813,6 +825,7 @@ def derive(raw: Any) -> TaskStatus:
     if since is None:
         # Any sign of work counts: run records, a PR, or a commit on the source branch.
         if runs or pr or head is not None:
+            github_gates()
             flags.add(Flag.UNAUTHORIZED_WORK)
             return status(
                 State.UNSAFE, "Work exists, but the owner never authorised this task.", head
@@ -881,12 +894,7 @@ def derive(raw: Any) -> TaskStatus:
         # missing or that the PR came before it, and never a passed review. Everything
         # GitHub does show is still judged and flagged (Codex's review of 69ed8e3): the
         # required checks, and for a possibly clinical change, the clinician's approval.
-        if pr:
-            _checks(task, head, flags)
-            if maybe_clinical and not _clinician_approved(task, head):
-                if pr.reviews is None:
-                    flags.add(Flag.REVIEWS_UNVERIFIED)
-                flags.add(Flag.CLINICAL_APPROVAL_MISSING)
+        github_gates()
         return status(
             State.BUILT,
             f"{head[:12]}: Billy's review records aren't read here, so its review isn't shown.",

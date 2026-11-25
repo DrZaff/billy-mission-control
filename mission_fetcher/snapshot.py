@@ -256,7 +256,12 @@ def _compact(paths: list[str] | None, clinical_paths: tuple[str, ...]) -> list[s
     return None
 
 
-def _reviews(pr: dict) -> list[dict]:
+def _reviews(pr: dict, clinicians: tuple[str, ...], merged: bool) -> list[dict]:
+    """The clinicians' reviews: the only ones the model reads. Anyone can review a public
+    pull request, so keeping every review let ordinary review volume push the snapshot over
+    its limit (Codex's review of 9fb21c8). GitHub gives a review's current state with the time
+    it was submitted, so for a merged PR a dismissed review can't be placed before or after the
+    merge: the reviews are then "not known" (null) rather than a guess (9fb21c8)."""
     out = []
     for node in _connection(pr.get("reviews"), MAX_REVIEWS):
         n = _obj(node)
@@ -266,15 +271,18 @@ def _reviews(pr: dict) -> list[dict]:
         if state not in REVIEW_STATES:
             raise _bad()
         author = n.get("author")
+        is_bot = isinstance(author, dict) and author.get("__typename") == "Bot"
+        if is_bot or _login(author) not in clinicians:
+            continue
+        if merged and state == "DISMISSED":
+            raise _Incomplete()
         commit = n.get("commit")
         if commit is None or n.get("submittedAt") is None:
             raise _Incomplete()  # a review whose commit is gone can't be placed: no guess
         out.append(
             {
-                "user": _login(author) or "ghost",
-                "user_type": "Bot"
-                if isinstance(author, dict) and author.get("__typename") == "Bot"
-                else "User",
+                "user": _login(author),
+                "user_type": "User",
                 "state": state,
                 "commit_id": _sha(_obj(commit).get("oid")),
                 "at": _time(n.get("submittedAt")),
@@ -446,7 +454,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
             pull["files_complete"] = False
     except _Incomplete:
         pull["files"] = None
-    parts = [("reviews", lambda: _reviews(pr))]
+    parts = [("reviews", lambda: _reviews(pr, cfg.clinicians, merged))]
     # Checks only for an open pull request. Once it is merged or closed, GitHub no longer shows
     # the test merge commit it judged, so no reading of the checks can match its verdict; the
     # merge box enforced them at the time (owner's decision, 2026-11-25, after Codex's review
@@ -569,9 +577,10 @@ def _fit(snapshot: dict) -> None:
     anyone can make (Codex's review of 72607b3: several repositories of long, escaped paths
     stopped every refresh), so the largest are cut down until it fits: to one known clinical
     path, so a known clinical change stays known (69ed8e3), or else to "not known" (null);
-    either way the model treats the rest as possibly clinical. What remains is bounded: titles and
-    check names are capped, reviews carry no text, and labels come from people with triage
-    access. Only if it still doesn't fit does the refresh fail ("too-large")."""
+    either way the model treats the rest as possibly clinical. Then reviews (only clinicians'
+    are kept) become "not known", which never counts as an approval. What remains is bounded
+    and comes from trusted accounts: titles are capped, and labels and statuses need write or
+    triage access. Only if it still doesn't fit does the refresh fail ("too-large")."""
 
     def size() -> int:
         return len(encode(dict(snapshot, token_revoked=False)))
@@ -587,6 +596,14 @@ def _fit(snapshot: dict) -> None:
             pull.pop("files_complete", None)
         else:
             pull["files_complete"] = False
+        if size() <= MAX_SNAPSHOT:
+            return
+    # Then the clinicians' reviews, largest first: null, "not known", never approved.
+    pulls = [i["task"]["pull_request"] for i in snapshot["items"]]
+    pulls = [p for p in pulls if p.get("reviews")]
+    pulls.sort(key=lambda p: len(encode({"r": p["reviews"]})), reverse=True)
+    for pull in pulls:
+        pull["reviews"] = None
         if size() <= MAX_SNAPSHOT:
             return
     raise FetchError("too-large")

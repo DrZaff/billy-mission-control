@@ -339,12 +339,13 @@ def _path(entry: Entry) -> str:
         rows.append(("-", "Checks", "not yet"))
 
     if Flag.CLINICAL in flags:
-        if Flag.CLINICAL_APPROVAL_MISSING in flags or Flag.MERGED_WITHOUT_CLINICIAN in flags:
+        if Flag.REVIEWS_UNVERIFIED in flags:
+            # Unread reviews: neither approved nor not (Codex's review of 9fb21c8).
+            rows.append(("?", "Clinician", "not shown: the reviews couldn't be read"))
+        elif Flag.CLINICAL_APPROVAL_MISSING in flags or Flag.MERGED_WITHOUT_CLINICIAN in flags:
             rows.append(("!", "Clinician", "approval of this commit needed"))
         elif clinician_approved(st):
             rows.append(("done", "Clinician", "approved this commit"))
-        elif Flag.REVIEWS_UNVERIFIED in flags:
-            rows.append(("?", "Clinician", "not shown: the reviews couldn't be read"))
         else:
             rows.append(("-", "Clinician", "approval of the final commit needed, later"))
 
