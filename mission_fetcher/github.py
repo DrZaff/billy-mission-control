@@ -272,7 +272,10 @@ class GitHub:
             raise FetchError("unauthorised")
         if status == 204:
             return None
-        if not 200 <= status < 300:
+        # Only the successes GitHub gives these calls: 200, and 201 for a new token. Any other,
+        # such as 206 Partial Content or 202 Accepted, is never taken as a whole answer
+        # (Codex's review of 09f37a5).
+        if status not in (200, 201):
             raise FetchError(f"http-{status}" if 100 <= status < 600 else "http-bad-status")
         try:
             return json.loads(data.decode("utf-8"))
@@ -385,7 +388,7 @@ class GitHub:
     def revoke(self, token: str) -> bool:
         """Revoke the installation token. Best effort: it expires within the hour anyway."""
         try:
-            self.call("DELETE", "/installation/token", token, final=True)
+            # Only GitHub's 204 No Content confirms it (Codex's review of 09f37a5).
+            return self.call("DELETE", "/installation/token", token, final=True) is None
         except FetchError:
             return False
-        return True

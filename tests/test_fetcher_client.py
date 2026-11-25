@@ -205,6 +205,13 @@ class StartupChecks(Base):
         os.chmod(self.base / "key.pem", 0o644)
         self.assertFalse(self.checks()["reader key"].ok)
 
+    def test_a_key_the_fetcher_cannot_read_fails(self):
+        # Codex's review of 09f37a5 (should fix): it passed, and every JWT then failed.
+        os.chmod(self.base / "key.pem", 0o200)
+        self.assertFalse(self.checks()["reader key"].ok)
+        (self.base / "key.pem").unlink()
+        self.assertFalse(self.checks()["reader key"].ok)
+
     def test_the_snapshot_folder_is_for_the_web_app_only(self):
         folder = self.cfg.snapshot_dir
         # Setgid is required, so new files take the folder's group (Codex, f772122).
@@ -635,6 +642,26 @@ class GitHubClient(Base):
             self.assertEqual(caught.exception.code, "network")
         self.transport_with(b'{"a": 1}', "8")  # whole: fine
         self.transport_with(b'{"a": 1}', None)  # read to the end: fine
+
+    def test_only_the_successes_github_gives_are_answers(self):
+        # Codex's review of 09f37a5 (should fix): 206 Partial Content, or a 202 for a
+        # revocation, was taken as success.
+        real = self.fake.__call__
+        for status in (202, 206, 299):
+            with self.subTest(status=status):
+
+                def call(method, path, headers, body, status=status):
+                    got = real(method, path, headers, body)
+                    if path.startswith("/installation/") or path == "/graphql":
+                        return status, got[1], got[2] or b"{}"
+                    return got
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.repositories(TOKEN, [REPO_A, REPO_B])
+                self.assertEqual(caught.exception.code, f"http-{status}")
+                self.assertFalse(github.revoke(TOKEN))
+        self.assertTrue(client(self.fake).revoke(TOKEN))  # GitHub's 204: confirmed
 
     def test_an_odd_or_repeated_repository_row_is_never_skipped(self):
         # Codex's review of df5912d (should fix).
