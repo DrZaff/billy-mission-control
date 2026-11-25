@@ -25,7 +25,8 @@ clinical_paths may be an explicit empty list.
       "paused": false,                       # the stop switch
       "issue": {"number": 7, "state": "open" | "closed", "timeline": [event, ...]},
       "branch": {"name": "claude/x", "head": "<40 hex>" | null} | null,  # the source branch
-      "runs": [run, ...],                    # Billy's run records (build, review, publish, ...)
+      "runs": [run, ...] | null,             # Billy's run records (build, review, publish, ...);
+                                             # null: not read (A5a, GitHub data only)
       "pull_request": pull_request | null,
     }
 
@@ -151,6 +152,7 @@ class Flag(StrEnum):
     MERGED_WITH_CHECKS_NOT_PASSED = "merged_with_checks_not_passed"
     # The checks' results aren't known here (pull_request.checks is null): no verdict either way.
     CHECKS_UNVERIFIED = "checks_unverified"
+    RUNS_UNVERIFIED = "runs_unverified"  # Billy's run records not read: no review claim
     # The changed files aren't known here (pull_request.files is null): they may be clinical.
     FILES_UNVERIFIED = "files_unverified"
     # The PR's reviews aren't known here (pull_request.reviews is null): no clinical approval.
@@ -339,7 +341,7 @@ class _Task:
     timeline: tuple[_Event, ...]
     branch: str | None
     branch_head: str | None
-    runs: tuple[_Run, ...]
+    runs: tuple[_Run, ...] | None  # None: not read
     pr: _PR | None
 
 
@@ -556,9 +558,18 @@ def parse(raw: Any) -> _Task:
         timeline=tuple(timeline),
         branch=branch_name,
         branch_head=branch_head,
-        runs=tuple(_parse_run(r, i) for i, r in enumerate(_list(_need(t, "runs", "runs"), "runs"))),
+        runs=_parse_runs(_need(t, "runs", "runs")),
         pr=None if pr_raw is None else _parse_pr(pr_raw),
     )
+
+
+def _parse_runs(value: Any) -> tuple[_Run, ...] | None:
+    """null: Billy's run records were not read (A5a: GitHub data only). That is never read as
+    "no review happened" (Codex's review of 9537b08: an empty list made every merged PR look
+    unreviewed)."""
+    if value is None:
+        return None
+    return tuple(_parse_run(r, i) for i, r in enumerate(_list(value, "runs")))
 
 
 # ---------------------------------------------------------------- derivation
@@ -668,8 +679,11 @@ def derive(raw: Any) -> TaskStatus:
     # Records for another repository or branch never count, and are reported. A build or review
     # must name exactly the task's source branch (parse() requires one); with no source branch
     # known, none can be matched. Publish records are bound by PR number and commit instead.
+    runs_known = task.runs is not None
+    if not runs_known:
+        flags.add(Flag.RUNS_UNVERIFIED)
     runs = []
-    for r in task.runs:
+    for r in task.runs or ():
         if r.repo != task.repo:
             flags.add(Flag.WRONG_REPO_RECORD)
         elif r.step in ("build", "review") and (task.branch is None or r.branch != task.branch):
@@ -731,7 +745,7 @@ def derive(raw: Any) -> TaskStatus:
         elif pr.merged_by != task.owner:
             flags.add(Flag.UNAUTHORIZED_MERGE)
             problems.append(f"merged by {pr.merged_by}, not the owner")
-        if not reviewed:
+        if runs_known and not reviewed:  # records not read: no claim either way
             flags.add(Flag.MERGED_UNREVIEWED)
             problems.append("the merged commit never passed review")
         if maybe_clinical and pr.reviews is None:
@@ -748,6 +762,13 @@ def derive(raw: Any) -> TaskStatus:
         # Unknown checks give CHECKS_UNVERIFIED (from _checks), not a claim either way.
         if not checks_ok and pr.checks is not None:
             flags.add(Flag.MERGED_WITH_CHECKS_NOT_PASSED)
+        if not runs_known:
+            return status(
+                State.MERGED,
+                f"Merged by the owner at {pr.head[:12]}. Billy's review records aren't read "
+                "here, so its review isn't shown.",
+                pr.head,
+            )
         return status(
             State.MERGED,
             f"Merged by the owner at the reviewed commit {pr.head[:12]}.",
@@ -832,6 +853,15 @@ def derive(raw: Any) -> TaskStatus:
             State.AWAITING_OWNER,
             f"{len(failed_rounds)} commits failed review, more than the "
             f"{task.max_fix_rounds} fix round(s) allowed; the owner decides.",
+            head,
+        )
+
+    if not runs_known and head is not None:
+        # Without Billy's records nothing is known of its review: no claim that one is
+        # missing or that the PR came before it, and never a passed review.
+        return status(
+            State.BUILT,
+            f"{head[:12]}: Billy's review records aren't read here, so its review isn't shown.",
             head,
         )
 

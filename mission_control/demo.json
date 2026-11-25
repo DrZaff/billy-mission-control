@@ -2261,38 +2261,7 @@
      "name": "claude/footer-link-colour",
      "head": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9"
     },
-    "runs": [
-     {
-      "step": "build",
-      "repo": "example-org/example-tools",
-      "branch": "claude/footer-link-colour",
-      "sha": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9",
-      "at": "2026-11-14T16:40:00+00:00",
-      "status": "finished"
-     },
-     {
-      "step": "review",
-      "repo": "example-org/example-tools",
-      "branch": "claude/footer-link-colour",
-      "sha": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9",
-      "at": "2026-11-14T16:50:00+00:00",
-      "status": "finished",
-      "verdict": "no_blocking_findings",
-      "findings": [
-       {
-        "severity": "note"
-       }
-      ]
-     },
-     {
-      "step": "publish",
-      "repo": "example-org/example-tools",
-      "branch": "agent/pub-c6d7e8f",
-      "sha": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9",
-      "at": "2026-11-14T16:55:00+00:00",
-      "pr": 61
-     }
-    ],
+    "runs": null,
     "pull_request": {
      "number": 61,
      "state": "closed",

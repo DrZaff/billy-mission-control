@@ -479,7 +479,7 @@ class Refresh(Base):
         for item in linked:
             tasks.parse(self.task_of(item))  # passes the model's input checks
             self.assertNotEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNKNOWN)
-            self.assertEqual(item["task"]["runs"], [])
+            self.assertIsNone(item["task"]["runs"])  # not read; never "no review"
         unlinked = next(i for i in snap["items"] if i["id"] == "site-2")
         self.assertIsNone(unlinked["task"]["issue"])
         self.assertEqual(tasks.derive(self.task_of(unlinked)).state, tasks.State.NOT_LINKED)
@@ -693,14 +693,43 @@ class Refresh(Base):
                 self.assertIsNone(item["task"]["pull_request"]["checks"])  # "not known"
                 self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.task_of(item)).flags)
         # Codex's review of b24ac2d (blocking): leaving the checks out made the whole PR
-        # unreadable. With "not known", the model still judges everything else: here, a merge
-        # of a commit that never passed review (there are no run records yet).
+        # unreadable. With "not known", the model still judges everything else.
         state = tasks.derive(self.task_of(merged))
-        self.assertEqual(state.state, tasks.State.UNSAFE)
-        self.assertIn(tasks.Flag.MERGED_UNREVIEWED, state.flags)
         self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, state.flags)
         self.assertNotIn(tasks.Flag.MERGED_WITH_CHECKS_NOT_PASSED, state.flags)
         self.assertEqual(tasks.derive(self.task_of(closed)).state, tasks.State.CLOSED)
+
+    def test_an_owner_merge_is_never_called_unreviewed_for_lack_of_run_records(self):
+        # Codex's review of 9537b08 (blocking): the snapshot sent an empty run list, which the
+        # model read as proof that no review happened, so every merged PR showed as unsafe.
+        # Run records are not read in A5a: null, and no claim either way.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [
+            pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
+        ]
+        item = self.run_refresh()["items"][0]
+        self.assertIsNone(item["task"]["runs"])
+        state = tasks.derive(self.task_of(item))
+        self.assertEqual(state.state, tasks.State.MERGED)
+        self.assertNotIn(tasks.Flag.MERGED_UNREVIEWED, state.flags)
+        self.assertIn(tasks.Flag.RUNS_UNVERIFIED, state.flags)
+        self.assertIsNone(state.reviewed_sha)  # merged, but no review is claimed
+        # Another account's merge is still unsafe without the records.
+        node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
+        node["mergedBy"] = {"login": "someone-else"}
+        self.fake.prs[REPO_A]["closed"] = [node]
+        other = tasks.derive(self.task_of(self.run_refresh()["items"][0]))
+        self.assertEqual(other.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, other.flags)
+
+    def test_an_open_pr_is_never_said_to_skip_review_for_lack_of_run_records(self):
+        state = tasks.derive(self.task_of(self.run_refresh()["items"][0]))
+        self.assertEqual(state.state, tasks.State.BUILT)
+        self.assertIn(tasks.Flag.RUNS_UNVERIFIED, state.flags)
+        self.assertNotIn(tasks.Flag.PR_BEFORE_REVIEW, state.flags)
+        self.assertNotIn(tasks.Flag.REVIEW_MISSING, state.flags)
+        self.assertIsNone(state.reviewed_sha)
 
     def test_unknown_checks_on_an_open_pr_never_count_as_passed(self):
         # The model's side of "not known" (pull_request.checks null): an open, reviewed PR whose

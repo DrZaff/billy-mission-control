@@ -398,6 +398,16 @@ class CodexReviewOfCaa5552(unittest.TestCase):
             self.assertEqual(state, expected)
             self.assertNotEqual(path_row(body, "Authorised"), "done", expected)
 
+    def test_unread_run_records_never_show_a_review_or_a_clinical_no(self):
+        # Codex's review of 9537b08: a merge with no run records read, and a file list not
+        # known, must show neither "review: done"/"never passed" nor "clinical: no".
+        e = DEMO.entry("example-tools-60")
+        body = views.task_detail(DEMO, e)
+        self.assertEqual(e.status.state, State.MERGED)
+        self.assertEqual(path_row(body, "Review"), "?")
+        self.assertNotIn("never passed review", body)
+        self.assertIn("clinical: not known", body)
+
     def test_an_unreviewed_merge_says_so(self):
         e = DEMO.entry("example-tools-57")
         body = views.task_detail(DEMO, e)

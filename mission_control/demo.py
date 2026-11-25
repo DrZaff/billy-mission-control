@@ -108,7 +108,7 @@ def _events(parsed: Any) -> tuple[tuple[datetime, str], ...]:
     for e in parsed.timeline:
         what = f"{e.kind} {e.label}" if e.label else e.kind
         items.append((e.at, len(items), f"{what} by {e.actor}"))
-    for r in parsed.runs:
+    for r in parsed.runs or ():  # None: not read (A5a)
         parts = [f"{r.step}"]
         if r.step in ("build", "review"):
             parts.append(r.status)

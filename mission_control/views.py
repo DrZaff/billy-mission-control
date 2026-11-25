@@ -58,6 +58,7 @@ FLAG_WORDS = {
     Flag.MERGED_UNREVIEWED: "The merged commit never passed review",
     Flag.MERGED_WITHOUT_CLINICIAN: "Clinical files merged without a clinician's approval",
     Flag.MERGED_WITH_CHECKS_NOT_PASSED: "Merged before the required checks passed",
+    Flag.RUNS_UNVERIFIED: "Billy's run records not read here (its review isn't shown)",
     Flag.CHECKS_UNVERIFIED: "Required checks not verified here (GitHub's merge box shows them)",
     Flag.FILES_UNVERIFIED: "Changed files not verified here (they may include clinical files)",
     Flag.REVIEWS_UNVERIFIED: "Reviews not verified here (no clinician's approval is assumed)",
@@ -297,6 +298,8 @@ def _path(entry: Entry) -> str:
 
     if st.reviewed_sha:
         review = ("done", f"passed for {_short(st.reviewed_sha)}")
+    elif Flag.RUNS_UNVERIFIED in flags:
+        review = ("?", "not shown: Billy's run records aren't read here")
     elif Flag.FIX_ROUNDS_EXHAUSTED in flags:
         review = ("!", "fix rounds used up; your decision")
     elif st.state is State.CHANGES_NEEDED:
@@ -363,7 +366,13 @@ def _path(entry: Entry) -> str:
 def task_detail(demo: Demo, entry: Entry) -> str:
     st = entry.status
     where = _where(entry)
-    clinical = "yes" if Flag.CLINICAL in st.flags else "no"
+    # A partial or unknown file list never shows "no" (Codex's review of 9537b08).
+    if Flag.CLINICAL in st.flags:
+        clinical = "yes"
+    elif Flag.FILES_UNVERIFIED in st.flags:
+        clinical = "not known"
+    else:
+        clinical = "no"
     reasons = "".join(f"<li>{_e(r)}</li>" for r in st.reasons)
     flags = "".join(
         f"<li>{'<strong>Attention:</strong> ' if f in ATTENTION_FLAGS else ''}{_e(FLAG_WORDS[f])}"

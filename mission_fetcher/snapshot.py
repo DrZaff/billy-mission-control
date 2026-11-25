@@ -10,8 +10,9 @@ module checks, plus the title and links the screens show. Everything from GitHub
   on part of the data. Nothing here decides a state: `tasks.derive` does, in the web app.
 
 Two keys the model needs are left for the web app (phase A5b): `paused`, which it reads from
-the stop marker itself, and the state for a pull request with no linked issue. `runs` is empty:
-phase A5 starts with GitHub data only (issue #15, 2026-11-24).
+the stop marker itself, and the state for a pull request with no linked issue. `runs` is null,
+"not read": phase A5 starts with GitHub data only (issue #15, 2026-11-24), and an empty list
+would claim no review ever happened.
 """
 
 from __future__ import annotations
@@ -456,7 +457,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
         "clinical_paths": list(settings.clinical_paths),
         "required_checks": list(settings.required_checks),
         "max_fix_rounds": 1,
-        "runs": [],
+        "runs": None,  # not read (A5a); [] would say "never reviewed"
         "pull_request": pull,
     }
     try:
