@@ -30,11 +30,13 @@ clinical_paths may be an explicit empty list.
       "pull_request": pull_request | null,
     }
 
-    event         {"event": "labeled" | "unlabeled" | "authorized" | <other>, "label": str,
-                   "actor": "login", "at": "ISO 8601 with a time zone"}
+    event         {"event": "labeled" | "unlabeled" | "authorized" | "closed" | "reopened" |
+                   <other>, "label": str, "actor": "login", "at": "ISO 8601 with a time zone"}
                    Only "labeled agent:ready" or "authorized" (an approved-action record, such as
-                   the owner's direct instruction) by the owner authorise work. Anything else,
-                   including the label's mere presence and every comment body, is ignored.
+                   the owner's direct instruction) by the owner authorise work. "closed" before a
+                   merge ends the authorisation for that merge, and "reopened" restores it.
+                   Anything else, including the label's mere presence and every comment body, is
+                   ignored.
                    A labeled or unlabeled event must name its label.
     run           {"step": "build" | "review" | "publish" | "question" | "failure",
                    "repo": "owner/name", "branch": str, "sha": "<40 hex>", "at": ISO 8601,
@@ -666,12 +668,19 @@ def _authorization(
     while already authorised keeps the start (so earlier work in the same authorisation still
     counts) and moves `last` (which answers an agent's question). Removing the label, by anyone,
     withdraws it; an add and a removal at the same instant count as withdrawn. With `until`
-    (a merge), later events are ignored: they can't authorise or withdraw what is done."""
+    (a merge), later events are ignored: they can't authorise or withdraw what is done.
+
+    For a merge, closing the issue before it, by anyone, also ends the authorisation, as it does
+    for an open PR (Codex's review of cae7658); reopening it restores the authorisation it had.
+    A closing in the merge's own second is GitHub closing the linked issue as the PR merges, so
+    it ends nothing. (An open PR is judged on the issue's current state instead.)"""
     since: datetime | None = None
     last: datetime | None = None
     withdrawn = False  # an authorisation existed and was removed
+    closed = False  # the issue was closed (a merge only)
     # At the same instant a removal sorts last, so it wins over an add or an authorisation.
-    for e in sorted(task.timeline, key=lambda e: (e.at, e.kind == "unlabeled")):
+    # So does a closing over a reopening.
+    for e in sorted(task.timeline, key=lambda e: (e.at, e.kind in ("unlabeled", "closed"))):
         if until is not None and e.at > until:
             break
         ready = e.label == READY_LABEL
@@ -688,6 +697,12 @@ def _authorization(
         elif e.kind == "unlabeled" and ready:
             withdrawn = withdrawn or since is not None
             since = last = None
+        elif until is not None and e.kind == "closed" and e.at < until:
+            closed = True
+        elif until is not None and e.kind == "reopened" and e.at < until:
+            closed = False
+    if closed:
+        return None, None, True if since is not None else withdrawn
     return since, last, withdrawn and since is None
 
 
@@ -959,12 +974,18 @@ def derive(raw: Any) -> TaskStatus:
         elif Flag.CLINICAL in flags:
             flags.add(Flag.MERGED_WITHOUT_CLINICIAN)
             problems.append("clinical files merged without a clinician's approval of that commit")
-        if since is None and task.issue_known:
+        if since is None and task.issue_known and withdrawn:
+            # Authorised once, then the label was removed or the issue closed before the merge
+            # (Codex's review of cae7658).
+            flags.update({Flag.UNAUTHORIZED_WORK, Flag.AUTHORIZATION_WITHDRAWN})
+            problems.append("your authorisation was withdrawn before the merge")
+        elif since is None and task.issue_known:
             flags.add(Flag.UNAUTHORIZED_WORK)
             problems.append("the work was never authorised by the owner")
         # Checks are never judged after a merge: results carry no time, so a later run could
-        # rewrite the verdict either way (Fable's review of 0cf099c), and GitHub's merge box
-        # enforced them at the time (owner's decision, 2026-11-25). The Checks row says so.
+        # rewrite the verdict either way (Fable's review of 0cf099c; owner's decision,
+        # 2026-11-25). The Checks row says they aren't judged and claims nothing GitHub enforced
+        # (Codex's review of cae7658).
         if problems:
             return status(State.UNSAFE, "Merged, but " + "; ".join(problems) + ".", pr.head)
         if not runs_known:
@@ -1170,9 +1191,16 @@ def derive(raw: Any) -> TaskStatus:
         )
     if maybe_clinical and not approved:
         unknown = Flag.REVIEWS_UNVERIFIED in flags
+        # Only known clinical files are called clinical; an incomplete list may hold some
+        # (Codex's review of cae7658: the header said "not known" and this said "clinical").
+        which = (
+            "Clinical files"
+            if Flag.CLINICAL in flags
+            else "The file list couldn't all be read, so some may be clinical"
+        )
         return status(
             State.CLINICAL_REVIEW,
-            f"Clinical files: a clinician's approval of {head[:12]} "
+            f"{which}: a clinician's approval of {head[:12]} "
             + ("isn't shown: the reviews couldn't be read." if unknown else "is needed."),
             head,
             head,
