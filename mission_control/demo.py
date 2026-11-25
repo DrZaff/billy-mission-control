@@ -153,7 +153,7 @@ def _entry(raw: Any, i: int, stop_switch_on: bool) -> Entry:
         parsed = None
     if parsed is not None:
         repo, branch = parsed.repo, parsed.branch
-        issue = task["issue"]["number"]
+        issue = None if task["issue"] is None else task["issue"]["number"]  # null: not linked
         events = _events(parsed)
     return Entry(task_id, title, risk, status, repo, issue, branch, events)
 

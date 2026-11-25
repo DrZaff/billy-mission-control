@@ -2305,6 +2305,132 @@
      "checks": null
     }
    }
+  },
+  {
+   "id": "example-tools-62",
+   "title": "Typo in the about page (no authorised issue linked)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": null,
+    "branch": {
+     "name": "claude/about-typo",
+     "head": "d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0"
+    },
+    "runs": [],
+    "pull_request": {
+     "number": 62,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0",
+     "files": [
+      "site/about.html"
+     ],
+     "reviews": [],
+     "checks": []
+    }
+   }
+  },
+  {
+   "id": "example-tools-64",
+   "title": "Footer spacing (merged by an account that can't be identified)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 63,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/footer-spacing",
+     "head": "e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/footer-spacing",
+      "sha": "e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1",
+      "at": "2026-11-14T16:40:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-tools",
+      "branch": "claude/footer-spacing",
+      "sha": "e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1",
+      "at": "2026-11-14T16:50:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-tools",
+      "branch": "agent/pub-e8f9a0b",
+      "sha": "e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1",
+      "at": "2026-11-14T16:55:00+00:00",
+      "pr": 64
+     }
+    ],
+    "pull_request": {
+     "number": 64,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": null,
+     "head_sha": "e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1e8f9a0b1",
+     "files": [
+      "site/footer.css"
+     ],
+     "reviews": [],
+     "checks": null
+    }
+   }
   }
  ]
 }

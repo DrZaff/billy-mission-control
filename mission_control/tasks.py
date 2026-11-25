@@ -63,6 +63,16 @@ clinical_paths may be an explicit empty list.
                    open PR waits for a clinician (FILES_UNVERIFIED); unknown reviews give no
                    clinical approval (REVIEWS_UNVERIFIED). A merged PR is still judged on
                    everything that is known, and nothing unknown is claimed either way.
+                   "files_complete": false (optional) marks a list known to be partial (a
+                   rename or a cut-off list): its known clinical paths still count, and the
+                   rest may be clinical (FILES_UNVERIFIED). merged_by may be null for a merged
+                   PR whose merger can't be identified: that is unsafe (MERGER_UNKNOWN), since
+                   nothing shows the owner merged it.
+    The task's "issue" may be null: no readable, authorised issue is linked (none, several,
+    one in another repository, or one whose events couldn't be read; issue #15, decision
+    A5-2). An open PR then shows as NOT_LINKED, calmly, rather than UNSAFE; a merged one is
+    still judged on everything else, with ISSUE_NOT_LINKED instead of a claim that the work
+    was never authorised.
 
 Example, as a phase A3 screen would use it:
 
@@ -109,6 +119,7 @@ class State(StrEnum):
     FAILED = "failed"  # the work failed, with a reason
     PAUSED = "paused"  # the stop switch is on
     CLOSED = "closed"  # closed without merging
+    NOT_LINKED = "not_linked"  # a PR with no readable, authorised issue linked (A5-2)
     UNSAFE = "unsafe"  # an invariant is broken; see the flags
     UNKNOWN = "unknown"  # the input can't be trusted; see the reasons
 
@@ -144,6 +155,10 @@ class Flag(StrEnum):
     FILES_UNVERIFIED = "files_unverified"
     # The PR's reviews aren't known here (pull_request.reviews is null): no clinical approval.
     REVIEWS_UNVERIFIED = "reviews_unverified"
+    # No readable, authorised issue is linked to the PR (issue is null).
+    ISSUE_NOT_LINKED = "issue_not_linked"
+    # A merged PR whose merger can't be identified: nothing shows the owner merged it.
+    MERGER_UNKNOWN = "merger_unknown"
 
 
 ATTENTION_STATES = frozenset(
@@ -166,6 +181,7 @@ ATTENTION_FLAGS = frozenset(
         Flag.PR_BEFORE_REVIEW,
         Flag.CHECKS_FAILING,
         Flag.MERGED_WITH_CHECKS_NOT_PASSED,
+        Flag.ISSUE_NOT_LINKED,
     }
 )
 
@@ -297,6 +313,7 @@ class _PR:
     merged_by: str | None
     head: str
     files: tuple[str, ...] | None  # None: not known
+    files_complete: bool  # False: the list is known to be partial
     reviews: tuple[_Review, ...] | None  # None: not known
     checks: tuple[_Check, ...] | None  # None: not known
 
@@ -310,6 +327,7 @@ class _Task:
     required_checks: tuple[str, ...]
     max_fix_rounds: int
     paused: bool
+    issue_known: bool  # False: issue was null (no readable, authorised issue linked)
     issue_open: bool
     timeline: tuple[_Event, ...]
     branch: str | None
@@ -377,6 +395,12 @@ def _parse_run(raw: Any, i: int) -> _Run:
     )
 
 
+def _complete(p: Mapping) -> bool:
+    value = p.get("files_complete", True)
+    _req(isinstance(value, bool), "pull_request.files_complete must be true or false")
+    return value
+
+
 def _parse_pr(raw: Any) -> _PR:
     p = _map(raw, "pull_request")
     number = p.get("number")
@@ -389,7 +413,7 @@ def _parse_pr(raw: Any) -> _PR:
     _req(not (merged and state == "open"), "pull_request can't be open and merged")
     merged_by = _need(p, "merged_by", "pull_request.merged_by")
     if merged:
-        merged_by = _login(merged_by, "pull_request.merged_by")
+        merged_by = None if merged_by is None else _login(merged_by, "pull_request.merged_by")
     reviews = []
     raw_reviews = _need(p, "reviews", "pull_request.reviews")
     for i, raw_review in enumerate(
@@ -447,6 +471,7 @@ def _parse_pr(raw: Any) -> _PR:
         if (raw_files := _need(p, "files", "pull_request.files")) is None
         else _strings(raw_files, "pull_request.files"),
         reviews=None if raw_reviews is None else tuple(reviews),
+        files_complete=_complete(p),
         checks=None if raw_checks is None else tuple(checks),
     )
 
@@ -456,10 +481,15 @@ def parse(raw: Any) -> _Task:
     t = _map(raw, "task")
     repo = _text(t.get("repo"), "repo")
     _req(bool(REPO.fullmatch(repo)), "repo must be owner/name")
-    issue = _map(t.get("issue"), "issue")
-    number = issue.get("number")
-    _req(isinstance(number, int) and not isinstance(number, bool), "issue.number must be a number")
-    _choice(issue.get("state"), ("open", "closed"), "issue.state")
+    raw_issue = _need(t, "issue", "issue")
+    issue = {"state": "open", "timeline": []} if raw_issue is None else _map(raw_issue, "issue")
+    if raw_issue is not None:
+        number = issue.get("number")
+        _req(
+            isinstance(number, int) and not isinstance(number, bool),
+            "issue.number must be a number",
+        )
+        _choice(issue.get("state"), ("open", "closed"), "issue.state")
     timeline = []
     for i, raw_event in enumerate(
         _list(_need(issue, "timeline", "issue.timeline"), "issue.timeline")
@@ -514,6 +544,7 @@ def parse(raw: Any) -> _Task:
         required_checks=required_checks,
         max_fix_rounds=max_rounds,
         paused=paused,
+        issue_known=raw_issue is not None,
         issue_open=issue["state"] == "open",
         timeline=tuple(timeline),
         branch=branch_name,
@@ -642,6 +673,8 @@ def derive(raw: Any) -> TaskStatus:
             runs.append(r)
 
     since, last_owner_action = _authorization(task, flags)
+    if not task.issue_known:
+        flags.add(Flag.ISSUE_NOT_LINKED)
 
     # Only records from within the owner's current authorisation are this task's work. Earlier
     # records (before it began, or from a withdrawn one) never count, and are reported.
@@ -671,9 +704,11 @@ def derive(raw: Any) -> TaskStatus:
         files.update(r.files)
     if any(fnmatchcase(f, pat) for f in files for pat in task.clinical_paths):
         flags.add(Flag.CLINICAL)
-    # Files not known may be clinical: gate on that, but never claim either way (A5a).
-    files_unknown = bool(pr and pr.files is None and task.clinical_paths)
-    if pr and pr.files is None:
+    # Files not known, or a list known to be partial, may be clinical: gate on that, but
+    # never claim either way (A5a). Known clinical paths in a partial list still count.
+    partial = bool(pr and (pr.files is None or not pr.files_complete))
+    files_unknown = partial and bool(task.clinical_paths)
+    if partial:
         flags.add(Flag.FILES_UNVERIFIED)
     maybe_clinical = Flag.CLINICAL in flags or files_unknown
 
@@ -682,7 +717,11 @@ def derive(raw: Any) -> TaskStatus:
     if pr and pr.merged:
         reviewed = verdicts.get(pr.head) == {"pass"}
         problems = []
-        if pr.merged_by != task.owner:
+        if pr.merged_by is None:
+            # Nothing shows the owner merged it (A5a: a deleted or unreadable account).
+            flags.add(Flag.MERGER_UNKNOWN)
+            problems.append("merged by an account that can't be identified")
+        elif pr.merged_by != task.owner:
             flags.add(Flag.UNAUTHORIZED_MERGE)
             problems.append(f"merged by {pr.merged_by}, not the owner")
         if not reviewed:
@@ -693,7 +732,7 @@ def derive(raw: Any) -> TaskStatus:
         elif Flag.CLINICAL in flags and not _clinician_approved(task, pr.head):
             flags.add(Flag.MERGED_WITHOUT_CLINICIAN)
             problems.append("clinical files merged without a clinician's approval of that commit")
-        if since is None:
+        if since is None and task.issue_known:
             flags.add(Flag.UNAUTHORIZED_WORK)
             problems.append("the work was never authorised by the owner")
         checks_ok = _checks(task, pr.head, flags)
@@ -712,6 +751,13 @@ def derive(raw: Any) -> TaskStatus:
     if (pr and not pr.open) or not task.issue_open:
         return status(State.CLOSED, "Closed without merging.", head)
 
+    if since is None and not task.issue_known:
+        return status(
+            State.NOT_LINKED,
+            "Not linked to an authorised issue: none is linked, several are, or the one "
+            "linked couldn't be read.",
+            head,
+        )
     if since is None:
         # Any sign of work counts: run records, a PR, or a commit on the source branch.
         if runs or pr or head is not None:

@@ -473,8 +473,8 @@ class UntrustedAndBrokenInput(unittest.TestCase):
             task(runs=[run("review")]),  # a finished review with no verdict
             task(runs=[dict(run("build"), at="yesterday")]),
             task(pull_request=pr(state="open", merged=True, merged_by=OWNER)),
-            task(pull_request=pr(merged=True, state="closed", merged_by=None)),
             task(pull_request=dict(pr(), number=True)),
+            task(pull_request=dict(pr(), files_complete="no")),
             task(pull_request=pr(checks=[{"name": "lint", "head_sha": A, "status": "done"}])),
             task(pull_request=pr(reviews=[approval(state="LGTM")])),
             task(max_fix_rounds=-1),
@@ -1047,6 +1047,67 @@ class Fixtures(unittest.TestCase):
                 self.assertIn(Flag(flag), s.flags, path.name)
 
 
+class NotKnown(unittest.TestCase):
+    """A5a: what the fetcher can't read is null ("not known"), never left out. It is never read
+    as clean, and never hides what is known (Codex's reviews of b24ac2d, 198a66e, 3f7d3c2)."""
+
+    def test_an_unidentified_merger_is_unsafe(self):
+        s = derive(
+            task(
+                runs=[run("build"), passed(), published()],
+                pull_request=pr(state="closed", merged=True, merged_by=None),
+            )
+        )
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.MERGER_UNKNOWN, s.flags)
+        self.assertNotIn(Flag.UNAUTHORIZED_MERGE, s.flags)  # it doesn't claim who
+
+    def test_no_linked_issue_is_calm_when_open_and_still_judged_when_merged(self):
+        open_pr = derive(task(issue=None, pull_request=pr()))
+        self.assertEqual(open_pr.state, State.NOT_LINKED)
+        self.assertIn(Flag.ISSUE_NOT_LINKED, open_pr.flags)
+        self.assertNotIn(Flag.UNAUTHORIZED_WORK, open_pr.flags)
+        merged = derive(
+            task(issue=None, pull_request=pr(state="closed", merged=True, merged_by="someone"))
+        )
+        self.assertEqual(merged.state, State.UNSAFE)
+        self.assertIn(Flag.UNAUTHORIZED_MERGE, merged.flags)
+        self.assertIn(Flag.ISSUE_NOT_LINKED, merged.flags)
+        self.assertNotIn(Flag.UNAUTHORIZED_WORK, merged.flags)  # not claimed: not known
+
+    def test_an_absent_issue_key_is_still_unreadable(self):
+        value = task()
+        del value["issue"]
+        self.assertEqual(derive(value).state, State.UNKNOWN)
+
+    def test_a_partial_file_list_keeps_its_known_clinical_paths(self):
+        merged = derive(
+            task(
+                runs=[run("build"), passed(), published()],
+                pull_request=pr(
+                    state="closed",
+                    merged=True,
+                    merged_by=OWNER,
+                    files=["evidence/x.json"],
+                    files_complete=False,
+                ),
+            )
+        )
+        self.assertIn(Flag.CLINICAL, merged.flags)  # known clinical: claimed
+        self.assertIn(Flag.FILES_UNVERIFIED, merged.flags)
+        self.assertIn(Flag.MERGED_WITHOUT_CLINICIAN, merged.flags)
+        self.assertEqual(merged.state, State.UNSAFE)
+        open_partial = derive(
+            dict(
+                reviewed_and_published(),
+                pull_request=pr(files=["site/x.html"], files_complete=False),
+            )
+        )
+        # The rest may be clinical: it waits for a clinician, without claiming CLINICAL.
+        self.assertEqual(open_partial.state, State.CLINICAL_REVIEW)
+        self.assertNotIn(Flag.CLINICAL, open_partial.flags)
+
+
 class Coverage(unittest.TestCase):
     def test_every_state_is_reachable_and_attention_states_are_sensible(self):
         seen = set()
@@ -1073,6 +1134,7 @@ class Coverage(unittest.TestCase):
             task(paused=True),
             task(pull_request=pr(state="closed")),
             task(runs=[run("build"), passed(A), published(A)], pull_request=pr(head=B)),
+            task(issue=None, pull_request=pr()),
             None,
         ):
             seen.add(derive(case).state)

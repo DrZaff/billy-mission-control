@@ -481,7 +481,8 @@ class Refresh(Base):
             self.assertNotEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNKNOWN)
             self.assertEqual(item["task"]["runs"], [])
         unlinked = next(i for i in snap["items"] if i["id"] == "site-2")
-        self.assertNotIn("issue", unlinked["task"])  # A5b shows "Not linked"
+        self.assertIsNone(unlinked["task"]["issue"])
+        self.assertEqual(tasks.derive(self.task_of(unlinked)).state, tasks.State.NOT_LINKED)
         self.assertEqual(self.fake.revoked, 1)
 
     def test_settings_and_links_come_from_the_config_and_the_fetcher(self):
@@ -516,7 +517,8 @@ class Refresh(Base):
             1, issue=issue_node(10), files=("a",), files_total=500
         )
         item = self.run_refresh()["items"][0]
-        self.assertIsNone(item["task"]["pull_request"]["files"])  # "not known"
+        self.assertEqual(item["task"]["pull_request"]["files"], ["a"])  # the known part
+        self.assertIs(item["task"]["pull_request"]["files_complete"], False)
         state = tasks.derive(self.reviewed(item))
         # Unknown files may be clinical: a reviewed PR waits for a clinician, never "ready".
         self.assertEqual(state.state, tasks.State.CLINICAL_REVIEW)
@@ -532,7 +534,7 @@ class Refresh(Base):
         self.fake.prs[REPO_A]["open"][0] = node
         item = self.run_refresh()["items"][0]
         self.assertEqual(item["linked_issues"], 2)
-        self.assertNotIn("issue", item["task"])
+        self.assertIsNone(item["task"]["issue"])
 
     def test_paths_are_kept_exactly_so_clinical_rules_still_match(self):
         # Codex's review of f772122 (blocking): cleaning collapsed distinct paths, and a path
@@ -737,7 +739,8 @@ class Refresh(Base):
             1, issue=issue_node(10), files=("site/moved.md",), renamed=("site/moved.md",)
         )
         item = self.run_refresh()["items"][0]
-        self.assertIsNone(item["task"]["pull_request"]["files"])
+        self.assertEqual(item["task"]["pull_request"]["files"], ["site/moved.md"])
+        self.assertIs(item["task"]["pull_request"]["files_complete"], False)
         self.assertIn(tasks.Flag.FILES_UNVERIFIED, tasks.derive(self.task_of(item)).flags)
 
     def test_a_merged_pr_with_unknown_files_keeps_its_known_warnings(self):
@@ -758,7 +761,7 @@ class Refresh(Base):
         self.fake.prs[REPO_A]["open"], self.fake.prs[REPO_A]["closed"] = [], [node]
         item = self.run_refresh()["items"][0]
         pull = item["task"]["pull_request"]
-        self.assertIsNone(pull["files"])
+        self.assertIs(pull["files_complete"], False)
         self.assertIsNone(pull["reviews"])
         state = tasks.derive(self.task_of(item))
         self.assertEqual(state.state, tasks.State.UNSAFE)
@@ -767,6 +770,41 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, state.flags)
         # Nothing unknown is claimed either way.
         self.assertNotIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+
+    def test_a_merged_pr_with_no_issue_and_an_unknown_merger_is_still_judged(self):
+        # Codex's review of 3f7d3c2 (blocking): a missing issue, or a merger GitHub can't name
+        # (a deleted account), made the merged PR unreadable and hid its warnings.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(1, state="MERGED", merged=True, closed_at=recent)  # no linked issue
+        node["mergedBy"] = None
+        self.fake.prs[REPO_A]["open"], self.fake.prs[REPO_A]["closed"] = [], [node]
+        item = self.run_refresh()["items"][0]
+        self.assertIsNone(item["task"]["issue"])
+        self.assertIsNone(item["task"]["pull_request"]["merged_by"])
+        state = tasks.derive(self.task_of(item))
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.MERGER_UNKNOWN, state.flags)
+        self.assertIn(tasks.Flag.ISSUE_NOT_LINKED, state.flags)
+
+    def test_a_known_clinical_path_in_a_renamed_list_still_counts(self):
+        # Codex's review of 3f7d3c2: a rename threw away paths that showed clinical content.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(
+            1,
+            state="MERGED",
+            merged=True,
+            closed_at=recent,
+            issue=issue_node(10),
+            files=("evidence/study.md", "site/moved.md"),
+            renamed=("site/moved.md",),
+        )
+        self.fake.prs[REPO_A]["open"], self.fake.prs[REPO_A]["closed"] = [], [node]
+        item = self.run_refresh()["items"][0]
+        task = self.reviewed(item)
+        state = tasks.derive(task)
+        self.assertIn(tasks.Flag.CLINICAL, state.flags)
+        self.assertIn(tasks.Flag.FILES_UNVERIFIED, state.flags)
+        self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
 
     def test_unknown_reviews_give_no_clinical_approval(self):
         self.fake.prs[REPO_A]["open"][0] = pr_node(
@@ -859,7 +897,7 @@ class Refresh(Base):
         item = self.run_refresh()["items"][0]
         self.assertEqual(item["linked_issues"], 1)
         self.assertIsNone(item["issue"])
-        self.assertNotIn("issue", item["task"])
+        self.assertIsNone(item["task"]["issue"])
 
     def test_authorisation_comes_only_from_label_events(self):
         self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10, actor="someone"))
@@ -985,6 +1023,24 @@ class RefresherFiles(Base):
         self.assertEqual(make().run(), server.TOO_SOON)
         since_boot[0] += 60
         self.assertEqual(make().run(), server.OK)
+
+    def test_without_boot_ids_a_new_boot_can_only_wait_longer(self):
+        # Codex's review of 3f7d3c2 suggested a quick reboot could skip the floor when the boot
+        # ids are missing. It can't: a new boot starts after the last attempt, so the real time
+        # since it is at least the new time since boot, and taking that boot for the old one
+        # (since_boot - last) only ever measures less, never more. Here: an attempt at 5 s of
+        # the old boot, then a new boot now at 40 s, at least 40 s later in fact, is held.
+        since_boot = [5.0]
+        wall = [NOW.timestamp()]
+
+        def make():
+            return self.make(lambda: wall[0], boot=lambda: (None, since_boot[0]))
+
+        self.assertEqual(make().run(), server.OK)
+        since_boot[0], wall[0] = 40.0, wall[0] + 40  # a new boot, 40 s on
+        self.assertEqual(make().run(), server.TOO_SOON)  # waits: never a bypass
+        since_boot[0], wall[0] = 66.0, wall[0] + 26  # 66 s since that boot began
+        self.assertEqual(make().run(), server.OK)  # and in fact at least 66 s have passed
 
     def test_after_a_restart_of_the_machine_the_wall_clock_decides(self):
         wall = [NOW.timestamp()]

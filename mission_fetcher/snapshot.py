@@ -210,24 +210,27 @@ def _connection(value: Any, limit: int, counted: bool = True) -> list:
     return nodes
 
 
-def _files(pr: dict) -> list[str]:
-    """The changed paths exactly as GitHub gives them: they are only matched against the
-    clinical patterns, never shown, so cleaning them could only make two paths look alike and
-    let a clinical one slip past its rule (Codex's review of f772122). A path that isn't a
-    plain, bounded string leaves the list out, so the model shows UNKNOWN."""
+def _files(pr: dict) -> tuple[list[str], bool]:
+    """(the changed paths exactly as GitHub gives them, whether the list is complete). They are
+    only matched against the clinical patterns, never shown, so cleaning them could only make
+    two paths look alike and let a clinical one slip past its rule (Codex's review of f772122).
+    A renamed or copied file is listed by its new path only, so a move out of a clinical folder
+    would hide where it came from (f37d0c7); a list cut off at one request is partial too. Such
+    a list is kept, marked incomplete: its known clinical paths still count (3f7d3c2), and the
+    rest may be clinical. A path that isn't a plain, bounded string makes the list unknown."""
+    conn = _obj(pr.get("files"))
+    nodes = _list(conn.get("nodes"))
+    complete = _int(conn.get("totalCount")) <= len(nodes)
     paths = []
-    for node in _connection(pr.get("files"), MAX_FILES):
+    for node in nodes:
         n = _obj(node)
         path = n.get("path")
         if not isinstance(path, str) or not 0 < len(path) <= 4096 or "\x00" in path:
             raise _Incomplete()
-        # A renamed or copied file is listed by its new path only, so a move out of a clinical
-        # folder would hide where it came from: the list isn't complete (Codex's review of
-        # f37d0c7), and the model shows UNKNOWN.
         if n.get("changeType") not in ("ADDED", "MODIFIED", "DELETED", "CHANGED"):
-            raise _Incomplete()
+            complete = False
         paths.append(path)
-    return paths
+    return paths, complete
 
 
 def _reviews(pr: dict) -> list[dict]:
@@ -410,12 +413,19 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
         "merged_by": _login(pr.get("mergedBy")) if merged else None,
         "head_sha": head,
     }
-    # Incomplete parts are left out: the model then shows UNKNOWN, never a guessed state.
-    parts = [("files", lambda: _files(pr)), ("reviews", lambda: _reviews(pr))]
+    # Parts that can't be read whole are null ("not known"): the model never reads them as
+    # clean, and still judges everything that is known.
+    try:
+        pull["files"], complete = _files(pr)
+        if not complete:
+            pull["files_complete"] = False
+    except _Incomplete:
+        pull["files"] = None
+    parts = [("reviews", lambda: _reviews(pr))]
     # Checks only for an open pull request. Once it is merged or closed, GitHub no longer shows
     # the test merge commit it judged, so no reading of the checks can match its verdict; the
     # merge box enforced them at the time (owner's decision, 2026-11-25, after Codex's review
-    # of a1e05e5). The model then shows a merged or closed one as UNKNOWN.
+    # of a1e05e5).
     if state == "OPEN":
         parts.append(("checks", lambda: _checks(pr, head, settings.checks_app)))
     else:
@@ -445,8 +455,10 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
         task["branch"] = {"name": _exact(pr.get("headRefName")), "head": head}
     except _Incomplete:
         task["branch"] = None  # not known; the pull request's head is still known
-    if issue is not None:
-        task["issue"] = issue
+    # null when no readable, authorised issue is linked: the model shows an open PR as
+    # NOT_LINKED and still judges a merged one (Codex's review of 3f7d3c2: leaving the key out
+    # made the whole PR unreadable).
+    task["issue"] = issue
     short = repo.split("/", 1)[1]
     return {
         "id": f"{short}-{number}",

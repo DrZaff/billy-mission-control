@@ -31,6 +31,7 @@ STATE_WORDS = {
     State.CLOSED: "Closed without merging",
     State.UNSAFE: "UNSAFE: do not approve",
     State.UNKNOWN: "Unknown: the data can't be trusted",
+    State.NOT_LINKED: "Not linked to an authorised issue",
 }
 
 FLAG_WORDS = {
@@ -60,6 +61,8 @@ FLAG_WORDS = {
     Flag.CHECKS_UNVERIFIED: "Required checks not verified here (GitHub's merge box shows them)",
     Flag.FILES_UNVERIFIED: "Changed files not verified here (they may include clinical files)",
     Flag.REVIEWS_UNVERIFIED: "Reviews not verified here (no clinician's approval is assumed)",
+    Flag.ISSUE_NOT_LINKED: "No readable, authorised issue is linked to this pull request",
+    Flag.MERGER_UNKNOWN: "Merged by an account that can't be identified",
 }
 
 SECTIONS = (
@@ -128,6 +131,17 @@ def needs_you(status: TaskStatus) -> bool:
     return section(status) in ("alerts", "waiting")
 
 
+def _where(entry: Entry) -> str:
+    """The task's repository and issue; a PR with no linked issue (A5a) shows its PR number."""
+    if entry.repo is None:
+        return "Unreadable task data"
+    if entry.issue is not None:
+        return f"{entry.repo} #{entry.issue}"
+    if entry.status.pr is not None:
+        return f"{entry.repo} PR #{entry.status.pr} (no linked issue)"
+    return entry.repo
+
+
 def github_link(entry: Entry) -> tuple[str, str] | None:
     """(url, label) for the task's PR, else its issue. Built only from validated values."""
     if entry.repo is None:
@@ -184,7 +198,7 @@ def _state_line(status: TaskStatus) -> str:
 
 def _card(entry: Entry, with_github: bool) -> str:
     st = entry.status
-    where = f"{entry.repo} #{entry.issue}" if entry.repo else "Unreadable task data"
+    where = _where(entry)
     reason = st.reasons[0] if st.reasons else ""
     alerts = [FLAG_WORDS[f] for f in sorted(st.flags & ATTENTION_FLAGS)]
     extra = "".join(f"<li>{_e(a)}</li>" for a in alerts)
@@ -347,7 +361,7 @@ def _path(entry: Entry) -> str:
 
 def task_detail(demo: Demo, entry: Entry) -> str:
     st = entry.status
-    where = f"{entry.repo} #{entry.issue}" if entry.repo else "Unreadable task data"
+    where = _where(entry)
     clinical = "yes" if Flag.CLINICAL in st.flags else "no"
     reasons = "".join(f"<li>{_e(r)}</li>" for r in st.reasons)
     flags = "".join(
