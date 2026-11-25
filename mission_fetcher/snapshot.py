@@ -26,6 +26,8 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
+from mission_control.tasks import READY_LABEL
+
 from .config import FetcherConfig
 from .github import FetchError, GitHub
 
@@ -291,7 +293,7 @@ def _reviews(pr: dict, clinicians: tuple[str, ...], merged: bool) -> list[dict]:
     return out
 
 
-def _checks(pr: dict, head: str, app: str) -> list[dict]:
+def _checks(pr: dict, head: str, app: str, required: tuple[str, ...]) -> list[dict]:
     """The head commit's check runs from the configured app only. A same-named run from any
     other app is left out, so it can never satisfy a required check (Codex's review of
     bf76866)."""
@@ -343,7 +345,9 @@ def _checks(pr: dict, head: str, app: str) -> list[dict]:
                 }
             )
     out += _status_cautions(commit, head)
-    return out
+    # Only the required names: the model reads no others, and a fork's pull request can make
+    # check runs with any name (Codex's review of dc1eb14: they could fill the snapshot).
+    return [c for c in out if c["name"] in required]
 
 
 def _status_cautions(commit: dict, head: str) -> list[dict]:
@@ -399,7 +403,11 @@ def _issue(repo: str, pr: dict) -> tuple[int, dict | None, dict | None]:
     timeline = []
     try:
         for event in events:
-            timeline.append(_event(event))
+            e = _event(event)
+            # Only the agent:ready label's events: the model reads no others, and keeping them
+            # all, once per pull request, could fill the snapshot (Codex's review of dc1eb14).
+            if e["label"] == READY_LABEL:
+                timeline.append(e)
     except _Incomplete:
         return total, None, screen
     issue = {"number": number, "state": state.lower(), "timeline": timeline}
@@ -460,7 +468,12 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
     # merge box enforced them at the time (owner's decision, 2026-11-25, after Codex's review
     # of a1e05e5).
     if state == "OPEN":
-        parts.append(("checks", lambda: _checks(pr, head, settings.checks_app)))
+        parts.append(
+            (
+                "checks",
+                lambda: _checks(pr, head, settings.checks_app, tuple(settings.required_checks)),
+            )
+        )
     else:
         # null: "not known", so the model still judges the merger, the authorisation, the
         # review and clinical approval (Codex's review of b24ac2d: leaving the key out made
@@ -580,7 +593,9 @@ def _fit(snapshot: dict) -> None:
     either way the model treats the rest as possibly clinical. Then reviews (only clinicians'
     are kept) become "not known", which never counts as an approval. What remains is bounded
     and comes from trusted accounts: titles are capped, and labels and statuses need write or
-    triage access. Only if it still doesn't fit does the refresh fail ("too-large")."""
+    triage access. Then checks become "not known" (never passed), and last, whole items are
+    left out, their repository marked truncated. Only if nothing is left does the refresh fail
+    ("too-large")."""
 
     def size() -> int:
         return len(encode(dict(snapshot, token_revoked=False)))
@@ -604,6 +619,26 @@ def _fit(snapshot: dict) -> None:
     pulls.sort(key=lambda p: len(encode({"r": p["reviews"]})), reverse=True)
     for pull in pulls:
         pull["reviews"] = None
+        if size() <= MAX_SNAPSHOT:
+            return
+    # Then the checks: null, "not known", never passed (CHECKS_UNVERIFIED).
+    pulls = [i["task"]["pull_request"] for i in snapshot["items"]]
+    pulls = [p for p in pulls if p.get("checks")]
+    pulls.sort(key=lambda p: len(encode({"c": p["checks"]})), reverse=True)
+    for pull in pulls:
+        pull["checks"] = None
+        if size() <= MAX_SNAPSHOT:
+            return
+    # Last, whole items: the oldest closed first, then the least recently updated open ones,
+    # each repository so cut listed in "truncated", as when GitHub's list is cut off. A stale
+    # snapshot for every repository would be worse (Codex's review of dc1eb14).
+    items = snapshot["items"]
+    closed = sorted((i for i in items if i["closed_at"] is not None), key=lambda i: i["closed_at"])
+    opened = [i for i in items if i["closed_at"] is None][::-1]
+    for item in closed + opened:
+        items.remove(item)
+        if item["repo"] not in snapshot["truncated"]:
+            snapshot["truncated"].append(item["repo"])
         if size() <= MAX_SNAPSHOT:
             return
     raise FetchError("too-large")

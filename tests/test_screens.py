@@ -426,6 +426,8 @@ class CodexReviewOfCaa5552(unittest.TestCase):
         state, body = detail(raw)
         self.assertEqual(path_row(body, "Clinician"), "?")
         self.assertNotIn("approval of this commit needed", body)
+        # Nor does the Flags list say so (Codex's review of dc1eb14).
+        self.assertNotIn("No clinician has approved", body)
 
     def test_a_merge_with_no_linked_issue_never_shows_authorisation(self):
         # Codex's review of 72607b3 (blocking): MERGED is reachable with ISSUE_NOT_LINKED.

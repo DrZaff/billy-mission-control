@@ -198,6 +198,12 @@ ATTENTION_FLAGS = frozenset(
 )
 
 
+# Flags that put a task under "Waiting for you" (not an alert), whatever its state: a known
+# missing clinician approval waits on a clinician, even when Billy's records aren't read and
+# the state is BUILT (Codex's review of dc1eb14).
+WAITING_FLAGS = frozenset({Flag.CLINICAL_APPROVAL_MISSING})
+
+
 @dataclass(frozen=True)
 class TaskStatus:
     state: State
@@ -209,7 +215,9 @@ class TaskStatus:
 
     @property
     def needs_attention(self) -> bool:
-        return self.state in ATTENTION_STATES or bool(self.flags & ATTENTION_FLAGS)
+        return self.state in ATTENTION_STATES or bool(
+            self.flags & (ATTENTION_FLAGS | WAITING_FLAGS)
+        )
 
 
 class InvalidInput(ValueError):
@@ -810,9 +818,11 @@ def derive(raw: Any) -> TaskStatus:
         if pr and pr.open:
             _checks(task, pr.head, flags)
             if maybe_clinical and not _clinician_approved(task, pr.head):
+                # Unread reviews claim nothing either way (Codex's review of dc1eb14).
                 if pr.reviews is None:
                     flags.add(Flag.REVIEWS_UNVERIFIED)
-                flags.add(Flag.CLINICAL_APPROVAL_MISSING)
+                else:
+                    flags.add(Flag.CLINICAL_APPROVAL_MISSING)
 
     if since is None and not task.issue_known:
         github_gates()
@@ -933,7 +943,8 @@ def derive(raw: Any) -> TaskStatus:
     if maybe_clinical and not _clinician_approved(task, head):
         if pr.reviews is None:
             flags.add(Flag.REVIEWS_UNVERIFIED)
-        flags.add(Flag.CLINICAL_APPROVAL_MISSING)
+        else:
+            flags.add(Flag.CLINICAL_APPROVAL_MISSING)
         return status(
             State.CLINICAL_REVIEW,
             f"Clinical files: waiting for a clinician's approval of {head[:12]}.",

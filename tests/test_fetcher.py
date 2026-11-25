@@ -590,7 +590,10 @@ class Refresh(Base):
                     )
                 ]
                 item = self.run_refresh()["items"][0]
-                self.assertEqual(item["task"]["pull_request"]["checks"][0]["name"], ran)
+                names = [c["name"] for c in item["task"]["pull_request"]["checks"]]
+                # Exactly the required name is kept, verbatim; a lookalike is never kept
+                # (dc1eb14: only required names are).
+                self.assertEqual(names, [ran] if ran == required else [])
                 self.assertIn(flag, tasks.derive(self.reviewed(item)).flags)
 
     def test_only_the_configured_apps_checks_count(self):
@@ -903,7 +906,7 @@ class Refresh(Base):
         for item in dropped:
             flags = tasks.derive(self.task_of(item)).flags
             self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, flags)
-            self.assertIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, flags)
+            self.assertNotIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, flags)  # not known: no claim
 
     def test_a_dismissed_review_on_a_merged_pr_is_not_known(self):
         # Codex's review of 9fb21c8 (blocking): GitHub gives a review's current state with its
@@ -953,6 +956,53 @@ class Refresh(Base):
         self.assertEqual(s2.state, tasks.State.UNSAFE)
         self.assertIn(tasks.Flag.CHECKS_PASSED, s2.flags)
         self.assertIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, s2.flags)
+
+    def test_valid_data_never_freezes_the_snapshot(self):
+        # Codex's review of dc1eb14 (blocking): long issue timelines repeated in every item, and
+        # many check runs, could push valid data over the limit, failing every refresh.
+        issue = issue_node(10)
+        noise = [
+            {
+                "__typename": "LabeledEvent",
+                "createdAt": "2026-11-20T08:00:00Z",
+                "actor": {"login": OWNER},
+                "label": {"name": "x" * 200},
+            }
+        ] * 90
+        issue["timelineItems"]["nodes"] = noise + issue["timelineItems"]["nodes"]
+        issue["timelineItems"]["totalCount"] = len(issue["timelineItems"]["nodes"])
+        checks = tuple(f"job-{i}-" + "y" * 100 for i in range(25)) + ("lint", "test")
+        self.fake.prs[REPO_A]["open"] = [
+            pr_node(n, issue=issue, files=("evidence/a.json",), checks=checks) for n in range(1, 31)
+        ]
+        snap = self.run_refresh()
+        task = snap["items"][0]["task"]
+        self.assertEqual([e["label"] for e in task["issue"]["timeline"]], ["agent:ready"])
+        self.assertEqual(
+            sorted(c["name"] for c in task["pull_request"]["checks"]), ["lint", "test"]
+        )
+        # And when even that is too much, items are left out and the repository marked
+        # truncated, rather than every refresh failing.
+        small = len(snapshot.encode(snap)) // 3
+        saved = snapshot.MAX_SNAPSHOT
+        snapshot.MAX_SNAPSHOT = small
+        try:
+            cut = self.run_refresh()
+        finally:
+            snapshot.MAX_SNAPSHOT = saved
+        self.assertLessEqual(len(snapshot.encode(cut)), small)
+        self.assertIn(REPO_A, cut["truncated"])
+        self.assertTrue(cut["items"])
+
+    def test_a_known_missing_approval_waits_for_you(self):
+        # Codex's review of dc1eb14: with Billy's records unread, an open clinical PR with no
+        # clinician approval sat under "Running / queued", its card silent.
+        self.fake.prs[REPO_A]["open"][0] = pr_node(
+            1, issue=issue_node(10), files=("evidence/a.json",)
+        )
+        state = tasks.derive(self.task_of(self.run_refresh()["items"][0]))
+        self.assertIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, state.flags)
+        self.assertTrue(state.needs_attention)
 
     def test_a_renamed_file_makes_the_file_list_incomplete(self):
         # Codex's review of f37d0c7 (blocking): a rename lists only the new path, so a move out
@@ -1084,13 +1134,14 @@ class Refresh(Base):
         compact = len(json.dumps(self.run_refresh()))
         self.assertGreater(written, compact)
         saved = snapshot.MAX_SNAPSHOT
-        snapshot.MAX_SNAPSHOT = (written + compact) // 2  # compact fits, written doesn't
+        limit = (written + compact) // 2  # compact fits, written doesn't
+        snapshot.MAX_SNAPSHOT = limit
         try:
-            with self.assertRaises(gh.FetchError) as caught:
-                self.run_refresh()
+            snap = self.run_refresh()
         finally:
             snapshot.MAX_SNAPSHOT = saved
-        self.assertEqual(caught.exception.code, "too-large")
+        # It was cut to fit, measured as written (dc1eb14: cutting, not failing).
+        self.assertLessEqual(len(snapshot.encode(snap)), limit)
 
     def test_a_removal_by_a_deleted_account_still_withdraws(self):
         # Codex's review of f772122 (blocking): skipping it left the authorisation in force.

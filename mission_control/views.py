@@ -11,7 +11,7 @@ from html import escape
 
 from . import PHASE
 from .demo import Demo, Entry, utc
-from .tasks import ATTENTION_FLAGS, Flag, State, TaskStatus
+from .tasks import ATTENTION_FLAGS, WAITING_FLAGS, Flag, State, TaskStatus
 
 STATE_WORDS = {
     State.PROPOSED: "Proposed: not authorised",
@@ -203,7 +203,7 @@ def _card(entry: Entry, with_github: bool) -> str:
     st = entry.status
     where = _where(entry)
     reason = st.reasons[0] if st.reasons else ""
-    alerts = [FLAG_WORDS[f] for f in sorted(st.flags & ATTENTION_FLAGS)]
+    alerts = [FLAG_WORDS[f] for f in sorted(st.flags & (ATTENTION_FLAGS | WAITING_FLAGS))]
     extra = "".join(f"<li>{_e(a)}</li>" for a in alerts)
     gh = github_link(entry) if with_github else None
     return (
