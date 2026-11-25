@@ -118,7 +118,12 @@ class Refresher:
             return isinstance(value, (int, float)) and not isinstance(value, bool)
 
         last_boot = previous.get("attempt_since_boot")
-        if boot_id is not None and previous.get("boot_id") == boot_id and number(last_boot):
+        same_boot = boot_id is not None and previous.get("boot_id") == boot_id
+        # With a boot id missing on either side, time since boot still tells: it only goes
+        # forward within a boot, so a value no smaller than the last one is taken as the same
+        # boot (Codex's review of 198a66e: an unreadable boot id fell back to the wall clock).
+        unknown_boot = boot_id is None or previous.get("boot_id") is None
+        if number(last_boot) and (same_boot or (unknown_boot and since_boot >= last_boot)):
             return since_boot - last_boot < MIN_INTERVAL
         last = previous.get("attempt_epoch")
         return number(last) and abs(now - last) < MIN_INTERVAL

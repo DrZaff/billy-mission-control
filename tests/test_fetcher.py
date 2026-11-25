@@ -516,8 +516,12 @@ class Refresh(Base):
             1, issue=issue_node(10), files=("a",), files_total=500
         )
         item = self.run_refresh()["items"][0]
-        self.assertNotIn("files", item["task"]["pull_request"])
-        self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNKNOWN)
+        self.assertIsNone(item["task"]["pull_request"]["files"])  # "not known"
+        state = tasks.derive(self.reviewed(item))
+        # Unknown files may be clinical: a reviewed PR waits for a clinician, never "ready".
+        self.assertEqual(state.state, tasks.State.CLINICAL_REVIEW)
+        self.assertIn(tasks.Flag.FILES_UNVERIFIED, state.flags)
+        self.assertNotIn(tasks.Flag.CLINICAL, state.flags)  # and isn't claimed to be clinical
 
     def test_several_closing_issues_give_no_guess(self):
         node = pr_node(1)
@@ -613,7 +617,8 @@ class Refresh(Base):
                     1, issue=issue_node(10), merge_commit=merge
                 )
                 item = self.run_refresh()["items"][0]
-                self.assertEqual("checks" in item["task"]["pull_request"], has_checks)
+                checks = item["task"]["pull_request"]["checks"]
+                self.assertEqual(checks is not None, has_checks)
 
     def test_a_commit_status_can_only_add_caution(self):
         # Codex's review of ab64500 (blocking): when a status and a check run share a required
@@ -732,8 +737,46 @@ class Refresh(Base):
             1, issue=issue_node(10), files=("site/moved.md",), renamed=("site/moved.md",)
         )
         item = self.run_refresh()["items"][0]
-        self.assertNotIn("files", item["task"]["pull_request"])
-        self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNKNOWN)
+        self.assertIsNone(item["task"]["pull_request"]["files"])
+        self.assertIn(tasks.Flag.FILES_UNVERIFIED, tasks.derive(self.task_of(item)).flags)
+
+    def test_a_merged_pr_with_unknown_files_keeps_its_known_warnings(self):
+        # Codex's review of 198a66e (blocking): a rename made a merged PR unreadable, hiding
+        # that someone other than the owner merged it.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(
+            1,
+            state="MERGED",
+            merged=True,
+            closed_at=recent,
+            issue=issue_node(10),
+            files=("site/moved.md",),
+            renamed=("site/moved.md",),
+        )
+        node["mergedBy"] = {"login": "someone-else"}
+        node["reviews"] = {"totalCount": 500, "nodes": []}  # reviews incomplete too
+        self.fake.prs[REPO_A]["open"], self.fake.prs[REPO_A]["closed"] = [], [node]
+        item = self.run_refresh()["items"][0]
+        pull = item["task"]["pull_request"]
+        self.assertIsNone(pull["files"])
+        self.assertIsNone(pull["reviews"])
+        state = tasks.derive(self.task_of(item))
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, state.flags)
+        self.assertIn(tasks.Flag.FILES_UNVERIFIED, state.flags)
+        self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, state.flags)
+        # Nothing unknown is claimed either way.
+        self.assertNotIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+
+    def test_unknown_reviews_give_no_clinical_approval(self):
+        self.fake.prs[REPO_A]["open"][0] = pr_node(
+            1, issue=issue_node(10), files=("evidence/study.md",)
+        )
+        self.fake.prs[REPO_A]["open"][0]["reviews"] = {"totalCount": 500, "nodes": []}
+        item = self.run_refresh()["items"][0]
+        state = tasks.derive(self.reviewed(item))
+        self.assertEqual(state.state, tasks.State.CLINICAL_REVIEW)
+        self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, state.flags)
 
     def test_a_manually_dispatched_run_never_counts(self):
         # Codex's review of f37d0c7 (blocking): GitHub leaves runs from workflow_dispatch out of
@@ -929,6 +972,20 @@ class RefresherFiles(Base):
         since_boot[0] += 60  # a real minute later, whatever the wall clock says
         self.assertEqual(make().run(), server.OK)
 
+    def test_an_unreadable_boot_id_still_uses_time_since_boot(self):
+        # Codex's review of 198a66e: without a boot id it fell back to the wall clock.
+        wall, since_boot = [NOW.timestamp()], [1000.0]
+
+        def make():
+            return self.make(lambda: wall[0], boot=lambda: (None, since_boot[0]))
+
+        self.assertEqual(make().run(), server.OK)
+        wall[0] += 5 * 3600  # the wall clock jumps hours ahead...
+        since_boot[0] += 5  # ...five seconds after the last refresh
+        self.assertEqual(make().run(), server.TOO_SOON)
+        since_boot[0] += 60
+        self.assertEqual(make().run(), server.OK)
+
     def test_after_a_restart_of_the_machine_the_wall_clock_decides(self):
         wall = [NOW.timestamp()]
         self.assertEqual(
@@ -980,6 +1037,21 @@ class RefresherFiles(Base):
             self.assertEqual(self.make(lambda: NOW.timestamp()).run(), server.OK)
         written = snapshot.read_json(self.cfg.snapshot_dir, snapshot.SNAPSHOT)
         self.assertEqual(len(written["items"]), 3)
+
+    def test_a_failed_folder_sync_after_the_rename_is_not_a_failed_write(self):
+        # Codex's review of 198a66e: the new snapshot was in place, but the refresh said it
+        # failed and the status kept the old time.
+        real = os.fsync
+
+        def fsync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(5, "sync failed")
+            return real(fd)
+
+        with mock.patch.object(snapshot.os, "fsync", side_effect=fsync):
+            self.assertEqual(self.make(lambda: NOW.timestamp()).run(), server.OK)
+        status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+        self.assertEqual(status["snapshot_at"], NOW.isoformat())
 
     def test_a_token_that_could_not_be_revoked_is_reported(self):
         # Codex's review of 1cc6cf8: a good refresh said "ok" while the token stayed valid.

@@ -427,7 +427,9 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
         try:
             pull[key] = read()
         except _Incomplete:
-            pass
+            # null: "not known", so the model still judges what is known (Codex's review of
+            # 198a66e: leaving the key out made the whole PR unreadable and hid its warnings).
+            pull[key] = None
     linked, issue, issue_screen = _issue(repo, pr)
     task = {
         "repo": repo,
@@ -442,7 +444,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
     try:
         task["branch"] = {"name": _exact(pr.get("headRefName")), "head": head}
     except _Incomplete:
-        pass  # no branch key: the model shows UNKNOWN
+        task["branch"] = None  # not known; the pull request's head is still known
     if issue is not None:
         task["issue"] = issue
     short = repo.split("/", 1)[1]
@@ -568,7 +570,13 @@ def write_json(folder: Path, name: str, data: dict) -> None:
             except OSError:
                 pass
             raise
-        os.fsync(folder_fd)
+        # The new file is already in place and readable: a failed sync of the folder must not
+        # report the write as failed (Codex's review of 198a66e). It only makes the rename's
+        # survival of a sudden power cut less certain.
+        try:
+            os.fsync(folder_fd)
+        except OSError:
+            pass
     finally:
         os.close(folder_fd)
 

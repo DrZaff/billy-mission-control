@@ -2226,7 +2226,7 @@
   },
   {
    "id": "example-tools-60",
-   "title": "Footer link colour (merged; checks not verified here)",
+   "title": "Footer link colour (merged; files, reviews and checks not verified here)",
    "risk": "low",
    "task": {
     "repo": "example-org/example-tools",
@@ -2300,10 +2300,8 @@
      "merged": true,
      "merged_by": "example-owner",
      "head_sha": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9",
-     "files": [
-      "site/footer.css"
-     ],
-     "reviews": [],
+     "files": null,
+     "reviews": null,
      "checks": null
     }
    }

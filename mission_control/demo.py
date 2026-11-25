@@ -123,7 +123,7 @@ def _events(parsed: Any) -> tuple[tuple[datetime, str], ...]:
             parts.append(f"[{where}]")
         items.append((r.at, len(items), " ".join(parts)))
     if parsed.pr is not None:
-        for rv in parsed.pr.reviews:
+        for rv in parsed.pr.reviews or ():  # None: not known (A5a); the flag says so
             who = f"{rv.user} (bot)" if rv.is_bot else rv.user
             text = f"GitHub review {rv.state.lower()} by {who} at {rv.commit[:12]}"
             items.append((rv.at, len(items), text))

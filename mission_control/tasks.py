@@ -58,6 +58,11 @@ clinical_paths may be an explicit empty list.
                    verdict once a PR is merged or closed). It is never read as passed: an
                    open PR's checks then count as not passed, and a merged PR is judged on
                    everything else, with CHECKS_UNVERIFIED instead of a checks verdict.
+                   files and reviews may be null in the same way (A5a: GitHub's answer was
+                   incomplete, such as a renamed file). Unknown files may be clinical, so an
+                   open PR waits for a clinician (FILES_UNVERIFIED); unknown reviews give no
+                   clinical approval (REVIEWS_UNVERIFIED). A merged PR is still judged on
+                   everything that is known, and nothing unknown is claimed either way.
 
 Example, as a phase A3 screen would use it:
 
@@ -135,6 +140,10 @@ class Flag(StrEnum):
     MERGED_WITH_CHECKS_NOT_PASSED = "merged_with_checks_not_passed"
     # The checks' results aren't known here (pull_request.checks is null): no verdict either way.
     CHECKS_UNVERIFIED = "checks_unverified"
+    # The changed files aren't known here (pull_request.files is null): they may be clinical.
+    FILES_UNVERIFIED = "files_unverified"
+    # The PR's reviews aren't known here (pull_request.reviews is null): no clinical approval.
+    REVIEWS_UNVERIFIED = "reviews_unverified"
 
 
 ATTENTION_STATES = frozenset(
@@ -287,8 +296,8 @@ class _PR:
     merged: bool
     merged_by: str | None
     head: str
-    files: tuple[str, ...]
-    reviews: tuple[_Review, ...]
+    files: tuple[str, ...] | None  # None: not known
+    reviews: tuple[_Review, ...] | None  # None: not known
     checks: tuple[_Check, ...] | None  # None: not known
 
 
@@ -382,8 +391,9 @@ def _parse_pr(raw: Any) -> _PR:
     if merged:
         merged_by = _login(merged_by, "pull_request.merged_by")
     reviews = []
+    raw_reviews = _need(p, "reviews", "pull_request.reviews")
     for i, raw_review in enumerate(
-        _list(_need(p, "reviews", "pull_request.reviews"), "pull_request.reviews")
+        [] if raw_reviews is None else _list(raw_reviews, "pull_request.reviews")
     ):
         rv = _map(raw_review, f"pull_request.reviews[{i}]")
         review_state = _choice(rv.get("state"), REVIEW_STATES, f"pull_request.reviews[{i}].state")
@@ -433,8 +443,10 @@ def _parse_pr(raw: Any) -> _PR:
         merged=merged,
         merged_by=merged_by,
         head=_sha(p.get("head_sha"), "pull_request.head_sha"),
-        files=_strings(_need(p, "files", "pull_request.files"), "pull_request.files"),
-        reviews=tuple(reviews),
+        files=None
+        if (raw_files := _need(p, "files", "pull_request.files")) is None
+        else _strings(raw_files, "pull_request.files"),
+        reviews=None if raw_reviews is None else tuple(reviews),
         checks=None if raw_checks is None else tuple(checks),
     )
 
@@ -568,6 +580,8 @@ def _clinician_approved(task: _Task, head: str) -> bool:
     outside GitHub's reviews (such as Codex's). Each clinician's latest decisive review counts;
     two different decisions at the same instant are ambiguous and block, whatever the input
     order."""
+    if task.pr.reviews is None:
+        return False  # not known: no approval (A5a)
     by_user: dict[str, list[_Review]] = {}
     for rv in task.pr.reviews:
         if rv.is_bot or rv.user not in task.clinicians or rv.commit != head:
@@ -652,11 +666,16 @@ def derive(raw: Any) -> TaskStatus:
     head = pr.head if pr else task.branch_head
     # Clinical gating looks at every file any record touched, authorised or not: when in
     # doubt, clinical.
-    files = set(pr.files if pr else ())
+    files = set(pr.files or () if pr else ())
     for r in runs:
         files.update(r.files)
     if any(fnmatchcase(f, pat) for f in files for pat in task.clinical_paths):
         flags.add(Flag.CLINICAL)
+    # Files not known may be clinical: gate on that, but never claim either way (A5a).
+    files_unknown = bool(pr and pr.files is None and task.clinical_paths)
+    if pr and pr.files is None:
+        flags.add(Flag.FILES_UNVERIFIED)
+    maybe_clinical = Flag.CLINICAL in flags or files_unknown
 
     # Merged: judged on its own, because it is final. Only the owner merges, and only a
     # commit that passed review (and, for clinical files, a clinician's approval).
@@ -669,7 +688,9 @@ def derive(raw: Any) -> TaskStatus:
         if not reviewed:
             flags.add(Flag.MERGED_UNREVIEWED)
             problems.append("the merged commit never passed review")
-        if Flag.CLINICAL in flags and not _clinician_approved(task, pr.head):
+        if maybe_clinical and pr.reviews is None:
+            flags.add(Flag.REVIEWS_UNVERIFIED)  # approval not known: no claim either way
+        elif Flag.CLINICAL in flags and not _clinician_approved(task, pr.head):
             flags.add(Flag.MERGED_WITHOUT_CLINICIAN)
             problems.append("clinical files merged without a clinician's approval of that commit")
         if since is None:
@@ -786,7 +807,9 @@ def derive(raw: Any) -> TaskStatus:
             head,
             head,
         )
-    if Flag.CLINICAL in flags and not _clinician_approved(task, head):
+    if maybe_clinical and not _clinician_approved(task, head):
+        if pr.reviews is None:
+            flags.add(Flag.REVIEWS_UNVERIFIED)
         flags.add(Flag.CLINICAL_APPROVAL_MISSING)
         return status(
             State.CLINICAL_REVIEW,

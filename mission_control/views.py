@@ -58,6 +58,8 @@ FLAG_WORDS = {
     Flag.MERGED_WITHOUT_CLINICIAN: "Clinical files merged without a clinician's approval",
     Flag.MERGED_WITH_CHECKS_NOT_PASSED: "Merged before the required checks passed",
     Flag.CHECKS_UNVERIFIED: "Required checks not verified here (GitHub's merge box shows them)",
+    Flag.FILES_UNVERIFIED: "Changed files not verified here (they may include clinical files)",
+    Flag.REVIEWS_UNVERIFIED: "Reviews not verified here (no clinician's approval is assumed)",
 }
 
 SECTIONS = (
