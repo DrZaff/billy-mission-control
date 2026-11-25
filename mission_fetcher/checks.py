@@ -160,6 +160,30 @@ def shared_with_web_app(
     return Check(name, True, "yes")
 
 
+def folder_files(path: Path, uid: int) -> Check:
+    """Every file already in the snapshot folder is the fetcher's own: a plain file it owns,
+    not writable by its group or anyone else. The fetcher reads its status file before it
+    writes, so one the web app's account owned or could change could hold refreshes back or
+    let them skip the one-minute floor (Codex's review of b7d568e)."""
+    name = "snapshot folder's files"
+    try:
+        entries = os.listdir(path)
+    except OSError:
+        return Check(name, False, "can't be listed")
+    for entry in sorted(entries):
+        try:
+            info = os.lstat(path / entry)
+        except OSError:
+            return Check(name, False, f"{entry} can't be read")
+        if not stat.S_ISREG(info.st_mode):
+            return Check(name, False, f"{entry} is not a plain file")
+        if info.st_uid != uid:
+            return Check(name, False, f"{entry} is not owned by the fetcher's account")
+        if info.st_mode & 0o022:
+            return Check(name, False, f"{entry} can be changed by other accounts")
+    return Check(name, True, "yes")
+
+
 def fetcher_checks(
     cfg: FetcherConfig,
     config_path: Path,
@@ -186,6 +210,7 @@ def fetcher_checks(
         key_file(cfg.key, uid),
         protected_above(cfg.key, trusted),
         own_folder(cfg.snapshot_dir, uid, "snapshot folder"),
+        folder_files(cfg.snapshot_dir, uid),
         shared_with_web_app(cfg.snapshot_dir, cfg.client_account, gid_of, members_of),
         no_acls(cfg.snapshot_dir),
         protected_above(cfg.snapshot_dir, trusted),

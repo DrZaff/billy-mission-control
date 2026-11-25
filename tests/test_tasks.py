@@ -423,6 +423,27 @@ class Merges(unittest.TestCase):
         value["pull_request"]["reviews"] = []
         self.assertIn(Flag.CLINICAL_APPROVAL_MISSING, derive(value).flags)
 
+    def test_unverifiable_authorisation_never_discards_billys_review_records(self):
+        # Codex's review of b7d568e (blocking): a merged PR with no issue lost every record,
+        # and so was said never to have passed review.
+        reviewed = task(
+            issue=None,
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(state="closed", merged=True, merged_by=OWNER, merged_at=t(20)),
+        )
+        s = derive(reviewed)
+        self.assertEqual(s.state, State.MERGED)
+        self.assertNotIn(Flag.MERGED_UNREVIEWED, s.flags)
+        self.assertIn(Flag.AUTHORIZATION_UNVERIFIED, s.flags)
+        unreviewed = copy.deepcopy(reviewed)
+        unreviewed["runs"] = [run("build")]
+        s = derive(unreviewed)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.MERGED_UNREVIEWED, s.flags)  # still caught
+        late = copy.deepcopy(reviewed)
+        late["runs"] = [run("build"), passed(minute=30)]  # after the merge: never counts
+        self.assertIn(Flag.MERGED_UNREVIEWED, derive(late).flags)
+
     def test_a_merge_without_its_time_is_unknown(self):
         value = self.merged()
         del value["pull_request"]["merged_at"]

@@ -407,6 +407,8 @@ class CodexReviewOfCaa5552(unittest.TestCase):
         self.assertEqual(path_row(body, "Review"), "?")
         self.assertNotIn("never passed review", body)
         self.assertIn("clinical: not known", body)
+        # Unverified checks are "?", never "not yet" (Codex's review of b7d568e).
+        self.assertEqual(path_row(body, "Checks"), "?")
 
     def test_unread_reviews_never_show_a_clinician_approval(self):
         # Codex's review of 72607b3 (blocking): MERGED alone was taken as proof.

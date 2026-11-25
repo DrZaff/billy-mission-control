@@ -324,6 +324,8 @@ def _path(entry: Entry) -> str:
         (Flag.CHECKS_MISSING, "!"),
         (Flag.CHECKS_PENDING, "..."),
         (Flag.CHECKS_PASSED, "done"),
+        # Not known here: neither passed nor "not yet" (Codex's review of b7d568e).
+        (Flag.CHECKS_UNVERIFIED, "?"),
     ):
         if flag in flags:
             rows.append((marker, "Checks", FLAG_WORDS[flag].lower()))

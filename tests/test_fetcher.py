@@ -1730,6 +1730,26 @@ class StartupChecks(Base):
         wrong_group = ("web-account", lambda a: self.gid + 1, lambda g: {"web-account"})
         self.assertFalse(shared_with_web_app(folder, *wrong_group).ok)
 
+    def test_files_in_the_snapshot_folder_are_the_fetchers_own(self):
+        # Codex's review of b7d568e (blocking): an existing status file was trusted unchecked.
+        from mission_fetcher.checks import folder_files
+
+        folder = self.cfg.snapshot_dir
+        status = folder / snapshot.STATUS
+        self.assertTrue(folder_files(folder, self.uid).ok)  # empty
+        status.write_text("{}")
+        for mode, ok in ((0o640, True), (0o600, True), (0o660, False), (0o642, False)):
+            with self.subTest(mode=oct(mode)):
+                os.chmod(status, mode)
+                self.assertEqual(folder_files(folder, self.uid).ok, ok)
+        os.chmod(status, 0o640)
+        self.assertFalse(folder_files(folder, self.uid + 1).ok)  # someone else's file
+        status.unlink()
+        status.symlink_to(self.base / "key.pem")
+        self.assertFalse(folder_files(folder, self.uid).ok)
+        status.unlink()
+        self.assertIn("snapshot folder's files", self.checks())
+
     def test_the_web_app_can_reach_the_snapshot_folder(self):
         # Codex's review of 23bfb61: protected folders above it could still shut the web app out.
         from mission_fetcher.checks import reachable_by

@@ -734,6 +734,12 @@ def derive(raw: Any) -> TaskStatus:
     current = [r for r in runs if since is not None and r.at >= since]
     if since is not None and len(current) < len(runs):
         flags.add(Flag.RECORD_BEFORE_AUTHORIZATION)
+    if since is None and not task.issue_known and pr and pr.merged:
+        # A merged PR whose authorisation can't be verified: its records can't be scoped to
+        # an authorisation, so every record for its branch up to the merge counts, rather
+        # than none (Codex's review of b7d568e: discarding them all claimed the merged commit
+        # was never reviewed). A passing review of exactly the merged commit is still needed.
+        current = list(runs)
     if merged_at is not None:
         # A review recorded after the merge can't make that merge compliant (Codex's review
         # of 69ed8e3).
