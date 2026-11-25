@@ -56,6 +56,9 @@ FLAG_WORDS = {
     Flag.CLINICAL_APPROVAL_MISSING: "No clinician has approved this commit",
     Flag.CLINICIAN_APPROVED: "A clinician approved this commit",
     Flag.FROM_FORK: "Opened from a fork: not Billy's work, whatever its issue link says",
+    Flag.DISMISSAL_UNPLACED: (
+        "A clinician's review was dismissed, and GitHub doesn't say when: approval not known"
+    ),
     Flag.AUTHORIZATION_WITHDRAWN: "You authorised this task, then removed agent:ready",
     Flag.AUTHORIZATION_UNVERIFIED: "Your authorisation of this merge can't be verified here",
     Flag.UNAUTHORIZED_MERGE: "Merged by someone other than you",
@@ -368,7 +371,11 @@ def _path(entry: Entry) -> str:
     if Flag.CLINICAL in flags and state is State.CLOSED and not st.merged:
         rows.append(("-", "Clinician", "not judged: closed without merging"))
     elif Flag.CLINICAL in flags:
-        if Flag.REVIEWS_UNVERIFIED in flags:
+        if Flag.DISMISSAL_UNPLACED in flags:
+            rows.append(
+                ("?", "Clinician", "not known: a review was dismissed, and GitHub doesn't say when")
+            )
+        elif Flag.REVIEWS_UNVERIFIED in flags:
             # Unread reviews: neither approved nor not (Codex's review of 9fb21c8).
             rows.append(("?", "Clinician", "not shown: the reviews couldn't be read"))
         elif Flag.CLINICAL_APPROVAL_MISSING in flags or Flag.MERGED_WITHOUT_CLINICIAN in flags:

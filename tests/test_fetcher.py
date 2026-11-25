@@ -206,7 +206,8 @@ def answer_for(node, query: str):
         mine = [
             r
             for r in reviews
-            if isinstance(r.get("author"), dict) and r["author"].get("login") == login
+            if isinstance(r.get("author"), dict)
+            and str(r["author"].get("login")).lower() == login.lower()  # as GitHub matches
         ]
         node[alias] = {"totalCount": totals.get(login, len(mine)), "nodes": mine}
     return node
@@ -1183,9 +1184,11 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.FROM_FORK, state.flags)
         self.assertTrue(state.needs_attention)
 
-    def test_every_pr_read_only_lite_fails_rather_than_say_ok(self):
-        # Finding 6: full queries all failing, lite ones working, gave "ok" with everything
-        # not known.
+    def test_every_pr_read_only_lite_is_shown_never_clean(self):
+        # Finding 6 asked that an all-lite reading not say "ok" with everything not known;
+        # the audit of 28009de showed that rejecting it let two huge PRs from anyone stall
+        # every repository. A lite read is now shown: reviews read, files and checks "not
+        # known" and alerting, never greener.
         real = self.fake.__call__
 
         def call(method, path, headers, body):
@@ -1194,9 +1197,10 @@ class Refresh(Base):
             return real(method, path, headers, body)
 
         github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
-        with self.assertRaises(gh.FetchError) as caught:
-            snapshot.refresh(self.cfg, github, NOW)
-        self.assertEqual(caught.exception.code, "too-heavy")
+        for item in snapshot.refresh(self.cfg, github, NOW)["items"]:
+            state = tasks.derive(self.task_of(item))
+            self.assertNotIn(tasks.Flag.CHECKS_PASSED, state.flags)
+            self.assertTrue(state.needs_attention)
 
     def test_hidden_characters_and_lone_surrogates_are_cleaned_or_refused(self):
         # Finding 7.
@@ -1990,7 +1994,7 @@ class Refresh(Base):
         head_dismissed = review_node(state="DISMISSED", at=before)
         item, state = self.merged_clinical([head_dismissed])
         self.assertIsNotNone(item["task"]["pull_request"]["reviews"])
-        self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, state.flags)
+        self.assertIn(tasks.Flag.DISMISSAL_UNPLACED, state.flags)
         self.assertNotIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
 
     def test_a_lone_pr_is_asked_for_again_after_a_transient_error(self):
@@ -2187,6 +2191,40 @@ class Refresh(Base):
                 item = self.run_refresh()["items"][0]
                 self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
+    # ------------------------------------------------ audit of 28009de
+
+    def test_a_wrongly_typed_check_name_is_never_skipped_silently(self):
+        for where in ("run", "status", "app key", "no workflow run"):
+            with self.subTest(where):
+                node, commit = self.failing_lint()
+                suites = commit["checkSuites"]
+                failing = suites["nodes"][0]
+                good = json.loads(json.dumps(failing))
+                good["checkRuns"]["nodes"][0]["conclusion"] = "SUCCESS"
+                if where == "run":
+                    failing["checkRuns"]["nodes"][0]["name"] = None
+                elif where == "app key":
+                    del failing["app"]
+                elif where == "no workflow run":
+                    failing["workflowRun"] = None
+                suites["nodes"].append(good)
+                suites["totalCount"] = 2
+                if where == "status":
+                    failing["checkRuns"]["nodes"][0]["conclusion"] = "SUCCESS"
+                    commit["status"] = {"contexts": [{"context": None, "state": "FAILURE"}]}
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
+    def test_a_clinicians_review_is_matched_whatever_the_login_case(self):
+        before = (NOW - timedelta(days=2)).isoformat()
+        request = review_node(OWNER.upper(), "CHANGES_REQUESTED", at=before)
+        item, state = self.merged_clinical([request])
+        self.assertEqual(
+            [r["state"] for r in item["task"]["pull_request"]["reviews"]], ["CHANGES_REQUESTED"]
+        )
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+
     def test_a_clinical_path_of_any_length_is_clinical(self):
         # Finding 6.
         item, state = self.merged_clinical(
@@ -2221,7 +2259,7 @@ class Refresh(Base):
         # verdict depends on the dismissed one.
         self.assertIsNotNone(item["task"]["pull_request"]["reviews"])
         state = tasks.derive(self.task_of(item))
-        self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, state.flags)
+        self.assertIn(tasks.Flag.DISMISSAL_UNPLACED, state.flags)
         self.assertNotIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
         # On an open PR the current state is what counts: it is kept.
         self.fake.prs[REPO_A]["closed"] = []

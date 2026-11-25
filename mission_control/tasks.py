@@ -161,6 +161,9 @@ class Flag(StrEnum):
     FROM_FORK = "from_fork"
     # The owner authorised the task, then removed agent:ready (with UNAUTHORIZED_WORK).
     AUTHORIZATION_WITHDRAWN = "authorization_withdrawn"
+    # A merge's clinician approval can't be judged: a clinician's review was dismissed, and
+    # GitHub doesn't say when (before or after the merge). The reviews were read.
+    DISMISSAL_UNPLACED = "dismissal_unplaced"
     UNAUTHORIZED_MERGE = "unauthorized_merge"  # merged by someone other than the owner
     MERGED_UNREVIEWED = "merged_unreviewed"  # the merged commit never passed review
     MERGED_WITHOUT_CLINICIAN = "merged_without_clinician"
@@ -209,6 +212,7 @@ ATTENTION_FLAGS = frozenset(
         # flagged this way.
         Flag.CHECKS_UNVERIFIED,
         Flag.CONFLICTING_RECORDS,
+        Flag.DISMISSAL_UNPLACED,
         Flag.REVIEWS_UNVERIFIED,
     }
 )
@@ -732,10 +736,19 @@ def _dismissal_unplaced(task: _Task, until: datetime) -> bool:
             continue
         if rv.at <= until:
             latest.setdefault(rv.user, []).append(rv)
+    # Each clinician's latest decisive review of the head too: the approval gate reads both,
+    # so a dismissal in either may hide a changes request in force at the merge (audit of
+    # 28009de: a later approval of another commit masked a dismissed one of the head).
+    head_latest: dict[str, list[_Review]] = {}
     for reviews in latest.values():
-        at = max(rv.at for rv in reviews)
-        if any(rv.state == "DISMISSED" for rv in reviews if rv.at == at):
-            return True
+        for rv in reviews:
+            if rv.commit == task.pr.head:
+                head_latest.setdefault(rv.user, []).append(rv)
+    for group in (latest, head_latest):
+        for reviews in group.values():
+            at = max(rv.at for rv in reviews)
+            if any(rv.state == "DISMISSED" for rv in reviews if rv.at == at):
+                return True
     return False
 
 
@@ -950,13 +963,13 @@ def derive(raw: Any) -> TaskStatus:
             flags.add(Flag.REVIEWS_UNVERIFIED)  # approval not known: no claim either way
         elif Flag.CLINICAL in flags and _clinician_approved(task, pr.head, merged_at):
             if _dismissal_unplaced(task, merged_at):
-                flags.add(Flag.REVIEWS_UNVERIFIED)  # approved, unless a dismissal came late
+                flags.add(Flag.DISMISSAL_UNPLACED)  # approved, unless a dismissal came late
             else:
                 flags.add(Flag.CLINICIAN_APPROVED)
         elif Flag.CLINICAL in flags and _head_dismissal_unplaced(task, pr.head, merged_at):
             # No approval now, but a dismissed review of the head may have been one at the
             # merge, and no changes request in force rules it out (audit of 42a3721).
-            flags.add(Flag.REVIEWS_UNVERIFIED)
+            flags.add(Flag.DISMISSAL_UNPLACED)
         elif Flag.CLINICAL in flags:
             flags.add(Flag.MERGED_WITHOUT_CLINICIAN)
             problems.append("clinical files merged without a clinician's approval of that commit")

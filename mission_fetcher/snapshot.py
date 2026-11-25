@@ -544,10 +544,15 @@ def _reviews(
             if state == "PENDING":
                 continue  # a draft review nobody else can see
             author = n.get("author")
+            if author is None:
+                continue  # a deleted account: not this clinician
+            # GitHub filtered by author, and logins are case-insensitive: anything else in this
+            # connection is a surprise, so the reviews are "not known" (audit of 28009de).
             if not isinstance(author, dict) or author.get("__typename") == "Bot":
-                continue
-            if author.get("login") != login:
-                continue  # GitHub filtered by author; anything else is not this clinician's
+                raise _Incomplete()
+            seen = author.get("login")
+            if not isinstance(seen, str) or seen.lower() != login.lower():
+                raise _Incomplete()
             submitted = n.get("submittedAt")
             if submitted is None:
                 raise _Incomplete()  # a review that can't be placed in time: no guess
@@ -617,6 +622,9 @@ def _checks(
         if not isinstance(suite, dict):
             complete = False
             continue
+        if "app" not in suite:
+            complete = False  # left out: not known (audit of 28009de)
+            continue
         suite_app = suite.get("app")
         if suite_app is None:
             continue  # no app: never the configured one
@@ -635,6 +643,11 @@ def _checks(
             if workflow_run is not None and not isinstance(event, str):
                 complete = False  # wrongly shaped: not known (audit of 42a3721)
                 continue
+            if workflow_run is None and _holds_required(suite, required):
+                # Its event can't be told, and it holds a required check: not known, never
+                # skipped (audit of 28009de).
+                complete = False
+                continue
             if event not in CHECK_EVENTS:
                 continue
         try:
@@ -649,7 +662,10 @@ def _checks(
                 complete = False
                 continue
             name = run.get("name")
-            if not isinstance(name, str) or name not in required:
+            if not isinstance(name, str):
+                complete = False  # wrongly shaped: not known, never skipped (audit of 28009de)
+                continue
+            if name not in required:
                 continue  # only required names, matched exactly (Codex's review of dc1eb14)
             raw_status = run.get("status")
             conclusion = run.get("conclusion")
@@ -688,6 +704,14 @@ def _checks(
     return out + cautions, complete and statuses_complete
 
 
+def _holds_required(suite: dict, required: tuple[str, ...]) -> bool:
+    runs = suite.get("checkRuns")
+    nodes = runs.get("nodes") if isinstance(runs, dict) else None
+    return isinstance(nodes, list) and any(
+        isinstance(r, dict) and r.get("name") in required for r in nodes
+    )
+
+
 def _status_cautions(commit: dict, head: str, required: tuple[str, ...]) -> tuple[list[dict], bool]:
     """(the head commit's statuses for required names, as cautions only, whether complete).
     When a status and a check run share a required name, GitHub needs both to pass (Codex's
@@ -706,7 +730,10 @@ def _status_cautions(commit: dict, head: str, required: tuple[str, ...]) -> tupl
             complete = False
             continue
         name = context.get("context")
-        if not isinstance(name, str) or name not in required:
+        if not isinstance(name, str):
+            complete = False  # wrongly shaped: not known (audit of 28009de)
+            continue
+        if name not in required:
             continue
         state = context.get("state")
         if not isinstance(state, str) or state not in STATUS_STATES:
@@ -1135,20 +1162,9 @@ def repo_items(
         # closed before the window (possible only if the list was wrong) does not.
         if item["closed_at"] is None or datetime.fromisoformat(item["closed_at"]) >= since:
             items.append(item)
-    unsafe_known = any(
-        _model_reads(i["task"]) and derive(dict(i["task"], paused=False)).state is State.UNSAFE
-        for i in items
-    )
-    # Unless what was read shows a known unsafe merge: that must be shown, not held back with
-    # the last snapshot (Codex's review of 5d06878).
-    # A lone pull request that keeps failing in full (as GitHub does for very large diffs) is
-    # shown lite after one more full try, like one that is too large: one stranger's pull
-    # request must never stall every repository (audit of 42a3721).
-    if len(details) > 1 and all(lite for _, _, lite in details) and not unsafe_known:
-        # Every pull request read without its files, reviews and checks is no per-PR problem
-        # either: fail, keeping the last good snapshot, rather than replace known results with
-        # "not known" under an "ok" (Fable's pre-review of 8152df0).
-        raise FetchError("too-heavy")
+    # No guard on reads cut short (lite): a lite read keeps reviews, and leaves files and checks
+    # "not known", which raises an alert, so it is never greener than GitHub. Rejecting such a
+    # refresh let two huge pull requests from anyone stall every repository (audit of 28009de).
     if len(details) > 1 and not readable:
         # Every pull request unreadable is no per-PR problem: fail, keeping the last good
         # snapshot, rather than replace it with nothing but unreadable entries (7faf35a).

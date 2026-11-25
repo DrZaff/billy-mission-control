@@ -1511,7 +1511,7 @@ class CodexReviewOf0e2139f(unittest.TestCase):
         )
         s = derive(value)
         self.assertNotIn(Flag.CLINICIAN_APPROVED, s.flags)
-        self.assertIn(Flag.REVIEWS_UNVERIFIED, s.flags)
+        self.assertIn(Flag.DISMISSAL_UNPLACED, s.flags)
         self.assertTrue(s.needs_attention)
         # Without the approval it is certain: a dismissed review is never an approval.
         value["pull_request"]["reviews"] = reviews[:1]
@@ -1569,3 +1569,26 @@ class AuditOf42a3721(unittest.TestCase):
         value = task(runs=None, clinical_paths=[], pull_request=dict(pr(), files=None))
         s = derive(value)
         self.assertNotIn(Flag.FILES_UNVERIFIED, s.flags)
+
+
+class AuditOf28009de(unittest.TestCase):
+    def test_a_later_approval_of_another_commit_never_masks_a_dismissal_of_the_head(self):
+        value = task(
+            clinicians=[CLINICIAN, "clinician-two"],
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(
+                state="closed",
+                merged=True,
+                merged_by=OWNER,
+                merged_at=t(30),
+                files=("evidence/a.json",),
+                reviews=[
+                    approval("clinician-two", minute=4),
+                    approval(state="DISMISSED", minute=7),
+                    approval(sha=B, minute=8),
+                ],
+            ),
+        )
+        s = derive(value)
+        self.assertNotIn(Flag.CLINICIAN_APPROVED, s.flags)
+        self.assertIn(Flag.DISMISSAL_UNPLACED, s.flags)
