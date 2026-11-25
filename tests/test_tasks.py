@@ -370,7 +370,11 @@ class Merges(unittest.TestCase):
         self.assertIn(Flag.UNAUTHORIZED_WORK, s.flags)
 
     def test_removing_the_label_after_the_merge_withdraws_nothing(self):
-        timeline = [labeled(minute=0), labeled(minute=30, kind="unlabeled")]
+        timeline = [
+            labeled(minute=0),
+            {"event": "closed", "actor": OWNER, "at": t(20), "closer_pr": 12},
+            labeled(minute=30, kind="unlabeled"),
+        ]
         done = task(
             issue={"number": 7, "state": "closed", "timeline": timeline},
             runs=[run("build"), passed(), published()],
@@ -467,13 +471,25 @@ class Merges(unittest.TestCase):
         # AWAITING_OWNER, beside an alert saying the issue was closed.
         ready = task(runs=[run("build"), passed(), published()], pull_request=pr())
         self.assertEqual(derive(ready).state, State.AWAITING_OWNER)
+        # Closed after the authorisation: withdrawn, as removing the label would be (Fable's
+        # audit of ca7faa9: one rule for an open PR and its merge).
         closed = copy.deepcopy(ready)
         closed["issue"]["state"] = "closed"
+        closed["issue"]["timeline"].append({"event": "closed", "actor": OWNER, "at": t(1)})
+        s = derive(closed)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
+        self.assertIn(Flag.ISSUE_CLOSED_PR_OPEN, s.flags)
+        self.assertTrue(s.needs_attention)
+        # Authorised after its closing: not on the way to a merge until it is reopened.
+        closed["issue"]["timeline"].append({"event": "authorized", "actor": OWNER, "at": t(1)})
+        closed["issue"]["timeline"][1]["at"] = t(0)
         s = derive(closed)
         self.assertEqual(s.state, State.NOT_LINKED)
         self.assertIn(Flag.ISSUE_CLOSED_PR_OPEN, s.flags)
         self.assertIn(Flag.CHECKS_PASSED, s.flags)  # GitHub's own results are still shown
         self.assertTrue(s.needs_attention)
+        self.assertIn("reopen it to go on", s.reasons[0])
 
     def test_a_fork_pr_is_never_credited_with_billys_records(self):
         # Codex's review of 9dbb868 (blocking): a fork PR reached AWAITING_OWNER.
@@ -1750,16 +1766,17 @@ class CodexReviewOfCae7658(unittest.TestCase):
         self.assertEqual(self.merged(self.closed(20, closer_pr=12)).state, State.MERGED)
         self.assertEqual(self.merged(self.closed(21)).state, State.MERGED)  # after: nothing
 
-    def test_any_other_closing_in_the_merges_second_counts(self):
-        for closing in (self.closed(20), self.closed(20, closer_pr=99)):
+    def test_any_other_closing_in_the_merges_second_is_never_calm(self):
+        # It may have come first: not placed, so not known (an alert), and never claimed as a
+        # withdrawal either (Fable's audit of ca7faa9).
+        bare = self.closed(20)
+        del bare["closer_pr"]  # as data from before closer_pr
+        for closing in (self.closed(20), self.closed(20, closer_pr=99), bare):
             with self.subTest(closing=closing):
                 s = self.merged(closing)
-                self.assertEqual(s.state, State.UNSAFE)
-                self.assertIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
-        # Without the key at all, as data from before closer_pr: the same.
-        closing = self.closed(20)
-        del closing["closer_pr"]
-        self.assertEqual(self.merged(closing).state, State.UNSAFE)
+                self.assertEqual(s.state, State.UNKNOWN)
+                self.assertIn(Flag.CLOSURE_UNPLACED, s.flags)
+                self.assertNotIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
 
     def test_closer_pr_must_be_a_number_or_null(self):
         for bad in ("12", True, 1.5):
@@ -1910,8 +1927,14 @@ class FableAuditOfFe4d72d(unittest.TestCase):
         # A removal within the merge's second, after it by a fraction, may have come first.
         late = {**labeled(kind="unlabeled"), "at": "2026-01-01T10:20:00.400000+00:00"}
         self.assertEqual(self.merged([late], issue_state="open").state, State.UNSAFE)
+        # A closing in that second, not by the merged PR: can't be placed.
         closing = self.closed(0, at="2026-01-01T10:20:00.400000+00:00")
-        self.assertEqual(self.merged([closing]).state, State.UNSAFE)
+        self.assertEqual(self.merged([closing]).state, State.UNKNOWN)
+        # A closing at 10:19:59.9 is before the merge's second: a withdrawal.
+        closing = self.closed(0, at="2026-01-01T10:19:59.900000+00:00")
+        s = self.merged([closing])
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
 
     def test_a_passing_review_is_still_shown_on_an_unsafe_merge(self):
         s = self.merged([], issue_state="open", merged_by="someone-else")
@@ -1936,14 +1959,26 @@ class FableAuditOfFe4d72d(unittest.TestCase):
                 self.assertEqual(Flag.AUTHORIZATION_WITHDRAWN in s.flags, withdrawn)
                 self.assertNotIn("reopen", " ".join(s.reasons))
 
-    def test_an_open_pr_is_judged_on_the_issues_current_state(self):
-        # Closings in the timeline of an issue that is open now end nothing for an open PR.
-        timeline = [labeled(), {"event": "closed", "actor": OWNER, "at": t(1)}]
-        s = derive(
-            reviewed_and_published()
-            | {"clinical_paths": [], "issue": {"number": 7, "state": "open", "timeline": timeline}}
-        )
-        self.assertEqual(s.state, State.AWAITING_OWNER)
+    def test_an_open_pr_and_its_merge_read_one_history_alike(self):
+        # Fable's audit of ca7faa9 (blocking): closed and reopened, an open PR showed as ready
+        # while its merge would be unsafe. Now both are withdrawn, until authorised again.
+        closing = {"event": "closed", "actor": OWNER, "at": t(1)}
+        reopening = {"event": "reopened", "actor": OWNER, "at": t(1)}
+        issue = {"number": 7, "state": "open", "timeline": [labeled(), closing, reopening]}
+        base = reviewed_and_published() | {"clinical_paths": [], "issue": issue}
+        s = derive(base)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
+        merged = copy.deepcopy(base)
+        merged["pull_request"].update(state="closed", merged=True, merged_by=OWNER, merged_at=t(20))
+        self.assertEqual(derive(merged).state, State.UNSAFE)
+        # Authorised again after the reopening: ready, and its merge is merged.
+        again = {"event": "authorized", "actor": OWNER, "at": t(1)}
+        for value in (base, merged):
+            value["issue"]["timeline"] = [labeled(), closing, reopening, dict(again)]
+            value["issue"]["timeline"][1]["at"] = value["issue"]["timeline"][2]["at"] = t(0)
+        self.assertEqual(derive(base).state, State.AWAITING_OWNER)
+        self.assertEqual(derive(merged).state, State.MERGED)
 
     def test_unread_checks_on_an_open_pr_are_an_alert(self):
         s = derive(task(runs=None, pull_request=pr(checks=None) | {"checks": None}))
@@ -1968,3 +2003,117 @@ class FableAuditOfFe4d72d(unittest.TestCase):
         )
         self.assertEqual(s.state, State.MERGED)
         self.assertIn(Flag.CLINICIAN_APPROVED, s.flags)
+
+
+class FableAuditOfCa7faa9(unittest.TestCase):
+    def merged(self, timeline, issue_state="open", **over):
+        value = task(
+            issue={"number": 7, "state": issue_state, "timeline": [labeled(), *timeline]},
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(state="closed", merged=True, merged_by=OWNER, merged_at=t(20)),
+        )
+        value.update(over)
+        return derive(value)
+
+    def ev(self, kind, minute, **extra):
+        return {"event": kind, "actor": OWNER, "at": t(minute), **extra}
+
+    def test_closings_that_dont_alternate_are_never_calm(self):
+        for name, timeline, state in (
+            ("a reopening with no closing", [self.ev("reopened", 10)], "open"),
+            ("a reopening after the merge", [self.ev("reopened", 25)], "open"),
+            (
+                "closed twice",
+                [self.ev("closed", 21), self.ev("closed", 22, closer_pr=12)],
+                "closed",
+            ),
+            (
+                "reopened, then GitHub's closing",
+                [self.ev("reopened", 10), self.ev("closed", 20, closer_pr=12)],
+                "closed",
+            ),
+        ):
+            with self.subTest(name):
+                s = self.merged(timeline, issue_state=state)
+                self.assertEqual(s.state, State.UNKNOWN)
+                self.assertIn(Flag.CLOSURE_UNPLACED, s.flags)
+                self.assertTrue(s.needs_attention)
+
+    def test_an_open_pr_on_a_history_that_doesnt_add_up_is_never_ready(self):
+        value = reviewed_and_published() | {"clinical_paths": []}
+        value["issue"] = {
+            "number": 7,
+            "state": "open",
+            "timeline": [labeled(), self.ev("reopened", 1)],
+        }
+        s = derive(value)
+        self.assertEqual(s.state, State.UNKNOWN)
+        self.assertIn(Flag.CLOSURE_UNPLACED, s.flags)
+        self.assertIn("Authorise again", s.reasons[0])
+
+    def test_a_closing_and_an_authorisation_in_one_second_withdraw(self):
+        # Within one second a closing sorts after an authorisation, whatever the input order.
+        value = reviewed_and_published() | {"clinical_paths": []}
+        value["issue"] = {
+            "number": 7,
+            "state": "closed",
+            "timeline": [self.ev("closed", 0), labeled()],
+        }
+        s = derive(value)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.UNAUTHORIZED_WORK, s.flags)
+
+    def test_every_time_is_read_to_the_second(self):
+        # A failing review 0.3 s into the merge's own second is in that second.
+        late_fail = failed(minute=0) | {"at": "2026-01-01T10:20:00.300000+00:00"}
+        s = self.merged(
+            [self.ev("closed", 20, closer_pr=12)],
+            issue_state="closed",
+            runs=[run("build"), passed(), late_fail, published()],
+        )
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn("reviews disagree", " ".join(s.reasons))
+        # A clinician's changes request then bounds the approval: not known, never approved.
+        s = self.merged(
+            [self.ev("closed", 20, closer_pr=12)],
+            issue_state="closed",
+            pull_request=pr(
+                state="closed",
+                merged=True,
+                merged_by=OWNER,
+                merged_at="2026-01-01T10:20:00.000000+00:00",
+                files=("evidence/a.json",),
+                reviews=(
+                    approval(minute=10),
+                    approval(state="CHANGES_REQUESTED") | {"at": "2026-01-01T10:20:00.300+00:00"},
+                ),
+            ),
+        )
+        self.assertNotIn(Flag.CLINICIAN_APPROVED, s.flags)
+
+    def test_a_closed_issue_still_shows_a_passing_review(self):
+        value = task(
+            issue={
+                "number": 7,
+                "state": "closed",
+                "timeline": [
+                    self.ev("closed", 0),
+                    {**labeled(), "event": "authorized", "at": t(1)},
+                ],
+            },
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(),
+        )
+        s = derive(value)
+        self.assertEqual(s.state, State.NOT_LINKED)
+        self.assertEqual(s.reviewed_sha, A)
+
+    def test_times_are_whole_seconds_in_utc(self):
+        # Even with an offset that has a fraction of a second, the second is the UTC one.
+        from datetime import UTC, datetime
+
+        from mission_control.tasks import _time
+
+        at = _time("2026-01-01T10:20:00.200000+00:00:00.500000", "at")
+        self.assertEqual(at, datetime(2026, 1, 1, 10, 19, 59, tzinfo=UTC))
+        self.assertEqual((at.microsecond, at.utcoffset().total_seconds()), (0, 0))

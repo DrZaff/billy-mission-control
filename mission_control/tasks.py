@@ -33,14 +33,15 @@ clinical_paths may be an explicit empty list.
     event         {"event": "labeled" | "unlabeled" | "authorized" | "closed" | "reopened" |
                    <other>, "label": str, "actor": "login", "at": "ISO 8601 with a time zone"}
                    Only "labeled agent:ready" or "authorized" (an approved-action record, such as
-                   the owner's direct instruction) by the owner authorise work. For a merge,
-                   "closed" by then ends the authorisation as "unlabeled" does, and "reopened"
-                   restores nothing (only a new authorisation does). A "closed" event may carry
-                   "closer_pr": the number of the pull request in the task's repository that
-                   closed it (GitHub's closer), or null; in the merge's own second only a
-                   closing by the merged PR itself is taken as coming with the merge. If the
-                   closings and reopenings disagree with the issue's state, a merge's
-                   authorisation is not known (CLOSURE_UNPLACED). Times count to the second.
+                   the owner's direct instruction) by the owner authorise work. "closed" ends
+                   the authorisation as "unlabeled" does, for an open PR and a merge alike, and
+                   "reopened" restores nothing (only a new authorisation does). A "closed"
+                   event may carry "closer_pr": the number of the pull request in the task's
+                   repository that closed it (GitHub's closer), or null. Closings and
+                   reopenings must alternate from open and end on the issue's state, and one in
+                   the merge's own second must be by the merged PR itself; otherwise the
+                   authorisation is not known (CLOSURE_UNPLACED, UNKNOWN). Every time is read to
+                   the second, GitHub's resolution.
                    Anything else, including the label's mere presence and every comment body, is
                    ignored.
                    A labeled or unlabeled event must name its label.
@@ -107,7 +108,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from fnmatch import fnmatchcase
 from typing import Any
@@ -179,8 +180,9 @@ class Flag(StrEnum):
     # A merge's clinician approval can't be judged: a clinician's review was dismissed, and
     # GitHub doesn't say when (before or after the merge). The reviews were read.
     DISMISSAL_UNPLACED = "dismissal_unplaced"
-    # A merge's authorisation can't be judged: the issue's closings and reopenings disagree with
-    # its current state, so when it was closed (before the merge or not) isn't known.
+    # The authorisation can't be judged: the issue's closings and reopenings don't alternate,
+    # don't end on its current state, or one falls in the merge's own second and isn't GitHub's
+    # (by the merged PR), so whether it was closed while authorised isn't known.
     CLOSURE_UNPLACED = "closure_unplaced"
     UNAUTHORIZED_MERGE = "unauthorized_merge"  # merged by someone other than the owner
     MERGED_UNREVIEWED = "merged_unreviewed"  # the merged commit never passed review
@@ -322,7 +324,9 @@ def _time(value: Any, name: str) -> datetime:
     except ValueError:
         raise InvalidInput(f"{name} must be an ISO 8601 time") from None
     _req(parsed.tzinfo is not None, f"{name} must include a time zone")
-    return parsed
+    # To GitHub's resolution, the second, so every comparison (records, reviews, events and
+    # the merge) treats one second alike (Fable's audit of ca7faa9).
+    return parsed.astimezone(UTC).replace(microsecond=0)
 
 
 def _choice(value: Any, allowed, name: str) -> str:
@@ -695,56 +699,55 @@ def _authorization(
     withdraws it; an add and a removal at the same instant count as withdrawn. With `until`
     (a merge), later events are ignored: they can't authorise or withdraw what is done.
 
-    For a merge, closing the issue before it, by anyone, ends the authorisation exactly as
-    removing the label does, and reopening restores nothing: only the owner authorising again
-    does (Codex's reviews of cae7658 and 4f8c1e9). In the merge's own second, only GitHub's
-    closing by this very PR (closer_pr) is known to come with the merge; any other closing then
-    may have come first, so it counts. Times are compared to the second, GitHub's resolution.
-    (An open PR is judged on the issue's current state.)"""
+    Closing the issue ends the authorisation exactly as removing the label does, for an open
+    PR and a merge alike, and reopening restores nothing: only the owner authorising again
+    does (Codex's reviews of cae7658 and 4f8c1e9; Fable's audit of ca7faa9: one rule for both,
+    so an open PR is never merge-ready on a history that makes its merge unsafe). A closing in
+    the merge's own second is not placed here: see _closure_unplaced."""
     since: datetime | None = None
     last: datetime | None = None
     withdrawn = False  # an authorisation existed and was removed
-    end = _second(until) if until is not None else None
     # Within one second a removal (an unlabel or a closing) sorts last, so it wins over an add
-    # or an authorisation: doubt resolves toward caution.
+    # or an authorisation: doubt resolves toward caution. (Times are whole seconds.)
     removal = ("unlabeled", "closed")
-    for e in sorted(task.timeline, key=lambda e: (_second(e.at), e.kind in removal)):
-        at = _second(e.at)
-        if end is not None and at > end:
+    for e in sorted(task.timeline, key=lambda e: (e.at, e.kind in removal)):
+        if until is not None and e.at > until:
             break
         ready = e.label == READY_LABEL
         if e.kind == "labeled" and ready and e.actor != task.owner:
             flags.add(Flag.LABEL_WITHOUT_OWNER)
         elif (e.kind == "labeled" and ready) or (e.kind == "authorized" and e.actor == task.owner):
-            if at == end:
+            if e.at == until:
                 # In the merge's own second it may have come just after the merge: it never
                 # authorises it (audit of ad78f34).
                 continue
             since = e.at if since is None else since
             last = e.at
-        elif (e.kind == "unlabeled" and ready) or (
-            end is not None
-            and e.kind == "closed"
-            and not (at == end and task.pr is not None and e.closer_pr == task.pr.number)
-        ):
+        elif (e.kind == "unlabeled" and ready) or (e.kind == "closed" and e.at != until):
             withdrawn = withdrawn or since is not None
             since = last = None
     return since, last, withdrawn and since is None
 
 
-def _second(at: datetime) -> datetime:
-    """A time to GitHub's resolution: the second."""
-    return at.replace(microsecond=0)
-
-
-def _closure_unplaced(task: _Task) -> bool:
-    """Whether the issue's closings and reopenings disagree with its current state: closed with
-    no closing on record, or open with a closing as the last word. Then when it was closed, so
-    whether before a merge, isn't known (Fable's audit of fe4d72d)."""
-    marks = [e for e in task.timeline if e.kind in ("closed", "reopened")]
-    last = max(marks, key=lambda e: (_second(e.at), e.kind == "closed"), default=None)
-    closed_on_record = last is not None and last.kind == "closed"
-    return closed_on_record == task.issue_open
+def _closure_unplaced(task: _Task, until: datetime | None) -> bool:
+    """Whether the issue's closings and reopenings can't be placed, so whether it was closed
+    while authorised (or before the merge) isn't known (Fable's audits of fe4d72d and ca7faa9).
+    Walked in time order from open, they must alternate (a reopening needs a closing before
+    it) and end on the issue's current state; and a closing in the merge's own second must be
+    GitHub's, by the merged PR itself (closer_pr), or it may have come first."""
+    state = "open"
+    for e in sorted(task.timeline, key=lambda e: e.at):
+        if e.kind == "closed":
+            if state == "closed":
+                return True  # closed twice: a reopening is missing
+            if e.at == until and (task.pr is None or e.closer_pr != task.pr.number):
+                return True
+            state = "closed"
+        elif e.kind == "reopened":
+            if state == "open":
+                return True  # reopened with no closing on record
+            state = "open"
+    return (state == "open") != task.issue_open
 
 
 def _checks(task: _Task, head: str, flags: set[Flag]) -> bool:
@@ -921,6 +924,10 @@ def derive(raw: Any) -> TaskStatus:
         runs = []
 
     since, last_owner_action, withdrawn = _authorization(task, flags, merged_at)
+    # The issue's closings don't add up: whether it was closed while authorised isn't known.
+    unplaced = task.issue_known and _closure_unplaced(task, merged_at)
+    if unplaced:
+        flags.add(Flag.CLOSURE_UNPLACED)
     if pr and pr.from_fork:
         flags.add(Flag.FROM_FORK)
     if not task.issue_known:
@@ -1025,14 +1032,6 @@ def derive(raw: Any) -> TaskStatus:
         elif since is None and task.issue_known:
             flags.add(Flag.UNAUTHORIZED_WORK)
             problems.append("the work was never authorised by the owner")
-        elif task.issue_known and _closure_unplaced(task):
-            # The issue's state and its closings disagree: it may have been closed before the
-            # merge, so the authorisation isn't known (Fable's audit of fe4d72d). Never calm.
-            flags.add(Flag.CLOSURE_UNPLACED)
-            reasons.append(
-                "The issue's closing can't be placed against the merge, so your authorisation "
-                "of it isn't known."
-            )
         # Checks are never judged after a merge: results carry no time, so a later run could
         # rewrite the verdict either way (Fable's review of 0cf099c; owner's decision,
         # 2026-11-25). The Checks row says they aren't judged and claims nothing GitHub enforced
@@ -1042,6 +1041,16 @@ def derive(raw: Any) -> TaskStatus:
             return status(
                 State.UNSAFE,
                 "Merged, but " + "; ".join(problems) + ".",
+                pr.head,
+                pr.head if reviewed and runs_known else None,
+            )
+        if unplaced:
+            # It may have been closed before the merge: never calm (Fable's audits of fe4d72d
+            # and ca7faa9).
+            return status(
+                State.UNKNOWN,
+                "Merged, but the issue's closings can't be placed against the merge, so your "
+                "authorisation of it isn't known.",
                 pr.head,
                 pr.head if reviewed and runs_known else None,
             )
@@ -1109,14 +1118,24 @@ def derive(raw: Any) -> TaskStatus:
                 head,
             )
 
+    if unplaced and since is not None:
+        # Never merge-ready on a history whose closings can't be placed (Fable's audit of
+        # ca7faa9).
+        return status(
+            State.UNKNOWN,
+            "The issue's closings and reopenings don't add up, so whether your authorisation "
+            "still stands isn't known. Authorise again (agent:ready) if it should.",
+            head,
+        )
     if issue_closed and since is not None:
-        # Only while an authorisation is in effect does reopening let it go on; otherwise it is
-        # unauthorised work, below, as with the issue open (Fable's audit of fe4d72d).
+        # Authorised after its closing (a closing ends any authorisation before it): reopening
+        # lets it go on. Otherwise it is unauthorised work, below (Fable's audit of fe4d72d).
         return status(
             State.NOT_LINKED,
-            "Its linked issue is closed, which ends your authorisation: reopen the issue to go "
-            "on, or close the pull request.",
+            "Its linked issue is closed: reopen it to go on, or close the pull request.",
             head,
+            # A passing review of its head is still shown (Fable's audit of ca7faa9).
+            head if runs_known and verdicts.get(head) == {"pass"} else None,
         )
     if pr and pr.open and pr.from_fork:
         # Never on the way to a merge: GitHub's own results are shown, and the owner decides
@@ -1144,7 +1163,8 @@ def derive(raw: Any) -> TaskStatus:
                 flags.add(Flag.AUTHORIZATION_WITHDRAWN)
                 return status(
                     State.UNSAFE,
-                    "Work exists, but your authorisation was withdrawn (agent:ready removed).",
+                    "Work exists, but your authorisation was withdrawn (agent:ready removed, or "
+                    "the issue closed).",
                     head,
                 )
             return status(

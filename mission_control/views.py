@@ -32,7 +32,7 @@ STATE_WORDS = {
     State.UNSAFE: "UNSAFE: do not approve",
     State.UNKNOWN: "Unknown: the data can't be trusted",
     # Also a fork PR, linked or not (Fable's audit of fe4d72d): the header claims no link.
-    State.NOT_LINKED: "Not on Billy's path: decide on GitHub",
+    State.NOT_LINKED: "Not on Billy's path now (see why)",
 }
 
 FLAG_WORDS = {
@@ -62,12 +62,12 @@ FLAG_WORDS = {
         " say when, or in the merge's own second): approval not known"
     ),
     Flag.CLOSURE_UNPLACED: (
-        "The issue's closing can't be placed against the merge: your authorisation of it isn't"
-        " known"
+        "The issue's closings and reopenings don't add up: whether your authorisation stands"
+        " isn't known"
     ),
     Flag.AUTHORIZATION_WITHDRAWN: (
-        "You authorised this task, then that was withdrawn (agent:ready removed, or for a merge"
-        " the issue closed by then)"
+        "You authorised this task, then that was withdrawn (agent:ready removed, or the issue"
+        " closed)"
     ),
     Flag.AUTHORIZATION_UNVERIFIED: "Your authorisation of this merge can't be verified here",
     Flag.UNAUTHORIZED_MERGE: "Merged by someone other than you",
@@ -306,11 +306,14 @@ def _path(entry: Entry) -> str:
     # Each row claims only what the model established. A "done" mark needs a state the model
     # reaches only after that gate passed; anything else says "not shown" rather than guess.
     if Flag.AUTHORIZATION_WITHDRAWN in flags and st.merged:
-        authorised = ("!", "withdrawn by the merge: agent:ready removed or the issue closed")
+        authorised = (
+            "!",
+            "withdrawn by the time of the merge: agent:ready removed or the issue closed",
+        )
     elif Flag.AUTHORIZATION_WITHDRAWN in flags:
-        authorised = ("!", "withdrawn: agent:ready removed")  # an open PR: the label only
+        authorised = ("!", "withdrawn: agent:ready removed or the issue closed")
     elif Flag.CLOSURE_UNPLACED in flags:
-        authorised = ("?", "not known: the issue's closing can't be placed against the merge")
+        authorised = ("?", "not known: the issue's closings and reopenings don't add up")
     elif Flag.UNAUTHORIZED_WORK in flags:
         authorised = ("!", "no")
     elif state is State.PROPOSED:
@@ -417,6 +420,8 @@ def _path(entry: Entry) -> str:
     # an unsafe, closed, unlinked or unknown one (Fable's review of 0cf099c).
     if state is State.MERGED:
         rows.append(("done", "Owner", "merged"))
+    elif st.merged and state is State.UNKNOWN:
+        rows.append(("?", "Owner", "merged; whether it was safe isn't known (see why)"))
     elif st.merged:
         rows.append(("!", "Owner", "merged unsafely; see the reasons"))
     elif state is State.UNSAFE:
@@ -424,7 +429,7 @@ def _path(entry: Entry) -> str:
     elif state is State.CLOSED:
         rows.append(("-", "Owner", "nothing to merge: closed"))
     elif state is State.NOT_LINKED:
-        rows.append(("-", "Owner", "not on Billy's path: decide on GitHub"))
+        rows.append(("-", "Owner", "not on Billy's path now: see why above"))
     elif state is State.UNKNOWN:
         rows.append(("?", "Owner", "not shown: the data can't be trusted"))
     elif state is State.AWAITING_OWNER and Flag.FIX_ROUNDS_EXHAUSTED in flags:
