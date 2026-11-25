@@ -50,12 +50,16 @@ Transport = Callable[[str, str, dict[str, str], bytes | None], Response]
 class FetchError(Exception):
     """A refused or failed refresh. `code` is short and safe to log or show."""
 
-    def __init__(self, code: str, paths: tuple = ()):
+    def __init__(self, code: str, paths: tuple = (), data: dict | None = None):
         super().__init__(code)
         self.code = code
         # For a GraphQL error: where in the answer each error is, as GitHub says (each a
         # tuple, or None when an error names no place). Never shown or logged.
         self.paths = paths
+        # For a GraphQL error: the partial answer GitHub gave with it, if any. GitHub sets a
+        # field it couldn't read to null, so the caller may use only what no error's place
+        # touches (Codex's review of c3ee86b). Never shown or logged.
+        self.data = data
 
 
 def tls_context() -> ssl.SSLContext:
@@ -221,10 +225,13 @@ class GitHub:
         answer = self.call("POST", "/graphql", token, {"query": query, "variables": variables})
         if not isinstance(answer, dict):
             raise FetchError("bad-response")
-        errors = answer.get("errors")
+        # A present `errors` that isn't a list is a bad answer, whatever its truth value: an
+        # empty object, an empty string or false was read as "no errors" (Codex's review of
+        # c3ee86b). Only an empty list is.
+        errors = answer.get("errors", [])
+        if not isinstance(errors, list):
+            raise FetchError("bad-response")
         if errors:
-            if not isinstance(errors, list):
-                raise FetchError("bad-response")
             # Only plain text types: anything else is ignored rather than raising (Codex's
             # review of 7faf35a: a list or object type raised TypeError).
             kinds = {
@@ -244,7 +251,10 @@ class GitHub:
                 else None
                 for e in errors
             )
-            raise FetchError("graphql-error", paths)
+            # The partial answer goes with the error, never in its place: a caller that
+            # doesn't look at the places gets no data at all (Codex's review of c3ee86b).
+            data = answer.get("data")
+            raise FetchError("graphql-error", paths, data if isinstance(data, dict) else None)
         data = answer.get("data")
         if not isinstance(data, dict):
             raise FetchError("bad-response")

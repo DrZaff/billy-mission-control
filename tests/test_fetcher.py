@@ -785,6 +785,175 @@ class Refresh(Base):
             snapshot.refresh(self.cfg, github, NOW)
         self.assertEqual(caught.exception.code, "bad-response")
 
+    def with_field_errors(self, errors_for, extra=()):
+        """A GitHub whose detail answers are partial, as GitHub's are: each field named in
+        `errors_for` (number -> fields) is null, with an error whose path locates it."""
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number:" in body:
+                answer = json.loads(data)
+                errors = list(extra)
+                for alias, node in answer["data"]["repository"].items():
+                    for field in errors_for.get(node["number"], ()):
+                        if field in node:  # the lite query doesn't ask for every field
+                            node[field] = None
+                            errors.append(
+                                {
+                                    "type": "SERVICE_UNAVAILABLE",
+                                    "path": ["repository", alias, field],
+                                }
+                            )
+                if errors:
+                    answer["errors"] = errors
+                    data = json.dumps(answer).encode()
+            return status, h, data
+
+        return gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+
+    def test_an_error_on_an_optional_field_never_hides_a_known_unsafe_merge(self):
+        # Codex's review of c3ee86b (blocking): a GraphQL error on one optional field threw
+        # away the whole partial answer, so a merge by someone else showed as UNKNOWN.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
+        node["mergedBy"] = {"login": "someone-else"}
+        self.fake.prs[REPO_A]["open"] = [pr_node(2)]
+        self.fake.prs[REPO_A]["closed"] = [node]
+        for field in ("closingIssuesReferences", "files", "reviews", "title", "headRefName"):
+            with self.subTest(field=field):
+                github = self.with_field_errors({1: [field]})
+                item = next(
+                    i for i in snapshot.refresh(self.cfg, github, NOW)["items"] if i["number"] == 1
+                )
+                state = tasks.derive(self.task_of(item))
+                self.assertEqual(state.state, tasks.State.UNSAFE)
+                self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, state.flags)
+
+    def test_a_field_github_nulled_for_an_error_is_never_read_as_clean(self):
+        # Codex's review of c3ee86b: GitHub sets the errored field to null. Null must mean
+        # "not known", never no files, no result on the test merge commit or no linked issue.
+        self.fake.prs[REPO_A]["open"] = [
+            pr_node(n, issue=issue_node(10), files=("evidence/a.json",), reviews=[review_node()])
+            for n in range(1, 6)
+        ]
+        github = self.with_field_errors(
+            {1: ["files"], 2: ["potentialMergeCommit"], 3: ["commits"], 4: ["reviews"]}
+        )
+        snap = snapshot.refresh(self.cfg, github, NOW)
+        pulls = {
+            i["number"]: i["task"]["pull_request"] for i in snap["items"] if i["repo"] == REPO_A
+        }
+        self.assertIsNone(pulls[1]["files"])  # not []
+        self.assertNotIn("files_complete", pulls[1])
+        self.assertIsNotNone(pulls[1]["reviews"])  # the rest is still read whole
+        self.assertIsNotNone(pulls[1]["checks"])
+        self.assertIsNone(pulls[2]["checks"])  # a null test merge commit isn't "no results"
+        self.assertIsNone(pulls[3]["checks"])
+        self.assertIsNone(pulls[4]["reviews"])
+        self.assertEqual(pulls[4]["files"], ["evidence/a.json"])
+        self.assertEqual(pulls[5]["files"], ["evidence/a.json"])  # untouched
+        self.assertEqual(len(pulls[5]["checks"]), 2)
+        by_number = {i["number"]: i for i in snap["items"] if i["repo"] == REPO_A}
+        flags = {n: tasks.derive(self.task_of(by_number[n])).flags for n in by_number}
+        self.assertIn(tasks.Flag.FILES_UNVERIFIED, flags[1])
+        self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, flags[2])
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags[2])
+        self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, flags[3])
+        self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, flags[4])
+        # One answer was enough: nothing was split or read again.
+        details = [q for q in self.fake.queries if "pullRequest(number: 1)" in q]
+        self.assertEqual(len(details), 1)
+
+    def test_an_errored_issue_link_gives_no_issue(self):
+        # Codex's review of c3ee86b: the link is "not known" (null), and nothing is shown.
+        self.fake.prs[REPO_A]["open"] = [pr_node(1, issue=issue_node(10)), pr_node(2)]
+        github = self.with_field_errors({1: ["closingIssuesReferences"]})
+        item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
+        self.assertIsNone(item["task"]["issue"])
+        self.assertIsNone(item["issue"])
+        self.assertEqual(item["task"]["pull_request"]["files"], ["site/a.html"])
+        self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.NOT_LINKED)
+
+    def test_an_error_on_a_core_field_makes_only_that_pr_unreadable(self):
+        # Codex's review of c3ee86b: who merged it can't be judged from a null GitHub put
+        # there for an error.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        for field in ("mergedBy", "merged", "state", "headRefOid", "mergedAt", "closedAt"):
+            with self.subTest(field=field):
+                self.fake.prs[REPO_A]["open"] = [pr_node(2)]
+                self.fake.prs[REPO_A]["closed"] = [
+                    pr_node(1, state="MERGED", merged=True, closed_at=recent)
+                ]
+                github = self.with_field_errors({1: [field]})
+                items = snapshot.refresh(self.cfg, github, NOW)["items"]
+                by_number = {i["number"]: i for i in items if i["repo"] == REPO_A}
+                self.assertIsNone(by_number[1]["task"])  # UNKNOWN, an alert
+                self.assertIsNotNone(by_number[2]["task"])
+
+    def test_partial_data_with_an_error_outside_the_pull_requests_fails_the_refresh(self):
+        # Codex's review of c3ee86b: partial data is used only when every error is inside a
+        # pull request that was asked for.
+        for path in (None, ["repository"], ["repository", "p9", "files"], ["rateLimit"], "p0"):
+            with self.subTest(path=path):
+                error = {"type": "FORBIDDEN"} if path is None else {"type": "X", "path": path}
+                github = self.with_field_errors({1: ["files"]}, extra=[error])
+                with self.assertRaises(gh.FetchError) as caught:
+                    snapshot.refresh(self.cfg, github, NOW)
+                self.assertEqual(caught.exception.code, "graphql-error")
+
+    def test_graphql_never_returns_partial_data_as_if_it_were_whole(self):
+        # Codex's review of c3ee86b: the partial answer travels with the error only.
+        answer = {
+            "data": {"repository": {"p0": {"files": None}}},
+            "errors": [{"type": "X", "path": ["repository", "p0", "files"]}],
+        }
+        fake = lambda *a: (200, {}, json.dumps(answer).encode())  # noqa: E731
+        github = gh.GitHub(APP_ID, KEY, transport=fake, clock=lambda: NOW.timestamp())
+        with self.assertRaises(gh.FetchError) as caught:
+            github.graphql(TOKEN, "query { x }", {})
+        self.assertEqual(caught.exception.code, "graphql-error")
+        self.assertEqual(caught.exception.paths, (("repository", "p0", "files"),))
+        self.assertEqual(caught.exception.data, answer["data"])
+
+    def test_prs_that_all_fail_validation_never_replace_the_snapshot(self):
+        # Codex's review of c3ee86b (blocking): the all-unreadable guard looked at GitHub's
+        # answer before the items were built, so pull requests that were all there but all
+        # wrongly shaped passed it, and the refresh reported success.
+        self.fake.prs[REPO_A]["open"] = [pr_node(1, head="not-a-sha"), pr_node(2, head="nor-this")]
+        with self.assertRaises(gh.FetchError) as caught:
+            self.run_refresh()
+        self.assertEqual(caught.exception.code, "bad-response")
+        self.assertEqual(self.fake.revoked, 1)
+        # One unreadable pull request among readable ones is still only that one.
+        self.fake.prs[REPO_A]["open"] = [pr_node(1, head="not-a-sha"), pr_node(2)]
+        items = self.run_refresh()["items"]
+        self.assertEqual([i["task"] is None for i in items], [True, False, False])
+
+    def test_core_errors_on_every_pr_never_replace_the_snapshot(self):
+        # Codex's review of c3ee86b: the same guard, when every pull request is unreadable
+        # because of GitHub's errors on fields it can't be judged without.
+        github = self.with_field_errors({1: ["state"], 2: ["merged"]})
+        with self.assertRaises(gh.FetchError) as caught:
+            snapshot.refresh(self.cfg, github, NOW)
+        self.assertEqual(caught.exception.code, "bad-response")
+
+    def test_an_errors_field_that_is_not_a_list_is_a_bad_response(self):
+        # Codex's review of c3ee86b: an empty object, an empty string or false was read as
+        # "no errors".
+        for errors in ({}, "", False, 0, None, {"a": 1}, "x"):
+            with self.subTest(errors=errors):
+                answer = {"data": {"repository": {}}, "errors": errors}
+                fake = lambda *a, answer=answer: (200, {}, json.dumps(answer).encode())  # noqa: E731
+                github = gh.GitHub(APP_ID, KEY, transport=fake, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.graphql(TOKEN, "query { x }", {})
+                self.assertEqual(caught.exception.code, "bad-response")
+        answer = {"data": {"repository": {}}, "errors": []}
+        fake = lambda *a: (200, {}, json.dumps(answer).encode())  # noqa: E731
+        github = gh.GitHub(APP_ID, KEY, transport=fake, clock=lambda: NOW.timestamp())
+        self.assertEqual(github.graphql(TOKEN, "query { x }", {}), {"repository": {}})
+
     def test_a_bad_issue_never_hides_a_known_unsafe_merge(self):
         # Codex's review of 7faf35a (blocking).
         recent = (NOW - timedelta(days=1)).isoformat()

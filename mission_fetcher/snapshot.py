@@ -120,6 +120,65 @@ def _its_own(error: FetchError, size: int) -> bool:
     )
 
 
+# The parts of a pull request the model can do without: each is "not known" (null) when it
+# can't be read, and the rest is still judged. Every other field is needed to judge the pull
+# request at all. When GitHub's error is on one of these, only that part is not known (Codex's
+# review of c3ee86b: the whole pull request became unreadable, hiding a known unsafe merge).
+OPTIONAL_FIELDS = {
+    "title",
+    "updatedAt",
+    "headRefName",
+    "closingIssuesReferences",
+    "potentialMergeCommit",
+    "files",
+    "reviews",
+    "commits",
+}
+
+
+class _Errored:
+    """Stands where GitHub reported an error: no shape check accepts it, so that part is "not
+    known". GitHub's own value there is null, which would read as none: no files, no result
+    on the test merge commit, no linked issue."""
+
+
+ERRORED = _Errored()
+
+
+def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
+    """The answer GitHub gave along with field errors, as [(number, node, lite)], or None when
+    it can't be used. Each error must be inside one of the pull requests asked for (_its_own).
+    One on an optional part marks that part ERRORED; one on anything else, or on the pull
+    request itself, makes that pull request UNREADABLE. GitHub nulls the nearest field that
+    may be null, at or above the error's place, so the whole part is distrusted, never only
+    the place named (Codex's review of c3ee86b)."""
+    if not _its_own(error, len(batch)) or error.code != "graphql-error":
+        return None
+    data = error.data
+    repository = data.get("repository") if isinstance(data, dict) else None
+    if not isinstance(repository, dict):
+        return None
+    marks: dict[str, set | None] = {}
+    for path in error.paths:
+        alias = path[1]
+        field = path[2] if len(path) > 2 else None
+        if isinstance(field, str) and field in OPTIONAL_FIELDS and marks.get(alias, ()) is not None:
+            marks.setdefault(alias, set()).add(field)
+        else:
+            marks[alias] = None  # the pull request itself, or a field it can't be judged without
+    out = []
+    for i, number in enumerate(batch):
+        alias = f"p{i}"
+        node = repository.get(alias)
+        fields = marks.get(alias, set())
+        if not isinstance(node, dict) or fields is None:
+            node = UNREADABLE
+        elif fields:
+            node = {**node, **dict.fromkeys(fields, ERRORED)}
+        out.append((number, node, lite))
+    return out
+
+
 _BASE_FIELDS = """
   number title state isDraft merged closedAt mergedAt
   mergedBy { login }
@@ -588,11 +647,17 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
     # shown (issue_screen).
     task["issue"] = None if merged else issue
     short = repo.split("/", 1)[1]
+    try:
+        title = _str(pr.get("title"), MAX_TITLE)
+    except _SHAPE:
+        # Only shown, never judged: a title that can't be read must not make the whole pull
+        # request unreadable and hide what is known about it (Codex's review of c3ee86b).
+        title = NO_TITLE
     return {
         "id": f"{short}-{number}",
         "repo": repo,
         "number": number,
-        "title": _str(pr.get("title"), MAX_TITLE),
+        "title": title,
         "url": f"https://github.com/{repo}/pull/{number}",
         "closed_at": None if pr.get("closedAt") is None else _time(pr.get("closedAt")),
         "linked_issues": linked,
@@ -632,7 +697,16 @@ def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[in
     answer didn't hold it whole."""
 
     def fetch(batch: list[int], lite: bool) -> list:
-        data = github.graphql(token, detail_query(batch, lite), {"owner": owner, "name": name})
+        try:
+            data = github.graphql(token, detail_query(batch, lite), {"owner": owner, "name": name})
+        except FetchError as error:
+            # Errors on some fields, with the rest of the answer: what GitHub did supply is
+            # still judged (Codex's review of c3ee86b). With no usable answer, the error
+            # stands and the batch is split as before.
+            partial = _partial(error, batch, lite)
+            if partial is None:
+                raise
+            return partial
         repository = _obj(_obj(data).get("repository"))
         # Missing or null: never silently dropped (Codex's review of 48929aa). It is shown as
         # unreadable; one deleted since the list is gone from the next refresh's list.
@@ -670,6 +744,7 @@ def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[in
 
 
 UNREADABLE = object()  # a pull request whose own data GitHub couldn't give whole
+NO_TITLE = "(this pull request's title couldn't be read)"
 
 
 def _unreadable(repo: str, number: int) -> dict:
@@ -697,10 +772,7 @@ def repo_items(repo: str, cfg: FetcherConfig, github: GitHub, token: str, now: d
     since = now - timedelta(days=RECENT_DAYS)
     items = []
     details = _details(github, token, owner, name, numbers)
-    if details and all(node is UNREADABLE for _, node, _ in details):
-        # Every pull request unreadable is no per-PR problem: fail, keeping the last good
-        # snapshot, rather than replace it with nothing but unreadable entries (7faf35a).
-        raise _bad()
+    readable = False
     for number, node, lite in details:
         try:
             if node is UNREADABLE:
@@ -713,10 +785,17 @@ def repo_items(repo: str, cfg: FetcherConfig, github: GitHub, token: str, now: d
             # fetcher's own (Codex's review of 48929aa: an unhashable review state raised
             # TypeError and failed the refresh for every repository).
             item = _unreadable(repo, number)
+        readable = readable or item["task"] is not None
         # A pull request closed between the list and its details still belongs here; one
         # closed before the window (possible only if the list was wrong) does not.
         if item["closed_at"] is None or datetime.fromisoformat(item["closed_at"]) >= since:
             items.append(item)
+    if details and not readable:
+        # Every pull request unreadable is no per-PR problem: fail, keeping the last good
+        # snapshot, rather than replace it with nothing but unreadable entries (7faf35a).
+        # Judged on the items as built, not on GitHub's answer: pull requests that were all
+        # there but all failed their checks here passed the guard (Codex's review of c3ee86b).
+        raise _bad()
     return items, more
 
 
