@@ -414,7 +414,8 @@ def _whole(conn: dict, nodes: list, cap: int) -> bool:
     nodes given, and within the cap."""
     total = conn.get("totalCount")
     good = isinstance(total, int) and not isinstance(total, bool) and total >= 0
-    return good and total <= len(nodes) and len(nodes) <= cap
+    # Exactly as many: fewer is cut off, more is a contradiction (Codex's review of b1f5a1a).
+    return good and total == len(nodes) and len(nodes) <= cap
 
 
 def _int(value: Any) -> int:
@@ -489,8 +490,8 @@ def _connection(value: Any, limit: int, counted: bool = True) -> list:
     nodes = _list(conn.get("nodes"))
     if counted:
         total = _int(conn.get("totalCount"))
-        if total > len(nodes) or total > limit:
-            raise _Incomplete()
+        if total != len(nodes) or total > limit:
+            raise _Incomplete()  # cut off, or a count that contradicts the nodes
     return nodes
 
 
@@ -504,7 +505,7 @@ def _files(pr: dict, clinical_paths: tuple[str, ...]) -> tuple[list[str] | None,
     rest may be clinical. A path that isn't a plain, bounded string makes the list unknown."""
     conn = _obj(pr.get("files"))
     nodes = _list(conn.get("nodes"))
-    complete = _int(conn.get("totalCount")) <= len(nodes)
+    complete = _int(conn.get("totalCount")) == len(nodes)
     paths = []
     size = 0
     for node in nodes:
@@ -816,7 +817,7 @@ def _provably_harmless_runs(suite: dict, required: tuple[str, ...]) -> bool:
     if not isinstance(runs, dict):
         return False
     nodes, total = runs.get("nodes"), runs.get("totalCount")
-    if not isinstance(nodes, list) or type(total) is not int or total > len(nodes):
+    if not isinstance(nodes, list) or type(total) is not int or total != len(nodes):
         return False
     for r in nodes:
         if not isinstance(r, dict) or not isinstance(r.get("name"), str):
@@ -835,7 +836,7 @@ def _provably_no_required(suite: dict, required: tuple[str, ...]) -> bool:
     if not isinstance(runs, dict):
         return False
     nodes, total = runs.get("nodes"), runs.get("totalCount")
-    if not isinstance(nodes, list) or type(total) is not int or total > len(nodes):
+    if not isinstance(nodes, list) or type(total) is not int or total != len(nodes):
         return False
     return all(
         isinstance(r, dict)
@@ -1144,7 +1145,7 @@ def _listing(
     repository = _obj(_obj(data).get("repository"))
     open_conn = _obj(repository.get("open"))
     open_nodes = _list(open_conn.get("nodes"))
-    more_open = _int(open_conn.get("totalCount")) > len(open_nodes)
+    more_open = _int(open_conn.get("totalCount")) != len(open_nodes)
     since = now - timedelta(days=RECENT_DAYS)
     numbers = [_int(_obj(n).get("number")) for n in open_nodes]
     closed, cursor = _closed_page(repository.get("closed"), since)

@@ -370,8 +370,6 @@ class GitHub:
             }
             if "RATE_LIMITED" in kinds:
                 raise FetchError("rate-limited")
-            if kinds & HEAVY_KINDS:
-                raise FetchError("too-heavy")  # GitHub stopped the query for its cost
             paths = tuple(
                 tuple(e["path"])
                 if isinstance(e, dict)
@@ -383,6 +381,11 @@ class GitHub:
             # The partial answer goes with the error, never in its place: a caller that
             # doesn't look at the places gets no data at all (Codex's review of c3ee86b).
             data = answer.get("data")
+            if kinds & HEAVY_KINDS and (not isinstance(data, dict) or None in paths):
+                # GitHub stopped the query for its cost, and gave nothing placed: too heavy. One
+                # placed on a part, with the rest of the answer, is like any other partial
+                # error, so what it did give is still read (Codex's review of b1f5a1a).
+                raise FetchError("too-heavy")
             raise FetchError("graphql-error", paths, data if isinstance(data, dict) else None)
         data = answer.get("data")
         if not isinstance(data, dict):

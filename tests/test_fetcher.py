@@ -791,16 +791,21 @@ class Refresh(Base):
             "headRefOid",
         )
         real = self.fake.__call__
+        nulled = []
 
         def call(method, path, headers, body):
             status, h, data = real(method, path, headers, body)
             if path == "/graphql" and b"pullRequest(number:" in body:
                 answer = json.loads(data)
                 repository = answer["data"]["repository"]
-                if b"number state isDraft" in body:  # the core query: only what it asks for
+                # The core query asks for no optional piece (Codex's review of b1f5a1a: the text
+                # matched before is in every query, so no request was ever nulled).
+                optional = (b"\n  title", b"files(", b"closingIssuesReferences", b"commits(")
+                if not any(m in body for m in optional):
                     for alias, pr in repository.items():
                         repository[alias] = {k: pr[k] for k in core_fields}
                 else:
+                    nulled.append(1)
                     for alias in repository:
                         repository[alias] = None
                     answer["errors"] = [
@@ -812,6 +817,7 @@ class Refresh(Base):
 
         github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
         item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
+        self.assertTrue(nulled)  # the full read was nulled, so the core read is what was kept
         self.assertIsNotNone(item["task"])
         self.assertEqual(item["title"], snapshot.NO_TITLE)
         pull = item["task"]["pull_request"]
@@ -3473,6 +3479,56 @@ class CodexReviewOf6e22a60(CodexReviewOf099ef9b):
                     self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
                     flags = tasks.derive(self.reviewed(item)).flags
                     self.assertIn(tasks.Flag.CHECKS_FAILING, flags)
+
+
+class CodexReviewOfB1f5a1a(CodexReviewOf099ef9b):
+    def test_a_count_below_the_nodes_given_is_never_whole(self):
+        # Blocking: a count smaller than the nodes GitHub gave read as complete.
+        for level in ("suites", "runs"):
+            with self.subTest(level=level):
+                node = pr_node(1, issue=issue_node(10))
+                suites = node["commits"]["nodes"][0]["commit"]["checkSuites"]
+                conn = suites if level == "suites" else suites["nodes"][0]["checkRuns"]
+                conn["totalCount"] = 0
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+                flags = tasks.derive(self.reviewed(item)).flags
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
+
+    def test_a_costly_error_on_one_part_keeps_the_rest_of_the_answer(self):
+        # Blocking: a resource-limit error placed on one optional part threw the whole answer
+        # away, a failure GitHub had reported in it included.
+        node = pr_node(1, issue=issue_node(10))
+        runs = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["checkRuns"]
+        runs["nodes"][0]["conclusion"] = "FAILURE"
+        self.fake.prs[REPO_A]["open"][0] = node
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"closingIssuesReferences" in body and b"p0:" in body:
+                answer = json.loads(data)
+                answer["data"]["repository"]["p0"]["closingIssuesReferences"] = None
+                place = ["repository", "p0", "closingIssuesReferences"]
+                answer["errors"] = [{"type": "RESOURCE_LIMITS_EXCEEDED", "path": place}]
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        item = self.run_refresh(github)["items"][0]
+        self.assertIsNotNone(item["task"])
+        self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
+
+    def test_a_costly_error_with_no_place_is_still_too_heavy(self):
+        def call(method, path, headers, body):
+            answer = {"data": {"repository": {}}, "errors": [{"type": "TIMEOUT"}]}
+            return 200, {}, json.dumps(answer).encode()
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        with self.assertRaises(gh.FetchError) as caught:
+            github.graphql(TOKEN, "query", {})
+        self.assertEqual(caught.exception.code, "too-heavy")
 
 
 class NoFifoAnywhere(Base):
