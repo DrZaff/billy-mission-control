@@ -855,7 +855,11 @@ def derive(raw: Any) -> TaskStatus:
         elif pr.merged_by != task.owner:
             flags.add(Flag.UNAUTHORIZED_MERGE)
             problems.append(f"merged by {pr.merged_by}, not the owner")
-        if runs_known and not reviewed:  # records not read: no claim either way
+        if runs_known and verdicts.get(pr.head) == {"conflict"}:
+            # Its reviews disagree: not "never passed", but no pass either (Codex's review of
+            # 84df535). CONFLICTING_RECORDS is already flagged.
+            problems.append("the merged commit's reviews disagree")
+        elif runs_known and not reviewed:  # records not read: no claim either way
             flags.add(Flag.MERGED_UNREVIEWED)
             problems.append("the merged commit never passed review")
         if maybe_clinical and pr.reviews is None:
@@ -1007,7 +1011,9 @@ def derive(raw: Any) -> TaskStatus:
         for r in current
         if r.step == "review"
         and r.status == "finished"
-        and verdicts.get(r.sha) == {"fail"}
+        # A commit whose reviews disagree may have failed: it uses a round too, so a conflict
+        # never stretches the budget (Codex's review of 84df535).
+        and verdicts.get(r.sha) in ({"fail"}, {"conflict"})
         and r.at >= last_owner_action
     }
     if len(failed_rounds) > task.max_fix_rounds:

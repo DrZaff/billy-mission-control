@@ -1762,6 +1762,30 @@ class Refresh(Base):
             cut = tasks.derive(self.task_of(short))
             self.assertEqual((cut.state, cut.flags), (full.state, full.flags), trial)
 
+    def test_a_review_dismissed_after_the_merge_keeps_the_evidence(self):
+        # Codex's review of 84df535 (blocking): a dismissed review submitted after the merge
+        # discarded every clinician review, hiding the missing-approval warning.
+        merged_at = (NOW - timedelta(days=1)).isoformat()
+        later = (NOW - timedelta(hours=1)).isoformat()
+        reviews = [review_node(state="DISMISSED", at=later)]  # no approval before the merge
+        node = pr_node(
+            1,
+            state="MERGED",
+            merged=True,
+            closed_at=merged_at,
+            issue=issue_node(10),
+            files=("evidence/a.json",),
+            reviews=reviews,
+        )
+        node["mergedAt"] = merged_at
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        item = self.run_refresh()["items"][0]
+        self.assertIsNotNone(item["task"]["pull_request"]["reviews"])
+        state = tasks.derive(self.task_of(item))
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+
     def test_a_dismissed_review_on_a_merged_pr_is_not_known(self):
         # Codex's review of 9fb21c8 (blocking): GitHub gives a review's current state with its
         # submission time, so a dismissal after the merge looked like one before it.

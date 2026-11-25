@@ -321,7 +321,10 @@ class CodexReviewOfDc58125(unittest.TestCase):
             }
         )
         state, body = detail(raw)
-        self.assertEqual(state, State.UNKNOWN)  # the head's reviews now disagree
+        # The head's reviews now disagree, and that uses a fix round too (Codex's review of
+        # 84df535): never merge-ready either way.
+        self.assertIn(state, (State.UNKNOWN, State.AWAITING_OWNER))
+        self.assertIn("fix rounds used up", body)
         self.assertNotEqual(path_row(body, "Clinician"), "done")
 
     def test_clinician_approved_needs_the_normal_path(self):

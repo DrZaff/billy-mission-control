@@ -1335,6 +1335,7 @@ class FableReviewOf0cf099c(unittest.TestCase):
         self.assertIn(Flag.CONFLICTING_RECORDS, s.flags)
         conflicted_head = copy.deepcopy(value)
         conflicted_head["runs"].append(failed(A, 7))
+        conflicted_head["max_fix_rounds"] = 5  # so the conflict itself decides
         s = derive(conflicted_head)
         self.assertEqual(s.state, State.UNKNOWN)
         self.assertEqual(s.pr, 12)
@@ -1419,3 +1420,32 @@ class FableReviewOf0cf099c(unittest.TestCase):
         self.assertEqual(s.state, State.UNSAFE)
         self.assertIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
         self.assertIn("withdrawn", s.reasons[0])
+
+
+class CodexReviewOf84df535(unittest.TestCase):
+    def test_a_conflicted_commit_uses_a_fix_round(self):
+        value = task(
+            runs=[
+                run("build"),
+                failed(B, 3),
+                passed(C, 4),
+                failed(C, 5),
+                passed(A, 6),
+                published(A, 7),
+            ],
+            pull_request=pr(),
+        )
+        s = derive(value)
+        self.assertEqual(s.state, State.AWAITING_OWNER)
+        self.assertIn(Flag.FIX_ROUNDS_EXHAUSTED, s.flags)  # never "ready to merge"
+
+    def test_a_merged_commit_with_disagreeing_reviews_says_so(self):
+        value = task(
+            runs=[run("build"), passed(), failed(minute=4), published(minute=5)],
+            pull_request=pr(state="closed", merged=True, merged_by=OWNER, merged_at=t(30)),
+        )
+        s = derive(value)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.CONFLICTING_RECORDS, s.flags)
+        self.assertNotIn(Flag.MERGED_UNREVIEWED, s.flags)
+        self.assertIn("disagree", s.reasons[0])

@@ -481,7 +481,7 @@ def _compact(paths: list[str] | None, clinical_paths: tuple[str, ...]) -> list[s
     return None
 
 
-def _reviews(pr: dict, clinicians: tuple[str, ...], merged: bool) -> list[dict]:
+def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) -> list[dict]:
     """The clinicians' reviews: the only ones the model reads. Anyone can review a public
     pull request, so keeping every review let ordinary review volume push the snapshot over
     its limit (Codex's review of 9fb21c8). GitHub gives a review's current state with the time
@@ -499,8 +499,12 @@ def _reviews(pr: dict, clinicians: tuple[str, ...], merged: bool) -> list[dict]:
         is_bot = isinstance(author, dict) and author.get("__typename") == "Bot"
         if is_bot or _login(author) not in clinicians:
             continue
-        if merged and state == "DISMISSED":
-            raise _Incomplete()
+        if merged_at is not None and state == "DISMISSED":
+            # Submitted after the merge, it was dismissed after it too, so it can't bear on
+            # the merge: only one submitted by then is "not known" (Codex's review of 84df535).
+            submitted = n.get("submittedAt")
+            if submitted is None or datetime.fromisoformat(_time(submitted)) <= merged_at:
+                raise _Incomplete()
         commit = n.get("commit")
         if commit is None or n.get("submittedAt") is None:
             raise _Incomplete()  # a review whose commit is gone can't be placed: no guess
@@ -708,7 +712,8 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
     except (_Incomplete, *_SHAPE):
         pull["files"] = None
         pull.pop("files_complete", None)
-    parts = [("reviews", lambda: _reviews(pr, cfg.clinicians, merged))]
+    merged_at = datetime.fromisoformat(pull["merged_at"]) if merged else None
+    parts = [("reviews", lambda: _reviews(pr, cfg.clinicians, merged_at))]
     # Checks only for an open pull request. Once it is merged or closed, GitHub no longer shows
     # the test merge commit it judged, so no reading of the checks can match its verdict; the
     # merge box enforced them at the time (owner's decision, 2026-11-25, after Codex's review
