@@ -46,7 +46,17 @@ SHA = re.compile(r"[0-9a-f]{40}")
 CONTROL = re.compile(r"[\x00-\x1f\x7f  ‪-‮⁦-⁩]")
 REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"}
 STATUS_STATES = ("ERROR", "EXPECTED", "FAILURE", "PENDING", "SUCCESS")
-CHECK_EVENTS = ("pull_request", "pull_request_target", "push", "merge_group")
+# Events GitHub documents as able to supply a pull request's required checks (Codex's review
+# of a1e05e5 added the review and deployment ones).
+CHECK_EVENTS = (
+    "pull_request",
+    "pull_request_target",
+    "pull_request_review",
+    "push",
+    "merge_group",
+    "deployment",
+    "deployment_status",
+)
 CHECK_STATUS = {"QUEUED": "queued", "IN_PROGRESS": "in_progress", "COMPLETED": "completed"}
 
 QUERY = Template("""
@@ -401,11 +411,14 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
         "head_sha": head,
     }
     # Incomplete parts are left out: the model then shows UNKNOWN, never a guessed state.
-    for key, read in (
-        ("files", lambda: _files(pr)),
-        ("reviews", lambda: _reviews(pr)),
-        ("checks", lambda: _checks(pr, head, settings.checks_app)),
-    ):
+    parts = [("files", lambda: _files(pr)), ("reviews", lambda: _reviews(pr))]
+    # Checks only for an open pull request. Once it is merged or closed, GitHub no longer shows
+    # the test merge commit it judged, so no reading of the checks can match its verdict; the
+    # merge box enforced them at the time (owner's decision, 2026-11-25, after Codex's review
+    # of a1e05e5). The model then shows a merged or closed one as UNKNOWN.
+    if state == "OPEN":
+        parts.append(("checks", lambda: _checks(pr, head, settings.checks_app)))
+    for key, read in parts:
         try:
             pull[key] = read()
         except _Incomplete:

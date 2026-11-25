@@ -95,8 +95,10 @@ class Refresher:
         previous = read_json(self.cfg.snapshot_dir, STATUS) or {}
         last = previous.get("attempt_epoch")
         if isinstance(last, (int, float)) and not isinstance(last, bool):
-            # A time in the future (a changed clock) counts as now.
-            if now - min(last, now) < MIN_INTERVAL:
+            # A recorded time in the future means the clock went back: don't wait for it to
+            # catch up, which could block refreshes for hours (Codex's review of a1e05e5); this
+            # attempt records the new time.
+            if 0 <= now - last < MIN_INTERVAL:
                 return TOO_SOON
         stamp = datetime.fromtimestamp(now, UTC)
         status = {

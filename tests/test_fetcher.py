@@ -439,6 +439,34 @@ class Refresh(Base):
     def run_refresh(self):
         return snapshot.refresh(self.cfg, client(self.fake), NOW)
 
+    def reviewed(self, item):
+        """The item's task with a synthetic finished build and passing review of its head:
+        the state where the model weighs the required checks before the owner merges."""
+        task = self.task_of(item)
+        branch, sha = task["branch"]["name"], task["branch"]["head"]
+        repo = task["repo"]
+        task["runs"] = [
+            {
+                "step": "build",
+                "repo": repo,
+                "branch": branch,
+                "sha": sha,
+                "at": "2026-11-21T10:00:00+00:00",
+                "status": "finished",
+            },
+            {
+                "step": "review",
+                "repo": repo,
+                "branch": branch,
+                "sha": sha,
+                "at": "2026-11-21T11:00:00+00:00",
+                "status": "finished",
+                "verdict": "no_blocking_findings",
+                "findings": [],
+            },
+        ]
+        return task
+
     def task_of(self, item):
         return dict(item["task"], paused=False)  # A5b adds paused from the stop marker
 
@@ -525,9 +553,8 @@ class Refresh(Base):
 
     def test_check_names_are_matched_exactly(self):
         # Codex's review of 1cc6cf8 (blocking): cleaning made " lint" satisfy "lint", and kept
-        # a configured name with doubled spaces from ever matching. A merged pull request is
-        # where the model weighs the required checks, so each case is one.
-        recent = (NOW - timedelta(days=1)).isoformat()
+        # a configured name with doubled spaces from ever matching. An open pull request with a
+        # passing review is where the model weighs the required checks.
         for required, ran, flag in (
             ("unit  tests", "unit  tests", tasks.Flag.CHECKS_PASSED),
             ("lint", " lint", tasks.Flag.CHECKS_MISSING),
@@ -538,43 +565,36 @@ class Refresh(Base):
                 data = config_data(self.base)
                 data["repos"][REPO_A]["required_checks"] = [required]
                 self.cfg = fconfig.parse_fetcher(json.dumps(data))
-                self.fake.prs[REPO_A]["open"] = []
-                self.fake.prs[REPO_A]["closed"] = [
+                self.fake.prs[REPO_A]["closed"] = []
+                self.fake.prs[REPO_A]["open"] = [
                     pr_node(
                         1,
-                        state="MERGED",
-                        merged=True,
-                        closed_at=recent,
                         issue=issue_node(10),
                         checks=(ran,),
                     )
                 ]
                 item = self.run_refresh()["items"][0]
                 self.assertEqual(item["task"]["pull_request"]["checks"][0]["name"], ran)
-                self.assertIn(flag, tasks.derive(self.task_of(item)).flags)
+                self.assertIn(flag, tasks.derive(self.reviewed(item)).flags)
 
     def test_only_the_configured_apps_checks_count(self):
         # Codex's review of bf76866 (blocking): a same-named check from another app could pass a
         # required check.
-        recent = (NOW - timedelta(days=1)).isoformat()
         for app, flag in (
             ("github-actions", tasks.Flag.CHECKS_PASSED),
             ("someone-elses-app", tasks.Flag.CHECKS_MISSING),
         ):
             with self.subTest(app=app):
-                self.fake.prs[REPO_A]["open"] = []
-                self.fake.prs[REPO_A]["closed"] = [
+                self.fake.prs[REPO_A]["closed"] = []
+                self.fake.prs[REPO_A]["open"] = [
                     pr_node(
                         1,
-                        state="MERGED",
-                        merged=True,
-                        closed_at=recent,
                         issue=issue_node(10),
                         checks_app=app,
                     )
                 ]
                 item = self.run_refresh()["items"][0]
-                self.assertIn(flag, tasks.derive(self.task_of(item)).flags)
+                self.assertIn(flag, tasks.derive(self.reviewed(item)).flags)
 
     def test_results_on_the_test_merge_commit_leave_the_checks_out(self):
         # Codex's review of 23bfb61 (blocking): GitHub judges the test merge commit when it has
@@ -599,7 +619,6 @@ class Refresh(Base):
         # Codex's review of ab64500 (blocking): when a status and a check run share a required
         # name, GitHub needs both to pass. A status that isn't a success counts against the name;
         # a successful one never makes a check pass.
-        recent = (NOW - timedelta(days=1)).isoformat()
         for checks, statuses, flag in (
             (("lint", "test"), [("lint", "FAILURE")], tasks.Flag.CHECKS_FAILING),
             (("lint", "test"), [("lint", "ERROR")], tasks.Flag.CHECKS_FAILING),
@@ -609,20 +628,17 @@ class Refresh(Base):
             (("lint", "test"), [("deploy/preview", "FAILURE")], tasks.Flag.CHECKS_PASSED),
         ):
             with self.subTest(checks=checks, statuses=statuses):
-                self.fake.prs[REPO_A]["open"] = []
-                self.fake.prs[REPO_A]["closed"] = [
+                self.fake.prs[REPO_A]["closed"] = []
+                self.fake.prs[REPO_A]["open"] = [
                     pr_node(
                         1,
-                        state="MERGED",
-                        merged=True,
-                        closed_at=recent,
                         issue=issue_node(10),
                         checks=checks,
                         statuses=statuses,
                     )
                 ]
                 item = self.run_refresh()["items"][0]
-                self.assertIn(flag, tasks.derive(self.task_of(item)).flags)
+                self.assertIn(flag, tasks.derive(self.reviewed(item)).flags)
 
     def test_an_internal_error_also_says_when_the_token_outlived_it(self):
         # Codex's review of ab64500: only a FetchError carried the failed-revoke warning.
@@ -655,6 +671,32 @@ class Refresh(Base):
             snapshot.MAX_SNAPSHOT = saved
         self.assertEqual(caught.exception.code, "too-large+token-not-revoked")
 
+    def test_a_merged_or_closed_pull_request_makes_no_check_claim(self):
+        # Owner's decision, 2026-11-25, after Codex's review of a1e05e5: once merged, GitHub no
+        # longer shows the test merge commit it judged, so no reading can match its verdict.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [
+            pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10)),
+            pr_node(2, state="CLOSED", closed_at=recent, issue=issue_node(11)),
+        ]
+        for item in self.run_refresh()["items"][:2]:
+            with self.subTest(id=item["id"]):
+                self.assertNotIn("checks", item["task"]["pull_request"])
+                state = tasks.derive(self.task_of(item))
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, state.flags)
+                self.assertEqual(state.state, tasks.State.UNKNOWN)
+
+    def test_review_and_deployment_runs_count(self):
+        # Codex's review of a1e05e5: GitHub documents these as sources of required checks.
+        for event in ("pull_request_review", "deployment", "deployment_status"):
+            with self.subTest(event=event):
+                self.fake.prs[REPO_A]["open"] = [
+                    pr_node(1, issue=issue_node(10), check_event=event)
+                ]
+                item = self.run_refresh()["items"][0]
+                self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
     def test_a_renamed_file_makes_the_file_list_incomplete(self):
         # Codex's review of f37d0c7 (blocking): a rename lists only the new path, so a move out
         # of a clinical folder would hide where it came from.
@@ -668,7 +710,6 @@ class Refresh(Base):
     def test_a_manually_dispatched_run_never_counts(self):
         # Codex's review of f37d0c7 (blocking): GitHub leaves runs from workflow_dispatch out of
         # a PR's required checks.
-        recent = (NOW - timedelta(days=1)).isoformat()
         for event, flag in (
             ("pull_request", tasks.Flag.CHECKS_PASSED),
             ("push", tasks.Flag.CHECKS_PASSED),
@@ -676,19 +717,16 @@ class Refresh(Base):
             ("schedule", tasks.Flag.CHECKS_MISSING),
         ):
             with self.subTest(event=event):
-                self.fake.prs[REPO_A]["open"] = []
-                self.fake.prs[REPO_A]["closed"] = [
+                self.fake.prs[REPO_A]["closed"] = []
+                self.fake.prs[REPO_A]["open"] = [
                     pr_node(
                         1,
-                        state="MERGED",
-                        merged=True,
-                        closed_at=recent,
                         issue=issue_node(10),
                         check_event=event,
                     )
                 ]
                 item = self.run_refresh()["items"][0]
-                self.assertIn(flag, tasks.derive(self.task_of(item)).flags)
+                self.assertIn(flag, tasks.derive(self.reviewed(item)).flags)
 
     def test_a_full_page_of_recently_updated_closed_prs_is_flagged(self):
         # Codex's review of f37d0c7: more closed pull requests could lie past the first page.
@@ -841,6 +879,16 @@ class RefresherFiles(Base):
         self.assertEqual(self.make(lambda: now[0]).run(), server.TOO_SOON)  # a new process
         now[0] += 31
         self.assertEqual(self.make(lambda: now[0]).run(), server.OK)
+
+    def test_a_clock_that_went_back_does_not_block_refreshes(self):
+        # Codex's review of a1e05e5: a recorded future time held every refresh until the clock
+        # caught up.
+        now = [NOW.timestamp()]
+        self.assertEqual(self.make(lambda: now[0]).run(), server.OK)
+        now[0] -= 3 * 3600  # the clock goes back three hours
+        self.assertEqual(self.make(lambda: now[0]).run(), server.OK)
+        now[0] += 10
+        self.assertEqual(self.make(lambda: now[0]).run(), server.TOO_SOON)  # the floor holds
 
     def test_no_token_or_key_reaches_any_file(self):
         self.make(lambda: NOW.timestamp()).run()
