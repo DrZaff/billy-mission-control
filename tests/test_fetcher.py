@@ -182,6 +182,36 @@ def issue_node(number, actor=OWNER, label="agent:ready", repo=REPO_A):
     }
 
 
+def answer_for(node, query: str):
+    """A pull request node as GitHub would answer this query: only the pieces it asks for, and
+    each clinician's reviews (`rv<i>: reviews(author: ...)`) filtered by author."""
+    if node is None:
+        return None
+    node = dict(node)
+    pieces = {
+        "files": "files(",
+        "commits": "commits(",
+        "potentialMergeCommit": "potentialMergeCommit",
+        "closingIssuesReferences": "closingIssuesReferences",
+        "headRefName": "\n  headRefName",
+        "title": "\n  title",
+        "updatedAt": "\n  updatedAt",
+    }
+    for key, marker in pieces.items():
+        if marker not in query:
+            node.pop(key, None)
+    reviews = (node.pop("reviews", None) or {}).get("nodes", [])
+    totals = node.pop("review_totals", {})  # a clinician with more reviews than returned
+    for alias, login in re.findall(r'(rv\d+): reviews\(author: "([^"]+)"', query):
+        mine = [
+            r
+            for r in reviews
+            if isinstance(r.get("author"), dict) and r["author"].get("login") == login
+        ]
+        node[alias] = {"totalCount": totals.get(login, len(mine)), "nodes": mine}
+    return node
+
+
 class FakeGitHub:
     """api.github.com, as far as the fetcher uses it. Each attribute can be changed to make it
     misbehave; every JWT it receives is verified with the App's public key."""
@@ -314,7 +344,7 @@ class FakeGitHub:
             if not lite and set(wanted) & self.too_large:
                 return 200, {}, b"x" * (gh.MAX_RESPONSE + 1)
             by_number = {n["number"]: n for n in data["open"] + data["closed"]}
-            nodes = {f"p{i}": by_number.get(n) for i, n in enumerate(wanted)}
+            nodes = {f"p{i}": answer_for(by_number.get(n), query) for i, n in enumerate(wanted)}
             return 200, {}, json.dumps({"data": {"repository": nodes}}).encode()
         if path == "/installation/token" and method == "DELETE":
             self.revoked += 1
@@ -660,8 +690,11 @@ class Refresh(Base):
                     1, issue=issue_node(10), merge_commit=merge
                 )
                 item = self.run_refresh()["items"][0]
-                checks = item["task"]["pull_request"]["checks"]
-                self.assertEqual(checks is not None, has_checks)
+                pull = item["task"]["pull_request"]
+                # Results on the test merge commit make the head's partial: never passed.
+                self.assertEqual(pull.get("checks_complete", True), has_checks)
+                passed = tasks.Flag.CHECKS_PASSED in tasks.derive(self.reviewed(item)).flags
+                self.assertEqual(passed, has_checks)
 
     def test_a_commit_status_can_only_add_caution(self):
         # Codex's review of ab64500 (blocking): when a status and a check run share a required
@@ -706,9 +739,12 @@ class Refresh(Base):
         self.fake.prs[REPO_A]["open"][0] = node
         items = self.run_refresh()["items"]
         bad = next(i for i in items if i["number"] == 1)
-        # Since 7faf35a only that part is "not known"; the rest of the PR is still judged.
-        self.assertIsNone(bad["task"]["pull_request"]["checks"])
-        self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, tasks.derive(self.task_of(bad)).flags)
+        # Since 7faf35a only that part is "not known"; since 4945de9 the checks are kept as
+        # partial (a failure would still count), and they never pass.
+        self.assertIs(bad["task"]["pull_request"]["checks_complete"], False)
+        flags = tasks.derive(self.task_of(bad)).flags
+        self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, flags)
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
         self.assertEqual([i["number"] for i in items], [1, 2, 3])
 
     def test_a_field_error_on_one_pr_never_stalls_the_others(self):
@@ -1290,7 +1326,8 @@ class Refresh(Base):
             for n in range(1, 6)
         ]
         github = self.with_field_errors(
-            {1: ["files"], 2: ["potentialMergeCommit"], 3: ["commits"], 4: ["reviews"]}
+            # rv0: the first clinician's reviews (one connection each since 4945de9)
+            {1: ["files"], 2: ["potentialMergeCommit"], 3: ["commits"], 4: ["rv0"]}
         )
         snap = snapshot.refresh(self.cfg, github, NOW)
         pulls = {
@@ -1300,7 +1337,8 @@ class Refresh(Base):
         self.assertNotIn("files_complete", pulls[1])
         self.assertIsNotNone(pulls[1]["reviews"])  # the rest is still read whole
         self.assertIsNotNone(pulls[1]["checks"])
-        self.assertIsNone(pulls[2]["checks"])  # a null test merge commit isn't "no results"
+        # A null test merge commit isn't "no results": the checks are partial, never passed.
+        self.assertIs(pulls[2]["checks_complete"], False)
         self.assertIsNone(pulls[3]["checks"])
         self.assertIsNone(pulls[4]["reviews"])
         self.assertEqual(pulls[4]["files"], ["evidence/a.json"])
@@ -1474,7 +1512,7 @@ class Refresh(Base):
         # Codex's review of b24ac2d (blocking): leaving the checks out made the whole PR
         # unreadable. With "not known", the model still judges everything else.
         state = tasks.derive(self.task_of(merged))
-        self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, state.flags)
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, state.flags)  # never judged after a merge
         self.assertEqual(tasks.derive(self.task_of(closed)).state, tasks.State.CLOSED)
 
     def test_an_owner_merge_is_never_called_unreviewed_for_lack_of_run_records(self):
@@ -1835,7 +1873,9 @@ class Refresh(Base):
         real = self.fake.__call__
 
         def call(method, path, headers, body):
-            if path == "/graphql" and b"files(" in body:
+            # Only this repository's full reads fail (another one read lite only for a
+            # transient reason would fail the refresh, by design: Fable's pre-review of 4945de9).
+            if path == "/graphql" and b"files(" in body and b'"name": "site"' in body:
                 return 502, {}, b""
             return real(method, path, headers, body)
 
@@ -1843,6 +1883,199 @@ class Refresh(Base):
         snap = snapshot.refresh(self.cfg, github, NOW)  # not held back
         item = next(i for i in snap["items"] if i["number"] == 9)
         self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNSAFE)
+
+    # ------------------------------------------------ Fable's pre-review of 4945de9
+
+    def failing_lint(self, **kw):
+        node = pr_node(1, issue=issue_node(10), **kw)
+        suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+        suite["checkRuns"]["nodes"][0]["conclusion"] = "FAILURE"
+        return node, node["commits"]["nodes"][0]["commit"]
+
+    def assert_failing(self, node, github=None):
+        self.fake.prs[REPO_A]["open"][0] = node
+        snap = snapshot.refresh(self.cfg, github, NOW) if github else self.run_refresh()
+        state = tasks.derive(self.task_of(snap["items"][0]))
+        self.assertIn(tasks.Flag.CHECKS_FAILING, state.flags)
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, state.flags)
+        self.assertTrue(state.needs_attention)
+
+    def test_a_reported_failure_survives_any_degraded_checks_reading(self):
+        # Finding 1 (blocking): the failure GitHub supplied was thrown away.
+        node, commit = self.failing_lint()
+        commit["checkSuites"]["totalCount"] = 21  # more suites than read
+        self.assert_failing(node)
+        node, _ = self.failing_lint(
+            merge_commit={"oid": "b" * 40, "status": None, "checkSuites": {"totalCount": 1}}
+        )
+        self.assert_failing(node)
+        node, commit = self.failing_lint()
+        suite = commit["checkSuites"]["nodes"][0]
+        suite["checkRuns"]["nodes"].append(
+            {"name": "x" * 300, "status": "COMPLETED", "conclusion": "SUCCESS"}
+        )  # not required
+        self.assert_failing(node)
+        node, commit = self.failing_lint(statuses=[("c" * 300, "FAILURE")])  # not required
+        self.assert_failing(node)
+        node, _ = self.failing_lint()
+        github = self.with_field_errors({}, extra=())
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number: 1)" in body and b"commits(" in body:
+                answer = json.loads(data)
+                answer["data"]["repository"]["p0"]["commits"]["nodes"][0]["commit"]["status"] = None
+                answer["errors"] = [
+                    {
+                        "type": "X",
+                        "path": ["repository", "p0", "commits", "nodes", 0, "commit", "status"],
+                    }
+                ]
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        self.assert_failing(node, github)
+
+    def test_checks_that_cant_be_read_on_an_open_pr_need_attention(self):
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10))
+        self.fake.too_large = {1}  # read lite: checks not known
+        self.fake.prs[REPO_A]["open"].append(pr_node(5, issue=issue_node(10)))
+        item = next(i for i in self.run_refresh()["items"] if i["number"] == 1)
+        state = tasks.derive(self.task_of(item))
+        self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, state.flags)
+        self.assertTrue(state.needs_attention)
+
+    def merged_clinical(self, reviews, **extra):
+        merged_at = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(
+            1,
+            state="MERGED",
+            merged=True,
+            closed_at=merged_at,
+            issue=issue_node(10),
+            files=("evidence/a.json",),
+            reviews=reviews,
+        )
+        node.update(extra)
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        item = self.run_refresh()["items"][0]
+        return item, tasks.derive(self.task_of(item))
+
+    def test_strangers_reviews_never_hide_a_clinical_merge_without_a_clinician(self):
+        # Finding 2 (blocking): 100 strangers' comments pushed the list over its limit.
+        later = (NOW - timedelta(hours=1)).isoformat()
+        crowd = [review_node(f"user{i}", "COMMENTED", at=later) for i in range(101)]
+        crowd.append(review_node("odd_login", "WEIRD"))  # a stranger's odd review
+        item, state = self.merged_clinical(crowd)
+        self.assertEqual(item["task"]["pull_request"]["reviews"], [])
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+
+    def test_a_stale_dismissed_approval_never_hides_a_merge_without_approval(self):
+        # Finding 3 (blocking): an approval of an older commit, dismissed as stale, nulled the
+        # reviews; so did a review whose commit was force-pushed away.
+        before = (NOW - timedelta(days=2)).isoformat()
+        stale = review_node(state="DISMISSED", at=before, commit="b" * 40)
+        gone = review_node(state="COMMENTED", at=before)
+        gone["commit"] = None
+        item, state = self.merged_clinical([stale, gone])
+        self.assertIsNotNone(item["task"]["pull_request"]["reviews"])
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+        # A dismissed review of the head, before the merge, still can't be placed.
+        head_dismissed = review_node(state="DISMISSED", at=before)
+        item, state = self.merged_clinical([head_dismissed])
+        self.assertIsNone(item["task"]["pull_request"]["reviews"])
+
+    def test_a_lone_pr_is_asked_for_again_after_a_transient_error(self):
+        # Finding 4: one 502 read a lone PR lite at once, under "ok".
+        merged_at = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(
+            3,
+            state="MERGED",
+            merged=True,
+            closed_at=merged_at,
+            issue=issue_node(11, repo=REPO_B),
+            files=("docs/a.md",),
+        )
+        node["mergedBy"] = {"login": "someone-else"}  # unsafe on its own
+        self.fake.prs[REPO_B]["open"], self.fake.prs[REPO_B]["closed"] = [], [node]
+        failures = [1]
+        real = self.fake.__call__
+
+        def once(method, path, headers, body):
+            if path == "/graphql" and b"files(" in body and b'"name": "tools"' in body and failures:
+                failures.pop()
+                return 502, {}, b""
+            return real(method, path, headers, body)
+
+        github = gh.GitHub(APP_ID, KEY, transport=once, clock=lambda: NOW.timestamp())
+        snap = snapshot.refresh(self.cfg, github, NOW)
+        item = next(i for i in snap["items"] if i["repo"] == REPO_B)
+        self.assertEqual(item["task"]["pull_request"]["files"], ["docs/a.md"])  # read whole
+        self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNSAFE)
+
+        def always(method, path, headers, body):
+            if path == "/graphql" and b"files(" in body and b'"name": "tools"' in body:
+                return 502, {}, b""
+            return real(method, path, headers, body)
+
+        # A calm one (merged by the owner): a transient-only reading never replaces the last
+        # snapshot under "ok". (A known unsafe merge would still be shown: 5d06878.)
+        node["mergedBy"] = {"login": OWNER}
+        github = gh.GitHub(APP_ID, KEY, transport=always, clock=lambda: NOW.timestamp())
+        with self.assertRaises(gh.FetchError) as caught:
+            snapshot.refresh(self.cfg, github, NOW)
+        self.assertEqual(caught.exception.code, "too-heavy")
+
+    def test_a_retry_leaves_out_only_the_pieces_in_error(self):
+        # Finding 5: an error on the title nulled the PR, and the retry went straight to the
+        # core, dropping files and reviews that were readable.
+        merged_at = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(
+            1,
+            state="MERGED",
+            merged=True,
+            closed_at=merged_at,
+            issue=issue_node(10),
+            files=("evidence/a.json",),
+        )
+        self.fake.prs[REPO_A]["open"], self.fake.prs[REPO_A]["closed"] = [], [node]
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number: 1)" in body and b"\\n  title" in body:
+                answer = json.loads(data)
+                answer["data"]["repository"]["p0"] = None
+                answer["errors"] = [{"type": "X", "path": ["repository", "p0", "title"]}]
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
+        pull = item["task"]["pull_request"]
+        self.assertEqual(pull["files"], ["evidence/a.json"])  # not dropped with the title
+        self.assertIsNotNone(pull["reviews"])
+        self.assertEqual(item["title"], snapshot.NO_TITLE)
+        state = tasks.derive(self.task_of(item))
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+
+    def test_a_clinical_path_of_any_length_is_clinical(self):
+        # Finding 6.
+        item, state = self.merged_clinical(
+            [],
+            files={
+                "totalCount": 1,
+                "nodes": [{"path": "evidence/" + "x" * 4100, "changeType": "MODIFIED"}],
+            },
+        )
+        self.assertIs(item["task"]["pull_request"]["clinical_known"], True)
+        self.assertEqual(state.state, tasks.State.UNSAFE)
 
     def test_a_dismissed_review_on_a_merged_pr_is_not_known(self):
         # Codex's review of 9fb21c8 (blocking): GitHub gives a review's current state with its
@@ -2017,12 +2250,14 @@ class Refresh(Base):
         snap = self.run_refresh()
         heavy, fine = snap["items"][:2]
         pull = heavy["task"]["pull_request"]
-        self.assertEqual((pull["files"], pull["reviews"], pull["checks"]), (None, None, None))
+        # Read lite: files and checks not known; reviews, which are small, are kept (4945de9).
+        self.assertEqual((pull["files"], pull["checks"]), (None, None))
+        self.assertEqual(pull["reviews"], [])
         state = tasks.derive(self.task_of(heavy))
         for flag in (
             tasks.Flag.FILES_UNVERIFIED,
-            tasks.Flag.REVIEWS_UNVERIFIED,
             tasks.Flag.CHECKS_UNVERIFIED,
+            tasks.Flag.CLINICAL_APPROVAL_MISSING,  # files may be clinical; reviews read: none
         ):
             self.assertIn(flag, state.flags)  # "not known", never clean
         self.assertNotIn(tasks.Flag.CHECKS_PASSED, state.flags)
@@ -2063,7 +2298,7 @@ class Refresh(Base):
             renamed=("site/moved.md",),
         )
         node["mergedBy"] = {"login": "someone-else"}
-        node["reviews"] = {"totalCount": 500, "nodes": []}  # reviews incomplete too
+        node["review_totals"] = {OWNER: 500}  # the clinician's reviews incomplete too
         self.fake.prs[REPO_A]["open"], self.fake.prs[REPO_A]["closed"] = [], [node]
         item = self.run_refresh()["items"][0]
         pull = item["task"]["pull_request"]
@@ -2116,7 +2351,7 @@ class Refresh(Base):
         self.fake.prs[REPO_A]["open"][0] = pr_node(
             1, issue=issue_node(10), files=("evidence/study.md",)
         )
-        self.fake.prs[REPO_A]["open"][0]["reviews"] = {"totalCount": 500, "nodes": []}
+        self.fake.prs[REPO_A]["open"][0]["review_totals"] = {OWNER: 500}
         item = self.run_refresh()["items"][0]
         state = tasks.derive(self.reviewed(item))
         self.assertEqual(state.state, tasks.State.CLINICAL_REVIEW)

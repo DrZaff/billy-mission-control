@@ -204,6 +204,11 @@ ATTENTION_FLAGS = frozenset(
         # Unknown files or reviews can hide a clinical change merged without a clinician, so
         # they always need a look (pre-review of 9537b08).
         Flag.FILES_UNVERIFIED,
+        # Checks that couldn't be read on an open PR, and records that disagree, need a look
+        # (Fable's pre-review of 4945de9). A merged PR's checks are never judged, so never
+        # flagged this way.
+        Flag.CHECKS_UNVERIFIED,
+        Flag.CONFLICTING_RECORDS,
         Flag.REVIEWS_UNVERIFIED,
     }
 )
@@ -358,6 +363,7 @@ class _PR:
     head: str
     files: tuple[str, ...] | None  # None: not known
     files_complete: bool  # False: the list is known to be partial
+    checks_complete: bool  # False: the results are known to be partial (never passed)
     reviews: tuple[_Review, ...] | None  # None: not known
     checks: tuple[_Check, ...] | None  # None: not known
 
@@ -439,9 +445,10 @@ def _parse_run(raw: Any, i: int) -> _Run:
     )
 
 
-def _flag(p: Mapping, key: str) -> bool:
-    """An optional true/false that only ever adds a warning: absent means false."""
-    value = p.get(key, False)
+def _flag(p: Mapping, key: str, default: bool = False) -> bool:
+    """An optional true/false whose absence is the calm reading only where the fetcher always
+    sends it when it isn't (clinical_known, checks_complete)."""
+    value = p.get(key, default)
     _req(isinstance(value, bool), f"pull_request.{key} must be true or false")
     return value
 
@@ -530,6 +537,7 @@ def _parse_pr(raw: Any) -> _PR:
         else _strings(raw_files, "pull_request.files"),
         reviews=None if raw_reviews is None else tuple(reviews),
         files_complete=_complete(p),
+        checks_complete=_flag(p, "checks_complete", default=True),
         checks=None if raw_checks is None else tuple(checks),
     )
 
@@ -660,6 +668,18 @@ def _checks(task: _Task, head: str, flags: set[Flag]) -> bool:
     if pr.checks is None:
         # Not known: never passed (A5a). The caller decides what that means.
         flags.add(Flag.CHECKS_UNVERIFIED)
+        return False
+    if not pr.checks_complete:
+        # Partial: a failure GitHub reported still fails, and nothing passes (Fable's
+        # pre-review of 4945de9: a failing check vanished when the reading was degraded).
+        failed = any(
+            c.name in task.required_checks
+            and c.sha == head
+            and c.status == "completed"
+            and c.conclusion != "success"
+            for c in pr.checks
+        )
+        flags.add(Flag.CHECKS_FAILING if failed else Flag.CHECKS_UNVERIFIED)
         return False
     ok = True
     for name in task.required_checks:
@@ -874,8 +894,7 @@ def derive(raw: Any) -> TaskStatus:
             problems.append("the work was never authorised by the owner")
         # Checks are never judged after a merge: results carry no time, so a later run could
         # rewrite the verdict either way (Fable's review of 0cf099c), and GitHub's merge box
-        # enforced them at the time (owner's decision, 2026-11-25).
-        flags.add(Flag.CHECKS_UNVERIFIED)
+        # enforced them at the time (owner's decision, 2026-11-25). The Checks row says so.
         if problems:
             return status(State.UNSAFE, "Merged, but " + "; ".join(problems) + ".", pr.head)
         if not runs_known:
@@ -902,8 +921,14 @@ def derive(raw: Any) -> TaskStatus:
     elif (pr and not pr.open) or not task.issue_open:
         # Nothing to decide: a closed stranger's or unlinked PR is history, not an alert
         # (Fable's review of 0cf099c).
-        flags.discard(Flag.ISSUE_NOT_LINKED)
-        flags.discard(Flag.FROM_FORK)
+        for calm in (
+            Flag.ISSUE_NOT_LINKED,
+            Flag.FROM_FORK,
+            Flag.FILES_UNVERIFIED,  # Fable's pre-review of 4945de9: a closed PR with a rename
+            Flag.REVIEWS_UNVERIFIED,
+            Flag.CHECKS_UNVERIFIED,
+        ):
+            flags.discard(calm)
         return status(State.CLOSED, "Closed without merging.", head)
 
     def github_gates() -> None:
@@ -924,6 +949,22 @@ def derive(raw: Any) -> TaskStatus:
     # Judged once, before any early return, for every open PR: no path hides a failing check
     # or a missing clinician approval (Fable's review of 0cf099c).
     github_gates()
+
+    # A published PR whose head moved off the published (reviewed) commit is unsafe. This is
+    # checked before any other gate, the closed-issue and not-linked ones included (Fable's
+    # pre-review of 4945de9), so an open question or a failure can't hide the warning,
+    # and against every publish record for this PR, not only the current authorisation's: a
+    # publish makes a PR for one exact commit, so its head never legitimately moves.
+    if pr:
+        published = [r for r in runs if r.step == "publish" and r.pr == pr.number]
+        if any(r.sha != pr.head for r in published):
+            flags.add(Flag.HEAD_MISMATCH)
+            return status(
+                State.UNSAFE,
+                f"PR #{pr.number}'s head {pr.head[:12]} is not the commit that was reviewed "
+                "and published. Do not approve it.",
+                head,
+            )
 
     if issue_closed:
         return status(
@@ -965,21 +1006,6 @@ def derive(raw: Any) -> TaskStatus:
                 State.UNSAFE, "Work exists, but the owner never authorised this task.", head
             )
         return status(State.PROPOSED, "Not authorised by the owner.", head)
-
-    # A published PR whose head moved off the published (reviewed) commit is unsafe. This is
-    # checked before any other gate, so an open question or a failure can't hide the warning,
-    # and against every publish record for this PR, not only the current authorisation's: a
-    # publish makes a PR for one exact commit, so its head never legitimately moves.
-    if pr:
-        published = [r for r in runs if r.step == "publish" and r.pr == pr.number]
-        if any(r.sha != pr.head for r in published):
-            flags.add(Flag.HEAD_MISMATCH)
-            return status(
-                State.UNSAFE,
-                f"PR #{pr.number}'s head {pr.head[:12]} is not the commit that was reviewed "
-                "and published. Do not approve it.",
-                head,
-            )
 
     # An agent's question holds the task until the owner acts after it (authorises again).
     # Later builds or reviews never clear it: only the owner can. An owner action at the same

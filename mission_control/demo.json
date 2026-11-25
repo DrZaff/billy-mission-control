@@ -2723,6 +2723,91 @@
      "from_fork": false
     }
    }
+  },
+  {
+   "id": "example-tools-70",
+   "title": "Settings copy (checks couldn't be read)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 901,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/footer-games-link",
+     "head": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/footer-games-link",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T09:10:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/footer-games-link",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T09:20:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-a1b2c3d",
+      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "at": "2026-11-14T09:25:00+00:00",
+      "pr": 906
+     }
+    ],
+    "pull_request": {
+     "number": 906,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": null,
+     "from_fork": false
+    }
+   }
   }
  ]
 }

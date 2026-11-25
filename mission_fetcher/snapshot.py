@@ -156,16 +156,16 @@ def _its_own(error: FetchError, size: int) -> bool:
 # can't be read, and the rest is still judged. Every other field is needed to judge the pull
 # request at all. When GitHub's error is on one of these, only that part is not known (Codex's
 # review of c3ee86b: the whole pull request became unreadable, hiding a known unsafe merge).
-OPTIONAL_FIELDS = {
-    "title",
-    "updatedAt",
-    "headRefName",
-    "closingIssuesReferences",
-    "potentialMergeCommit",
-    "files",
-    "reviews",
-    "commits",
-}
+REVIEW_ALIAS = re.compile(r"rv\d{1,2}")
+
+
+def _piece(field) -> str | None:
+    """The optional piece a field of a pull request belongs to, or None for a core field."""
+    if not isinstance(field, str):
+        return None
+    if REVIEW_ALIAS.fullmatch(field):
+        return "reviews"
+    return field if field in PIECES else None
 
 
 class _Errored:
@@ -175,10 +175,16 @@ class _Errored:
 
 
 ERRORED = _Errored()
-# A pull request GitHub nulled whole for an error on an optional field (a non-null one, such as
-# its title, nulls its parent): it is asked for again with only the core fields, so what is
-# known about the merge is still judged (Codex's review of 8152df0).
-RETRY = object()
+
+
+class Retry:
+    """A pull request GitHub nulled whole for an error on an optional field (a non-null one,
+    such as its title, nulls its parent): asked for again without just those pieces, then with
+    the core fields only, so what is known is still judged (Codex's review of 8152df0; Fable's
+    pre-review of 4945de9: it went straight to the core)."""
+
+    def __init__(self, pieces: frozenset):
+        self.pieces = pieces
 
 
 def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
@@ -195,18 +201,23 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
     if not isinstance(repository, dict):
         return None
     marks: dict[str, set | None] = {}
+    deep_commits: set[str] = set()
     for path in error.paths:
         alias = path[1]
         field = path[2] if len(path) > 2 else None
         if field == "files" and len(path) > 3:
             # An error inside one file's entry: GitHub nulled that entry, and the paths it did
             # give are kept, so a clinical one among them is still found (clinical_known) before
-            # the list itself is "not known" (Codex's review of c5adbba: the whole list was
-            # discarded, hiding a clinical merge without a clinician). Files only: elsewhere a
-            # null left by an error can read as "none" (no status, no results), so those parts
-            # stay wholly "not known".
+            # the list itself is "not known" (Codex's review of c5adbba).
             continue
-        if isinstance(field, str) and field in OPTIONAL_FIELDS and marks.get(alias, ()) is not None:
+        if field == "commits" and len(path) > 3:
+            # An error inside the checks: what GitHub did give is kept, marked partial, so a
+            # failure it reported still counts; nothing in it can pass (Fable's pre-review of
+            # 4945de9: a failing check vanished).
+            deep_commits.add(alias)
+            continue
+        piece = _piece(field)
+        if piece is not None and marks.get(alias, ()) is not None:
             marks.setdefault(alias, set()).add(field)
         else:
             marks[alias] = None  # the pull request itself, or a field it can't be judged without
@@ -216,20 +227,40 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
         node = repository.get(alias)
         fields = marks.get(alias, set())
         if not isinstance(node, dict) and fields:
-            node = RETRY  # nulled whole, but only for optional fields: ask for its core
+            node = Retry(frozenset(_piece(f) for f in fields))
         elif not isinstance(node, dict) or fields is None:
             node = UNREADABLE
-        elif fields:
-            node = {**node, **dict.fromkeys(fields, ERRORED)}
+        else:
+            if fields:
+                node = {**node, **dict.fromkeys(fields, ERRORED)}
+            if alias in deep_commits:
+                node = {**node, "__checks_partial__": True}
         out.append((number, node, lite))
     return out
 
 
-_BASE_FIELDS = """
-  number title state isDraft merged closedAt mergedAt isCrossRepository
+# The fields every query asks for: what the merge verdict needs.
+CORE_FIELDS = """
+  number state isDraft merged closedAt mergedAt isCrossRepository
   mergedBy { login }
-  headRefName headRefOid
-  updatedAt
+  headRefOid
+"""
+_LIMITS = {
+    "files": MAX_FILES,
+    "reviews": MAX_REVIEWS,
+    "suites": MAX_SUITES,
+    "runs": MAX_RUNS,
+    "issues": MAX_ISSUES,
+    "events": MAX_EVENTS,
+}
+# The optional parts, each of which can be left out on its own: a retry leaves out only the
+# parts GitHub had an error on (Fable's pre-review of 4945de9), and the lite read only the large
+# ones. Reviews are asked for per clinician (`reviews`, below).
+PIECES = {
+    "title": "title",
+    "updatedAt": "updatedAt",
+    "headRefName": "headRefName",
+    "closingIssuesReferences": Template("""
   closingIssuesReferences(first: $issues) {
     totalCount
     nodes {
@@ -244,19 +275,17 @@ _BASE_FIELDS = """
         }
       }
     }
-  }
-"""
-_HEAVY_FIELDS = """
+  }""").substitute(_LIMITS),
+    "potentialMergeCommit": """
   potentialMergeCommit {
     oid
     status { contexts { context } }
     checkSuites(first: 1) { totalCount }
-  }
-  files(first: $files) { totalCount nodes { path changeType } }
-  reviews(last: $reviews) {
-    totalCount
-    nodes { state submittedAt author { __typename login } commit { oid } }
-  }
+  }""",
+    "files": Template("""
+  files(first: $files) { totalCount nodes { path changeType } }""").substitute(_LIMITS),
+    "reviews": None,  # built per clinician
+    "commits": Template("""
   commits(last: 1) {
     nodes { commit { oid status { contexts { context state } } checkSuites(first: $suites) {
       totalCount
@@ -266,42 +295,52 @@ _HEAVY_FIELDS = """
         checkRuns(first: $runs) { totalCount nodes { name status conclusion completedAt } }
       }
     } } }
-  }
-"""
-_LIMITS = {
-    "files": MAX_FILES,
-    "reviews": MAX_REVIEWS,
-    "suites": MAX_SUITES,
-    "runs": MAX_RUNS,
-    "issues": MAX_ISSUES,
-    "events": MAX_EVENTS,
+  }""").substitute(_LIMITS),
 }
-FRAGMENT = Template("fragment pr on PullRequest {" + _BASE_FIELDS + _HEAVY_FIELDS + "}").substitute(
-    _LIMITS
-)
-LITE_FRAGMENT = Template("fragment pr on PullRequest {" + _BASE_FIELDS + "}").substitute(_LIMITS)
-# Only what the merge verdict needs; every other part is then "not known".
-CORE_FRAGMENT = """fragment pr on PullRequest {
-  number state isDraft merged closedAt mergedAt isCrossRepository
-  mergedBy { login }
-  headRefOid
-}"""
+LARGE = frozenset({"files", "commits", "potentialMergeCommit"})  # left out of the lite read
+ALL_PIECES = frozenset(PIECES)
+LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
 
 
-def detail_query(numbers: list[int], lite: bool = False, core: bool = False) -> str:
-    """The details of these pull requests, by number. Numbers are checked integers, so they
-    can be written into the query; everything else is a variable."""
+def _review_fields(clinicians: tuple[str, ...]) -> str:
+    """One reviews connection per clinician, `rv<i>`: GitHub filters by author, so no number
+    of other people's reviews can push a clinician's out of the answer (Fable's pre-review of
+    4945de9: 100 strangers' comments made every review "not known")."""
+    parts = []
+    for i, login in enumerate(clinicians):
+        if not LOGIN.fullmatch(login):
+            raise _bad()
+        parts.append(
+            f"\n  rv{i}: reviews(author: {json.dumps(login)}, last: {MAX_REVIEWS}) {{"
+            "\n    totalCount"
+            "\n    nodes { state submittedAt author { __typename login } commit { oid } }"
+            "\n  }"
+        )
+    return "".join(parts)
+
+
+def detail_query(
+    numbers: list[int], omit: frozenset = frozenset(), clinicians: tuple[str, ...] = ()
+) -> str:
+    """The details of these pull requests, by number, without the pieces in `omit`. Numbers
+    and logins are checked first, so they can be written into the query."""
     if not numbers or not all(type(n) is int and 0 < n < 2**31 for n in numbers):
         raise _bad()
     fields = "\n".join(
         f"    p{i}: pullRequest(number: {n}) {{ ...pr }}" for i, n in enumerate(numbers)
     )
+    body = CORE_FIELDS
+    for name, text in PIECES.items():
+        if name in omit:
+            continue
+        body += _review_fields(clinicians) if name == "reviews" else "\n  " + text.strip()
     return (
         "query($owner: String!, $name: String!) {\n"
         "  repository(owner: $owner, name: $name) {\n"
         f"{fields}\n"
         "  }\n"
-        "}\n" + (CORE_FRAGMENT if core else LITE_FRAGMENT if lite else FRAGMENT)
+        "}\n"
+        "fragment pr on PullRequest {" + body + "\n}\n"
     )
 
 
@@ -443,8 +482,8 @@ def _all_paths(pr: dict) -> list[str]:
     out = []
     for node in nodes:
         path = node.get("path") if isinstance(node, dict) else None
-        if isinstance(path, str) and 0 < len(path) <= 4096:
-            out.append(path)
+        if isinstance(path, str) and path:
+            out.append(path)  # any length: a long clinical path is still clinical (4945de9)
     return out
 
 
@@ -481,47 +520,55 @@ def _compact(paths: list[str] | None, clinical_paths: tuple[str, ...]) -> list[s
     return None
 
 
-def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) -> list[dict]:
-    """The clinicians' reviews: the only ones the model reads. Anyone can review a public
-    pull request, so keeping every review let ordinary review volume push the snapshot over
-    its limit (Codex's review of 9fb21c8). GitHub gives a review's current state with the time
-    it was submitted, so for a merged PR a dismissed review can't be placed before or after the
-    merge: the reviews are then "not known" (null) rather than a guess (9fb21c8)."""
+VANISHED = "0" * 40  # a review's commit that is gone (force-pushed away): never the head
+
+
+def _reviews(
+    pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None, head: str
+) -> list[dict]:
+    """The clinicians' reviews, the only ones the model reads, one connection per clinician
+    (`rv<i>`). A part missing or cut off makes the reviews "not known". Each review is first
+    placed in time, and one submitted after a merge is skipped before anything else about it is
+    checked (Codex's reviews of 84df535 and 5d06878). GitHub gives a review's current state with
+    the time it was submitted, so a dismissed review of the head, submitted before the merge,
+    can't be placed: "not known". A review of another or a vanished commit is never an approval
+    of the head, so it is kept as it is (Fable's pre-review of 4945de9: an approval dismissed
+    as stale hid a clinical merge without a clinician)."""
     out = []
-    for node in _connection(pr.get("reviews"), MAX_REVIEWS):
-        n = _obj(node)
-        state = n.get("state")
-        if state == "PENDING":
-            continue  # a draft review nobody else can see
-        if state not in REVIEW_STATES:
-            raise _bad()
-        author = n.get("author")
-        is_bot = isinstance(author, dict) and author.get("__typename") == "Bot"
-        if is_bot or _login(author) not in clinicians:
-            continue
-        submitted = n.get("submittedAt")
-        if submitted is None:
-            raise _Incomplete()  # a review that can't be placed in time: no guess
-        if merged_at is not None and datetime.fromisoformat(_time(submitted)) > merged_at:
-            # Submitted after the merge: it can't bear on the merge, so nothing about it (a
-            # missing commit, a later dismissal) may discard the rest (Codex's reviews of
-            # 84df535 and 5d06878).
-            continue
-        if merged_at is not None and state == "DISMISSED":
-            # Dismissed some time after a submission before the merge: not placeable.
+    for i, login in enumerate(clinicians):
+        if f"rv{i}" not in pr:
             raise _Incomplete()
-        commit = n.get("commit")
-        if commit is None or n.get("submittedAt") is None:
-            raise _Incomplete()  # a review whose commit is gone can't be placed: no guess
-        out.append(
-            {
-                "user": _login(author),
-                "user_type": "User",
-                "state": state,
-                "commit_id": _sha(_obj(commit).get("oid")),
-                "at": _time(n.get("submittedAt")),
-            }
-        )
+        for node in _connection(pr.get(f"rv{i}"), MAX_REVIEWS):
+            n = _obj(node)
+            state = n.get("state")
+            if state == "PENDING":
+                continue  # a draft review nobody else can see
+            author = n.get("author")
+            if not isinstance(author, dict) or author.get("__typename") == "Bot":
+                continue
+            if author.get("login") != login:
+                continue  # GitHub filtered by author; anything else is not this clinician's
+            submitted = n.get("submittedAt")
+            if submitted is None:
+                raise _Incomplete()  # a review that can't be placed in time: no guess
+            at = datetime.fromisoformat(_time(submitted))
+            if merged_at is not None and at > merged_at:
+                continue
+            if not isinstance(state, str) or state not in REVIEW_STATES:
+                raise _bad()
+            commit = n.get("commit")
+            commit_id = VANISHED if commit is None else _sha(_obj(commit).get("oid"))
+            if merged_at is not None and state == "DISMISSED" and commit_id == head:
+                raise _Incomplete()
+            out.append(
+                {
+                    "user": login,
+                    "user_type": "User",
+                    "state": state,
+                    "commit_id": commit_id,
+                    "at": _time(submitted),
+                }
+            )
     return out
 
 
@@ -530,102 +577,137 @@ CHECK_FRESH = timedelta(days=7)
 
 def _checks(
     pr: dict, head: str, app: str, required: tuple[str, ...], now: datetime | None = None
-) -> list[dict]:
-    """The head commit's check runs from the configured app only. A same-named run from any
-    other app is left out, so it can never satisfy a required check (Codex's review of
-    bf76866)."""
+) -> tuple[list[dict], bool]:
+    """(the head commit's results for the required check names, whether they are complete).
+    Check runs from the configured app only: a same-named run from any other app can never
+    satisfy a required check (Codex's review of bf76866). Whatever can't be read whole makes
+    the list partial, never empty: a failure GitHub did report is kept, since any failure
+    fails a check, and a partial list never passes (Fable's pre-review of 4945de9: a failing
+    check vanished whenever the reading was degraded). Names that aren't required are passed
+    over before anything else about them is read."""
+    complete = not pr.get("__checks_partial__")
+    out: list[dict] = []
     # When GitHub has results for the test merge commit, it judges that commit, not the head.
-    # Such results aren't read here, so the checks are left out and the model shows UNKNOWN,
-    # rather than look greener than GitHub (Codex's review of 23bfb61).
+    # Such results aren't read here, so the list is partial (Codex's review of 23bfb61).
     merge = pr.get("potentialMergeCommit")
     if merge is not None:
-        merge = _obj(merge)
-        merge_status = merge.get("status")
-        if merge_status is not None and _list(_obj(merge_status).get("contexts")):
-            raise _Incomplete()
-        if _int(_obj(merge.get("checkSuites")).get("totalCount")) > 0:
-            raise _Incomplete()
+        try:
+            merge = _obj(merge)
+            merge_status = merge.get("status")
+            if merge_status is not None and _list(_obj(merge_status).get("contexts")):
+                complete = False
+            if _int(_obj(merge.get("checkSuites")).get("totalCount")) > 0:
+                complete = False
+        except FetchError:
+            complete = False
     commits = _list(_obj(pr.get("commits")).get("nodes"))
     if not commits:
-        return []
+        return [], complete
     commit = _obj(_obj(commits[0]).get("commit"))
     if _sha(commit.get("oid")) != head:
-        raise _Incomplete()
-    out = []
-    for suite in _connection(commit.get("checkSuites"), MAX_SUITES):
-        suite = _obj(suite)
+        raise _Incomplete()  # results for another commit: none of them apply
+    try:
+        suites_conn = _obj(commit.get("checkSuites"))
+        suites = _list(suites_conn.get("nodes"))
+        if _int(suites_conn.get("totalCount")) > len(suites) or len(suites) > MAX_SUITES:
+            complete = False
+    except FetchError:
+        suites, complete = [], False
+    for suite in suites:
+        if not isinstance(suite, dict):
+            complete = False
+            continue
         suite_app = suite.get("app")
         if not isinstance(suite_app, dict) or suite_app.get("slug") != app:
             continue
         # Only runs started by a pull request, a push or the merge queue can stand for a PR's
-        # required checks; GitHub leaves out a manually dispatched or scheduled run, and so
-        # does this (Codex's review of f37d0c7). The aim is never to look greener than GitHub:
-        # its ruleset, shown in the merge box, stays the authority on what can merge.
-        # Only GitHub Actions suites have a workflow run; another configured app's checks are
-        # taken as GitHub gives them (Codex's review of de9a6fb: they showed as missing).
+        # required checks (Codex's review of f37d0c7). Only GitHub Actions suites have a
+        # workflow run; another app's checks are taken as GitHub gives them (de9a6fb).
         if app == "github-actions":
-            run_event = _obj(suite.get("workflowRun") or {}).get("event")
-            if run_event not in CHECK_EVENTS:
+            workflow_run = suite.get("workflowRun") or {}
+            if not isinstance(workflow_run, dict):
+                complete = False
                 continue
-        for run in _connection(suite.get("checkRuns"), MAX_RUNS):
-            r = _obj(run)
-            raw_status = r.get("status")
-            if not isinstance(raw_status, str):
-                raise _bad()  # Codex's review of 23bfb61: an unhashable one raised TypeError
+            if workflow_run.get("event") not in CHECK_EVENTS:
+                continue
+        try:
+            runs_conn = _obj(suite.get("checkRuns"))
+            runs = _list(runs_conn.get("nodes"))
+            if _int(runs_conn.get("totalCount")) > len(runs) or len(runs) > MAX_RUNS:
+                complete = False
+        except FetchError:
+            runs, complete = [], False
+        for run in runs:
+            if not isinstance(run, dict):
+                complete = False
+                continue
+            name = run.get("name")
+            if not isinstance(name, str) or name not in required:
+                continue  # only required names, matched exactly (Codex's review of dc1eb14)
+            raw_status = run.get("status")
+            conclusion = run.get("conclusion")
+            if not isinstance(raw_status, str) or not (
+                conclusion is None or isinstance(conclusion, str)
+            ):
+                complete = False  # Codex's review of 23bfb61: an odd one raised TypeError
+                continue
             status = CHECK_STATUS.get(raw_status, "queued")  # waiting, pending: not done
-            conclusion = r.get("conclusion")
-            if conclusion is not None and not isinstance(conclusion, str):
-                raise _bad()
             if status == "completed" and conclusion == "SUCCESS":
                 # A success counts only while fresh: GitHub needs one within the past seven
-                # days, so an old one (or one with no time) is no result here (Codex's review of
-                # 5d06878: it passed a required check indefinitely).
-                done = r.get("completedAt")
+                # days, so an old one (or one with no time) is no result here (5d06878).
+                done = run.get("completedAt")
                 if done is None or now is None:
                     continue
                 if datetime.fromisoformat(_time(done)) < now - CHECK_FRESH:
                     continue
             out.append(
                 {
-                    "name": _exact(r.get("name")),
+                    "name": name,
                     "head_sha": head,
                     "status": status,
                     "conclusion": conclusion.lower() if conclusion else None,
                 }
             )
-    out += _status_cautions(commit, head)
-    # Only the required names: the model reads no others, and a fork's pull request can make
-    # check runs with any name (Codex's review of dc1eb14: they could fill the snapshot).
-    return [c for c in out if c["name"] in required]
+    cautions, statuses_complete = _status_cautions(commit, head, required)
+    return out + cautions, complete and statuses_complete
 
 
-def _status_cautions(commit: dict, head: str) -> list[dict]:
-    """The head commit's statuses (GitHub's older kind of result), as cautions only. When a
-    status and a check run share a required name, GitHub needs both to pass (Codex's review of
-    ab64500). A status that isn't a success counts against that name; a successful one adds
-    nothing, because a status can't be tied to an app the way a check run can, so it must never
-    make a check look passed. Never greener than GitHub."""
+def _status_cautions(commit: dict, head: str, required: tuple[str, ...]) -> tuple[list[dict], bool]:
+    """(the head commit's statuses for required names, as cautions only, whether complete).
+    When a status and a check run share a required name, GitHub needs both to pass (Codex's
+    review of ab64500). A status that isn't a success counts against that name; a successful
+    one adds nothing, because a status can't be tied to an app the way a check run can."""
     raw = commit.get("status")
     if raw is None:
-        return []
-    out = []
-    for context in _list(_obj(raw).get("contexts")):
-        c = _obj(context)
-        state = c.get("state")
-        if state not in STATUS_STATES:
-            raise _bad()
+        return [], True
+    try:
+        contexts = _list(_obj(raw).get("contexts"))
+    except FetchError:
+        return [], False
+    out, complete = [], True
+    for context in contexts:
+        if not isinstance(context, dict):
+            complete = False
+            continue
+        name = context.get("context")
+        if not isinstance(name, str) or name not in required:
+            continue
+        state = context.get("state")
+        if not isinstance(state, str) or state not in STATUS_STATES:
+            complete = False
+            continue
         if state == "SUCCESS":
             continue
         pending = state in ("PENDING", "EXPECTED")
         out.append(
             {
-                "name": _exact(c.get("context")),
+                "name": name,
                 "head_sha": head,
                 "status": "in_progress" if pending else "completed",
                 "conclusion": None if pending else "failure",
             }
         )
-    return out
+    return out, complete
 
 
 def _issue(repo: str, pr: dict) -> tuple[int, dict | None, dict | None]:
@@ -681,11 +763,9 @@ def _event(event: Any) -> dict:
     }
 
 
-def _item(
-    repo: str, cfg: FetcherConfig, node: Any, lite: bool = False, now: datetime | None = None
-) -> dict:
-    """One pull request as a snapshot item. `lite`: read without its files, reviews and checks
-    (it was too large to read whole), which are then "not known"."""
+def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None) -> dict:
+    """One pull request as a snapshot item. A part that wasn't asked for (a lite or retried
+    read) or couldn't be read is "not known"."""
     pr = _obj(node)
     number = _int(pr.get("number"))
     head = _sha(pr.get("headRefOid"))
@@ -722,7 +802,7 @@ def _item(
     # Parts that can't be read whole are null ("not known"): the model never reads them as
     # clean, and still judges everything that is known.
     try:
-        if lite:
+        if "files" not in pr:
             raise _Incomplete()
         patterns = tuple(settings.clinical_paths)
         if _clinical(_all_paths(pr), patterns):
@@ -734,35 +814,25 @@ def _item(
         pull["files"] = None
         pull.pop("files_complete", None)
     merged_at = datetime.fromisoformat(pull["merged_at"]) if merged else None
-    parts = [("reviews", lambda: _reviews(pr, cfg.clinicians, merged_at))]
+    try:
+        pull["reviews"] = _reviews(pr, cfg.clinicians, merged_at, head)
+    except (_Incomplete, *_SHAPE):
+        # null: "not known", so the model still judges what is known (Codex's review of
+        # 198a66e: leaving the key out made the whole PR unreadable and hid its warnings).
+        pull["reviews"] = None
     # Checks only for an open pull request. Once it is merged or closed, GitHub no longer shows
     # the test merge commit it judged, so no reading of the checks can match its verdict; the
     # merge box enforced them at the time (owner's decision, 2026-11-25, after Codex's review
     # of a1e05e5).
-    if lite:
-        parts = []
-        pull["reviews"] = pull["checks"] = None
-    elif state == "OPEN":
-        parts.append(
-            (
-                "checks",
-                lambda: _checks(
-                    pr, head, settings.checks_app, tuple(settings.required_checks), now
-                ),
-            )
-        )
-    else:
-        # null: "not known", so the model still judges the merger, the authorisation, the
-        # review and clinical approval (Codex's review of b24ac2d: leaving the key out made
-        # the whole PR unreadable and hid those warnings).
-        pull["checks"] = None
-    for key, read in parts:
+    pull["checks"] = None
+    if state == "OPEN" and "commits" in pr:
         try:
-            pull[key] = read()
+            required = tuple(settings.required_checks)
+            pull["checks"], complete = _checks(pr, head, settings.checks_app, required, now)
+            if not complete:
+                pull["checks_complete"] = False  # a failure in it still fails; it never passes
         except (_Incomplete, *_SHAPE):
-            # null: "not known", so the model still judges what is known (Codex's review of
-            # 198a66e: leaving the key out made the whole PR unreadable and hid its warnings).
-            pull[key] = None
+            pull["checks"] = None
     try:
         linked, issue, issue_screen = _issue(repo, pr)
     except _SHAPE:
@@ -862,6 +932,12 @@ def _listing(
     return list(dict.fromkeys(numbers)), more_open or cursor is not None
 
 
+# Failures that may pass on asking again: a lone pull request is asked for in full once more
+# before it is read lite, and a repository read lite only because of these fails the refresh
+# rather than replace known results (Fable's pre-review of 4945de9).
+TRANSIENT = HEAVY - {"too-large", "too-heavy"}
+
+
 def _details(
     github: GitHub,
     token: str,
@@ -869,13 +945,15 @@ def _details(
     name: str,
     numbers: list[int],
     deadline: float | None = None,
+    clinicians: tuple[str, ...] = (),
 ) -> list:
     """[(number, node, lite)] for these pull requests, in order; node UNREADABLE when GitHub's
-    answer didn't hold it whole."""
+    answer didn't hold it whole. `lite` is False for a full read, else why it was cut short
+    (the failure's code, or "retry")."""
 
-    def fetch(batch: list[int], lite: bool, core: bool = False) -> list:
+    def fetch(batch: list[int], omit: frozenset, lite) -> list:
         try:
-            query = detail_query(batch, lite, core)
+            query = detail_query(batch, omit, clinicians)
             data = github.graphql(token, query, {"owner": owner, "name": name})
             _on_time(deadline)
         except FetchError as error:
@@ -892,51 +970,54 @@ def _details(
         # unreadable; one deleted since the list is gone from the next refresh's list.
         return [(n, repository.get(f"p{i}") or UNREADABLE, lite) for i, n in enumerate(batch)]
 
-    # At most about four requests per pull request: splitting to one, reading it lite, and
-    # its core.
-    budget = [4 * len(numbers) + 2]
+    # At most about five requests per pull request: splitting to one, asking again, reading
+    # it lite, and a retry without the pieces in error, then its core.
+    budget = [5 * len(numbers) + 2]
 
-    def fetch_counted(batch: list[int], lite: bool, core: bool = False) -> list:
+    def fetch_counted(batch: list[int], omit: frozenset, lite) -> list:
         if budget[0] <= 0:
             raise FetchError("too-heavy")
-        if deadline is not None and time.monotonic() > deadline:
-            raise FetchError("too-slow")  # not in HEAVY: never split, the refresh ends
         budget[0] -= 1
-        return resolve(fetch(batch, lite, core))
+        return resolve(fetch(batch, omit, lite))
 
     def resolve(entries: list) -> list:
-        """Each RETRY asked for again with its core fields only (read as lite: files, reviews
-        and checks not known). Still nothing usable: unreadable."""
+        """Each Retry asked for again without just its pieces in error, then with its core
+        only. Still nothing usable: unreadable."""
         out = []
         for number, node, lite in entries:
-            if node is RETRY:
-                try:
-                    ((_, node, _),) = fetch_counted([number], True, core=True)
-                except FetchError as error:
-                    if not _its_own(error, 1):
-                        raise
-                    node = UNREADABLE
-                if node is RETRY:
-                    node = UNREADABLE
-                lite = True
+            if isinstance(node, Retry):
+                pieces, node, lite = node.pieces, UNREADABLE, "retry"
+                for omit in (pieces, ALL_PIECES):
+                    try:
+                        ((_, got, _),) = fetch_counted([number], omit, "retry")
+                    except FetchError as error:
+                        if not _its_own(error, 1):
+                            raise
+                        continue
+                    if isinstance(got, dict):
+                        node = got
+                        break
             out.append((number, node, lite))
         return out
 
-    def read(batch: list[int]) -> list:
+    def read(batch: list[int], again: bool = True) -> list:
         try:
-            return fetch_counted(batch, False)
+            return fetch_counted(batch, frozenset(), False)
         except FetchError as error:
             if error.code not in HEAVY and not _its_own(error, len(batch)):
                 raise
+            code = error.code
         if len(batch) > 1:
             half = len(batch) // 2
             return read(batch[:half]) + read(batch[half:])
+        if again and code in TRANSIENT:
+            return read(batch, again=False)  # once more in full before cutting it short
         try:
-            return fetch_counted(batch, True)
+            return fetch_counted(batch, LARGE, code)
         except FetchError as error:
             if not _its_own(error, 1):
                 raise
-            return [(batch[0], UNREADABLE, True)]
+            return [(batch[0], UNREADABLE, code)]
 
     out = []
     for i in range(0, len(numbers), BATCH):
@@ -1000,13 +1081,13 @@ def repo_items(
     numbers, more = _listing(repo, listing, now, more_pages)
     since = now - timedelta(days=RECENT_DAYS)
     items = []
-    details = _details(github, token, owner, name, numbers, deadline)
+    details = _details(github, token, owner, name, numbers, deadline, tuple(cfg.clinicians))
     readable = False
-    for number, node, lite in details:
+    for number, node, _lite in details:
         try:
             if node is UNREADABLE:
                 raise _bad()
-            item = _item(repo, cfg, node, lite, now)
+            item = _item(repo, cfg, node, now)
             if item["number"] != number:
                 raise _bad()
         except (FetchError, TypeError, ValueError, AttributeError, KeyError, OverflowError):
@@ -1025,7 +1106,12 @@ def repo_items(
     )
     # Unless what was read shows a known unsafe merge: that must be shown, not held back with
     # the last snapshot (Codex's review of 5d06878).
-    if len(details) > 1 and all(lite for _, _, lite in details) and not unsafe_known:
+    lites = [lite for _, _, lite in details]
+    # A lone pull request read lite only because of a timeout or a server error is no reason
+    # to replace the last snapshot either (Fable's pre-review of 4945de9): unlike one that is
+    # too large, asking again later can read it whole.
+    only_transient = bool(lites) and all(lite in TRANSIENT for lite in lites)
+    if details and all(lites) and (len(details) > 1 or only_transient) and not unsafe_known:
         # Every pull request read without its files, reviews and checks is no per-PR problem
         # either: fail, keeping the last good snapshot, rather than replace known results with
         # "not known" under an "ok" (Fable's pre-review of 8152df0).

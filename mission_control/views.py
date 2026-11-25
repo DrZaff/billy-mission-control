@@ -340,22 +340,26 @@ def _path(entry: Entry) -> str:
     else:
         rows.append(("-", "Pull request", "none yet"))
 
-    for flag, marker in (
-        (Flag.CHECKS_FAILING, "!"),
-        # Stale or missing results are still coming, not an alert: "...", never a "!" that
-        # nothing else backs up (Fable's review of 0cf099c).
-        (Flag.CHECKS_STALE, "..."),
-        (Flag.CHECKS_MISSING, "..."),
-        (Flag.CHECKS_PENDING, "..."),
-        (Flag.CHECKS_PASSED, "done"),
-        # Not known here: neither passed nor "not yet" (Codex's review of b7d568e).
-        (Flag.CHECKS_UNVERIFIED, "?"),
-    ):
-        if flag in flags:
-            rows.append((marker, "Checks", FLAG_WORDS[flag].lower()))
-            break
+    if st.merged:
+        # Never judged after a merge (owner's decision, 2026-11-25): neither passed nor not.
+        rows.append(("?", "Checks", "not judged after a merge (GitHub's merge box enforced them)"))
     else:
-        rows.append(("-", "Checks", "not yet"))
+        for flag, marker in (
+            (Flag.CHECKS_FAILING, "!"),
+            # Stale or missing results are still coming, not an alert: "...", never a "!" that
+            # nothing else backs up (Fable's review of 0cf099c).
+            (Flag.CHECKS_STALE, "..."),
+            (Flag.CHECKS_MISSING, "..."),
+            (Flag.CHECKS_PENDING, "..."),
+            (Flag.CHECKS_PASSED, "done"),
+            # Not known here: neither passed nor "not yet" (Codex's review of b7d568e).
+            (Flag.CHECKS_UNVERIFIED, "?"),
+        ):
+            if flag in flags:
+                rows.append((marker, "Checks", FLAG_WORDS[flag].lower()))
+                break
+        else:
+            rows.append(("-", "Checks", "not yet"))
 
     if Flag.CLINICAL in flags:
         if Flag.REVIEWS_UNVERIFIED in flags:

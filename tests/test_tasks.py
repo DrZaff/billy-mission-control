@@ -542,8 +542,9 @@ class Merges(unittest.TestCase):
         # review of 0cf099c); GitHub's merge box enforced them at the time.
         s = derive(self.merged(checks=[check("lint"), check("test", conclusion="failure")]))
         self.assertEqual(s.state, State.MERGED)
-        self.assertIn(Flag.CHECKS_UNVERIFIED, s.flags)
-        self.assertNotIn(Flag.CHECKS_FAILING, s.flags)
+        judged = {Flag.CHECKS_FAILING, Flag.CHECKS_PASSED, Flag.CHECKS_UNVERIFIED}
+        self.assertFalse(s.flags & judged)
+        self.assertFalse(s.needs_attention)
 
 
 class BlockedFailedPausedClosed(unittest.TestCase):
@@ -1449,3 +1450,41 @@ class CodexReviewOf84df535(unittest.TestCase):
         self.assertIn(Flag.CONFLICTING_RECORDS, s.flags)
         self.assertNotIn(Flag.MERGED_UNREVIEWED, s.flags)
         self.assertIn("disagree", s.reasons[0])
+
+
+class FableReviewOf4945de9(unittest.TestCase):
+    def test_a_moved_head_is_never_hidden_by_a_closed_or_unlinked_issue(self):
+        # Finding 7.
+        moved = task(runs=[run("build"), passed(), published(B)], pull_request=pr())
+        for over in (
+            {"issue": {"number": 7, "state": "closed", "timeline": [labeled()]}},
+            {"issue": None},
+        ):
+            s = derive(dict(moved, **over))
+            self.assertEqual(s.state, State.UNSAFE, over)
+            self.assertIn(Flag.HEAD_MISMATCH, s.flags)
+
+    def test_disagreeing_records_need_attention(self):
+        # Finding 8.
+        value = task(
+            runs=[
+                run("build", B),
+                passed(B, 2),
+                failed(B, 3),
+                run("build", A, 4),
+                passed(A, 5),
+                published(A, 6),
+            ],
+            pull_request=pr(state="closed", merged=True, merged_by=OWNER, merged_at=t(30)),
+        )
+        s = derive(value)
+        self.assertEqual(s.state, State.MERGED)
+        self.assertIn(Flag.CONFLICTING_RECORDS, s.flags)
+        self.assertTrue(s.needs_attention)
+
+    def test_a_closed_pr_with_unread_parts_is_calm(self):
+        # Finding 9.
+        closed = dict(pr(state="closed"), files=None, reviews=None, checks=None)
+        s = derive(task(runs=None, pull_request=closed))
+        self.assertEqual(s.state, State.CLOSED)
+        self.assertFalse(s.needs_attention)
