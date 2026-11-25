@@ -718,7 +718,9 @@ class FableAuditOfB5ac6ddScreens(unittest.TestCase):
         state, body = detail(raw)
         self.assertEqual(state, State.UNSAFE)
         self.assertNotIn("never", body)  # neither "never authorised" nor "never passed review"
-        self.assertIn("withdrawn by the merge: agent:ready removed or the issue closed", body)
+        self.assertIn(
+            "withdrawn by the time of the merge: agent:ready removed or the issue closed", body
+        )
         self.assertIn("not judged: no authorisation covers Billy&#x27;s records", body)
 
     def test_an_approval_shows_even_when_the_files_may_be_clinical(self):
@@ -763,7 +765,7 @@ class FableAuditOfFe4d72dScreens(unittest.TestCase):
         body, _ = self.rows(entry("example-site-935"))
         self.assertIn("not known: a review can&#x27;t be placed", body)
         body, _ = self.rows(entry("example-site-939"))
-        self.assertIn("not known: the issue&#x27;s closing can&#x27;t be placed", body)
+        self.assertIn("not known: the issue&#x27;s closings and reopenings don&#x27;t add up", body)
         body, _ = self.rows(entry("example-tools-62"))
         self.assertIn("not shown: no linked issue to show it", body)
 
@@ -801,3 +803,23 @@ class FableAuditOfFe4d72dScreens(unittest.TestCase):
         self.assertEqual(e_p.status.state, State.PAUSED)
         self.assertEqual(body_p, body_u)
         self.assertEqual(views.section(e_p.status), views.section(e_u.status))
+
+
+class FableAuditOfCa7faa9Screens(unittest.TestCase):
+    def test_the_not_linked_header_never_contradicts_its_reason(self):
+        for task_id in ("example-tools-62", "example-tools-68"):
+            state, body = detail(entry(task_id))
+            self.assertEqual(state, State.NOT_LINKED)
+            self.assertIn("Not on Billy&#x27;s path now (see why)", body)
+            self.assertNotIn("decide on GitHub", body)
+
+    def test_an_unknown_merge_is_not_called_unsafe(self):
+        state, body = detail(entry("example-site-939"))
+        self.assertEqual(state, State.UNKNOWN)
+        self.assertIn("whether it was safe isn&#x27;t known", body)
+        self.assertNotIn("merged unsafely", body)
+
+    def test_the_withdrawn_row_reads_the_same_open_or_merged(self):
+        state, body = detail(entry("example-tools-66"))
+        self.assertEqual(state, State.UNSAFE)
+        self.assertIn("withdrawn: agent:ready removed or the issue closed", body)
