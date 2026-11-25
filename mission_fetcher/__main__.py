@@ -59,7 +59,8 @@ def github_checks(cfg, github) -> list[Check]:
     results.append(Check("read-only token", True, "yes"))
     try:
         github.repositories(token, repos)
-        results.append(Check(f"exactly {len(repos)} repositories", True, ", ".join(repos)))
+        # Counted, never named: the names are the config's own text (Codex's review of 9cc8f43).
+        results.append(Check(f"exactly {len(repos)} repositories", True, "yes"))
     except FetchError as error:
         results.append(Check(f"exactly {len(repos)} repositories", False, error.code))
     finally:

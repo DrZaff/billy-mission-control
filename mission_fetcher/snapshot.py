@@ -82,6 +82,8 @@ CHECK_EVENTS = (
     "deployment_status",
 )
 CHECK_STATUS = {"QUEUED": "queued", "IN_PROGRESS": "in_progress", "COMPLETED": "completed"}
+# GitHub's CheckStatusState values, exactly: the rest (waiting, pending, requested) aren't done.
+CHECK_STATUS_STATES = frozenset({*CHECK_STATUS, "PENDING", "REQUESTED", "WAITING"})
 # GitHub's CheckConclusionState values, exactly as it writes them.
 CHECK_CONCLUSIONS = frozenset(
     {
@@ -413,6 +415,16 @@ def _list(value: Any) -> list:
     return value
 
 
+def _placed(at: str, now: datetime | None) -> datetime:
+    """A time that may be judged against the refresh: one later than `now`, beyond clock drift,
+    is wrongly dated, and nothing is placed by it (pre-review of 07c3480: a review, an event or
+    a merge dated in the future counted). Raises _Incomplete."""
+    when = datetime.fromisoformat(at)
+    if now is not None and when > now + FUTURE_SKEW:
+        raise _Incomplete()
+    return when
+
+
 def _fresh(stale_at: datetime, now: datetime) -> bool:
     """Whether a result going stale at `stale_at` is fresh now: not yet stale, and not dated in
     the future beyond clock drift."""
@@ -481,9 +493,15 @@ def _sha(value: Any) -> str:
     return value
 
 
+ISO_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})")
+
+
 def _time(value: Any) -> str:
-    """GitHub's ISO time, re-written as an unambiguous UTC time the model accepts."""
-    if not isinstance(value, str):
+    """GitHub's ISO time, re-written as an unambiguous UTC time the model accepts: GitHub's own
+    shape only, and to the whole second, the model's resolution, so the two place every event
+    alike (pre-review of 07c3480: a half second let the fetcher drop a review the model would
+    have held in doubt)."""
+    if not isinstance(value, str) or not ISO_TIME.fullmatch(value):
         raise _bad()
     try:
         parsed = datetime.fromisoformat(value)
@@ -492,7 +510,7 @@ def _time(value: Any) -> str:
     if parsed.tzinfo is None:
         raise _bad()
     try:
-        return parsed.astimezone(UTC).isoformat()
+        return parsed.astimezone(UTC).replace(microsecond=0).isoformat()
     except OverflowError:
         # A time at the edge of the calendar (year 1 or 9999 with an offset): a bad value like
         # any other, never an error that discards the rest (audit of ea9b32a).
@@ -609,7 +627,12 @@ def _compact(paths: list[str] | None, clinical_paths: tuple[str, ...]) -> list[s
 VANISHED = "0" * 40  # a review's commit that is gone (force-pushed away): never the head
 
 
-def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) -> list[dict]:
+def _reviews(
+    pr: dict,
+    clinicians: tuple[str, ...],
+    merged_at: datetime | None,
+    now: datetime | None = None,
+) -> list[dict]:
     """The clinicians' reviews, the only ones the model reads, one connection per clinician
     (`rv<i>`). A part missing or cut off makes the reviews "not known". Each review is first
     placed in time, and one submitted after a merge is skipped before anything else about it is
@@ -630,7 +653,7 @@ def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) 
             submitted = n.get("submittedAt")
             if submitted is None:
                 raise _Incomplete()  # a review that can't be placed in time: no guess
-            at = datetime.fromisoformat(_time(submitted))
+            at = _placed(_time(submitted), now)
             if merged_at is not None and at > merged_at:
                 continue  # after the merge: skipped before anything else (audit of 0585599)
             author = n.get("author")
@@ -711,11 +734,16 @@ def _checks(
         except FetchError:
             complete = False
     commits = _list(_obj(pr.get("commits")).get("nodes"))
-    if not commits:
-        return [], complete
+    # Exactly the head: an open pull request always has one, and asked for the last one, GitHub
+    # gives one row (pre-review of 07c3480: none read as "no checks", a second was ignored).
+    if len(commits) != 1:
+        if not commits:
+            return [], False
+        complete = False
     commit = _obj(_obj(commits[0]).get("commit"))
     if _sha(commit.get("oid")) != head:
         raise _Incomplete()  # results for another commit: none of them apply
+    run_ids: set[str] = set()
     try:
         suites_conn = _obj(commit.get("checkSuites"))
         suites = _list(suites_conn.get("nodes"))
@@ -783,6 +811,13 @@ def _checks(
             if not isinstance(run, dict):
                 complete = False
                 continue
+            # A run in two suites may stand for an omitted one, as a repeat within a suite may
+            # (pre-review of 07c3480).
+            run_id = run.get("id")
+            if isinstance(run_id, str):
+                if run_id in run_ids:
+                    complete = False
+                run_ids.add(run_id)
             name = run.get("name")
             if not isinstance(name, str):
                 complete = False  # wrongly shaped: not known, never skipped (audit of 28009de)
@@ -803,6 +838,14 @@ def _checks(
             if conclusion is not None and conclusion not in CHECK_CONCLUSIONS:
                 # Only GitHub's own values, exactly: a "success" in another case would skip the
                 # freshness check below and still read as passed (Codex's review of b1fef32).
+                complete = False
+                continue
+            if raw_status not in CHECK_STATUS_STATES or (
+                conclusion is not None and raw_status != "COMPLETED"
+            ):
+                # Only GitHub's own states, and a conclusion only once completed: an odd one,
+                # or a failure "in progress", is not known, never pending (pre-review of
+                # 07c3480).
                 complete = False
                 continue
             status = CHECK_STATUS.get(raw_status, "queued")  # waiting, pending: not done
@@ -914,6 +957,7 @@ def _status_cautions(
     except FetchError:
         return [], False
     out, complete = [], True
+    names: set[str] = set()
     for context in contexts:
         if not isinstance(context, dict):
             complete = False
@@ -922,6 +966,11 @@ def _status_cautions(
         if not isinstance(name, str):
             complete = False  # wrongly shaped: not known (audit of 28009de)
             continue
+        # GitHub gives one row per context: a repeat may stand for an omitted one (pre-review
+        # of 07c3480).
+        if name.casefold() in names:
+            complete = False
+        names.add(name.casefold())
         # In any case: a status only ever counts against a name (Codex's review of 0f79663).
         key = _required_name(name, required)
         if key is None:
@@ -954,14 +1003,18 @@ def _status_cautions(
     return out, complete
 
 
-def _issue(repo: str, pr: dict) -> tuple[int, dict | None, dict | None]:
+def _issue(
+    repo: str, pr: dict, now: datetime | None = None
+) -> tuple[int, dict | None, dict | None]:
     """(how many issues the PR closes, the issue's model input or None, its screen fields).
     An issue in another repository gives no issue: its number would point at the wrong one
     here (Codex's review of f772122)."""
     refs = _obj(pr.get("closingIssuesReferences"))
     total = _int(refs.get("totalCount"))
     nodes = _list(refs.get("nodes"))
-    if total != 1 or len(nodes) != 1:
+    if total != len(nodes) or total > MAX_ISSUES:
+        return None, None, None  # a count that disagrees: not even how many is known
+    if total != 1:
         return total, None, None  # none, or several: the model can't pick one, so no guess
     node = _obj(nodes[0])
     if _obj(node.get("repository")).get("nameWithOwner") != repo:
@@ -978,7 +1031,7 @@ def _issue(repo: str, pr: dict) -> tuple[int, dict | None, dict | None]:
     timeline = []
     try:
         for event in events:
-            e = _event(event, repo)
+            e = _event(event, repo, now)
             # Only the agent:ready label's events, and closings and reopenings: the model reads
             # no others, and keeping them all, once per pull request, could fill the snapshot
             # (Codex's review of dc1eb14). A closing ends the authorisation as an unlabel does,
@@ -999,7 +1052,7 @@ EVENT_KINDS = {
 }
 
 
-def _event(event: Any, repo: str) -> dict:
+def _event(event: Any, repo: str, now: datetime | None = None) -> dict:
     """One label event, its label name exact (_exact), or a closing or reopening. A closing
     names the pull request that closed it (closer_pr) only when GitHub says it was one in this
     repository; anything else (a commit, a project, another repository, none) is null, which
@@ -1012,7 +1065,9 @@ def _event(event: Any, repo: str) -> dict:
     # label still withdraws an authorisation (Codex's review of f772122: skipping it could
     # leave an earlier authorisation in force).
     actor = _login(e.get("actor")) or "ghost"
-    out = {"event": kind, "actor": actor, "at": _time(e.get("createdAt"))}
+    at = _time(e.get("createdAt"))
+    _placed(at, now)  # one dated in the future leaves the issue not known
+    out = {"event": kind, "actor": actor, "at": at}
     if kind in ("labeled", "unlabeled"):
         out["label"] = _exact(_obj(e.get("label")).get("name"))
     else:
@@ -1051,6 +1106,18 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
     # one closed long ago fell out of the window silently (Fable's pre-review of a21bd27).
     if (state == "OPEN") != (pr.get("closedAt") is None):
         raise _bad()
+    # A merged pull request closed when it merged, and neither can be in the future: one time
+    # drives the window and the other the cut-off for reviews and authorisation (pre-review
+    # of 07c3480). GitHub gives merged_by only for a merged one.
+    if merged and _time(pr.get("mergedAt")) != _time(pr.get("closedAt")):
+        raise _bad()
+    if not merged and pr.get("mergedBy") is not None:
+        raise _bad()
+    try:
+        if state != "OPEN":
+            _placed(_time(pr.get("closedAt")), now)
+    except _Incomplete:
+        raise _bad() from None
     settings = cfg.repos[repo]
     pull = {
         "number": number,
@@ -1081,7 +1148,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
         pull.pop("files_complete", None)
     merged_at = datetime.fromisoformat(pull["merged_at"]) if merged else None
     try:
-        pull["reviews"] = _reviews(pr, cfg.clinicians, merged_at)
+        pull["reviews"] = _reviews(pr, cfg.clinicians, merged_at, now)
     except (_Incomplete, *_SHAPE):
         # null: "not known", so the model still judges what is known (Codex's review of
         # 198a66e: leaving the key out made the whole PR unreadable and hid its warnings).
@@ -1105,7 +1172,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
     if pull["checks"] is not None and expiry:
         fresh_until = min(expiry).astimezone(UTC).isoformat()
     try:
-        linked, issue, issue_screen = _issue(repo, pr)
+        linked, issue, issue_screen = _issue(repo, pr, now)
     except _SHAPE:
         linked, issue, issue_screen = None, None, None  # not known: no claim from it
     task = {
@@ -1157,11 +1224,12 @@ def _closed_page(conn: Any, since: datetime) -> tuple[list[int], str | None, lis
     row's number, for finding repeats)."""
     conn = _obj(conn)
     nodes = _list(conn.get("nodes"))
-    numbers, rows = [], []
+    numbers, rows, updated = [], [], []
     for node in nodes:
         node = _obj(node)
         number = _int(node.get("number"))
         rows.append(number)
+        updated.append(datetime.fromisoformat(_time(node.get("updatedAt"))))
         # A closed pull request always has a closing time: one without is a bad answer, never
         # skipped quietly (Fable's pre-review of 8152df0).
         closed_at = datetime.fromisoformat(_time(node.get("closedAt")))
@@ -1173,12 +1241,13 @@ def _closed_page(conn: Any, since: datetime) -> tuple[list[int], str | None, lis
         raise _bad()
     # Newest-updated first: if the last one was still updated in the window, more may lie past
     # it (Codex's review of f37d0c7).
-    last_in_window = (
-        bool(nodes) and datetime.fromisoformat(_time(_obj(nodes[-1]).get("updatedAt"))) >= since
-    )
+    last_in_window = bool(updated) and updated[-1] >= since
+    # That order is checked, never trusted: a page out of order says nothing about the next, so
+    # it is read too, or the list marked cut off (pre-review of 07c3480).
+    disordered = any(a < b for a, b in zip(updated, updated[1:], strict=False))
     # An empty page that says more follow is never the end: the next is read, or the list is
     # marked cut off (Codex's review of 9cc8f43).
-    if has_next and (last_in_window or not nodes):
+    if has_next and (last_in_window or disordered or not nodes):
         cursor = info.get("endCursor")
         if not isinstance(cursor, str) or not 0 < len(cursor) <= 512:
             raise _bad()
@@ -1406,10 +1475,12 @@ def repo_items(
             # TypeError and failed the refresh for every repository).
             item = _unreadable(repo, number)
         readable = readable or _model_reads(item["task"])
-        # A pull request closed between the list and its details still belongs here; one
-        # closed before the window (possible only if the list was wrong) does not.
-        if item["closed_at"] is None or datetime.fromisoformat(item["closed_at"]) >= since:
-            items.append(item)
+        # A pull request closed between the list and its details still belongs here. One the
+        # details place before the window contradicts the list: it is kept, never dropped (it
+        # may be an unsafe merge), and the repository marked cut off (pre-review of 07c3480).
+        if item["closed_at"] is not None and datetime.fromisoformat(item["closed_at"]) < since:
+            more = True
+        items.append(item)
     # No guard on reads cut short (lite): a lite read keeps reviews, and leaves files and checks
     # "not known", which raises an alert, so it is never greener than GitHub. Rejecting such a
     # refresh let two huge pull requests from anyone stall every repository (audit of 28009de).

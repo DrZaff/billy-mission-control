@@ -296,13 +296,18 @@ class GitHub:
         found = set()
         for repo in repos:
             inst = self.call("GET", f"/repos/{repo}/installation", self.app_jwt())
-            if not isinstance(inst, dict) or not isinstance(inst.get("id"), int):
+            inst_id = inst.get("id") if isinstance(inst, dict) else None
+            if not isinstance(inst_id, int) or isinstance(inst_id, bool):
                 raise FetchError("bad-response")
             if inst.get("app_id") != self.app_id:
                 raise FetchError("wrong-app")
             account = inst.get("account")
             if not isinstance(account, dict) or account.get("login") != owner:
                 raise FetchError("wrong-account")
+            # Left out is not "not suspended": the key must be there, null (pre-review of
+            # 07c3480).
+            if "suspended_at" not in inst:
+                raise FetchError("bad-response")
             if inst.get("suspended_at") is not None:
                 raise FetchError("suspended")
             if inst.get("repository_selection") != "selected":

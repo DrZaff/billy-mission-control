@@ -73,7 +73,10 @@ def _keys(data: Any, expected: set[str], name: str) -> dict:
 
 def _path(value: Any, name: str) -> Path:
     _req(isinstance(value, str) and value.startswith("/"), f"{name} must be an absolute path")
-    _req("\x00" not in value and len(value) <= 300, f"{name} is not a usable path")
+    # No control characters: a path is printed in start-up checks and logs (pre-review of
+    # 07c3480: one with an escape or a newline wrote its own lines).
+    usable = len(value) <= 300 and not re.search(r"[\x00-\x1f\x7f-\x9f]", value)
+    _req(usable, f"{name} is not a usable path")
     path = Path(value)
     _req(".." not in path.parts and str(path) == value.rstrip("/"), f"{name} must be normalised")
     return path

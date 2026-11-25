@@ -56,6 +56,8 @@ class SelfCheck(Base):
         results = github_checks(self.cfg_for_repos(), client(self.fake))
         self.assertTrue(all(c.ok for c in results), results)
         self.assertEqual(self.fake.revoked, 1)
+        # The repositories are counted, never named: they are the config's own text.
+        self.assertFalse(any(REPO_A in c.name + c.detail for c in results))
         self.fake.permissions["checks"] = "write"
         results = github_checks(self.cfg_for_repos(), client(self.fake))
         self.assertEqual([(c.ok, c.detail) for c in results], [(False, "not-read-only")])
@@ -3839,6 +3841,187 @@ class CodexReviewOf0dc0f8b(CodexReviewOf099ef9b):
         query = snapshot.detail_query([1], frozenset(), (OWNER,))
         for piece in ("nodes { id state", "id app { slug }", "nodes { id name", "{ id createdAt"):
             self.assertIn(piece, query)
+
+
+class PreReviewOf07c3480(CodexReviewOf099ef9b):
+    """A class-by-class audit of 07c3480: every remaining place for each pattern."""
+
+    FUTURE = "2031-01-01T00:00:00Z"
+
+    def item_for(self, node, github=None):
+        self.fake.prs[REPO_A]["open"] = [node]
+        self.fake.prs[REPO_A]["closed"] = []
+        return self.run_refresh(github)["items"][0]
+
+    def merged(self, **over):
+        merged_at = over.pop("merged_at", (NOW - timedelta(days=1)).isoformat())
+        node = pr_node(1, state="MERGED", merged=True, closed_at=merged_at, issue=issue_node(10))
+        node.update(over)
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        return self.run_refresh()["items"][0]
+
+    # ---- times
+    def test_a_review_dated_in_the_future_is_not_known(self):
+        review = review_node(OWNER, "APPROVED", at=self.FUTURE)
+        node = pr_node(1, issue=issue_node(10), files=("evidence/a.json",), reviews=(review,))
+        self.assertIsNone(self.item_for(node)["task"]["pull_request"]["reviews"])
+
+    def test_an_issue_event_dated_in_the_future_is_not_known(self):
+        issue = issue_node(10)
+        late = dict(issue["timelineItems"]["nodes"][0], createdAt=self.FUTURE)
+        issue["timelineItems"]["nodes"].append(late)
+        issue["timelineItems"]["totalCount"] = 2
+        self.assertIsNone(self.item_for(pr_node(1, issue=issue))["task"]["issue"])
+
+    def test_a_merge_dated_in_the_future_or_unlike_its_closing_is_unreadable(self):
+        self.assertIsNone(self.merged(merged_at=self.FUTURE)["task"])
+        self.assertIsNone(self.merged(mergedAt="2026-11-01T00:00:00Z")["task"])
+
+    def test_times_are_whole_seconds_as_the_model_reads_them(self):
+        # A changes request half a second into the merge's second is in that second: the model
+        # holds it in doubt, never "after the merge".
+        merged_at = "2026-11-23T00:00:00Z"
+        approved = review_node(OWNER, "APPROVED", at="2026-11-22T00:00:00Z")
+        changes = review_node(OWNER, "CHANGES_REQUESTED", at="2026-11-23T00:00:00.500Z")
+        item = self.merged(
+            merged_at=merged_at,
+            files={"totalCount": 1, "nodes": [{"path": "evidence/a.json", "changeType": "ADDED"}]},
+            reviews={"totalCount": 2, "nodes": [approved, changes]},
+        )
+        flags = tasks.derive(dict(item["task"], paused=False)).flags
+        self.assertNotIn(tasks.Flag.CLINICIAN_APPROVED, flags)
+        for odd in ("20261123T000000Z", "2026-W48-1T00:00:00+00:00", "2026-11-23T00:00:00"):
+            with self.subTest(odd=odd), self.assertRaises(gh.FetchError):
+                snapshot._time(odd)
+
+    # ---- repeats
+    def test_a_repeated_status_or_a_run_in_two_suites_is_never_whole(self):
+        node = pr_node(1, issue=issue_node(10), statuses=[("lint", "SUCCESS"), ("LINT", "SUCCESS")])
+        self.assertFalse(self.item_for(node)["task"]["pull_request"].get("checks_complete", True))
+        node = pr_node(1, issue=issue_node(10))
+        suites = node["commits"]["nodes"][0]["commit"]["checkSuites"]
+        for i, r in enumerate(suites["nodes"][0]["checkRuns"]["nodes"]):
+            r["id"] = f"CR_{i}"
+        suites["nodes"].append(json.loads(json.dumps(suites["nodes"][0])))
+        suites["nodes"][1]["id"] = "S2"
+        suites["totalCount"] = 2
+        item = self.item_for(node)
+        self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
+    # ---- contradictions, and states read as calmer
+    def test_a_merger_on_an_unmerged_pr_makes_it_unreadable(self):
+        node = pr_node(1, state="CLOSED", closed_at=(NOW - timedelta(days=1)).isoformat())
+        node["mergedBy"] = {"__typename": "User", "login": "stranger"}
+        self.assertIsNone(self.item_for(node)["task"])
+
+    def test_a_run_in_an_odd_state_is_not_known_never_pending(self):
+        for status, conclusion in (
+            ("IN_PROGRESS", "FAILURE"),
+            ("completed", "FAILURE"),
+            ("X", None),
+        ):
+            with self.subTest(status=status):
+                node = pr_node(1, issue=issue_node(10))
+                run = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+                run["checkRuns"]["nodes"][0].update(status=status, conclusion=conclusion)
+                pull = self.item_for(node)["task"]["pull_request"]
+                self.assertFalse(pull.get("checks_complete", True))
+
+    def test_the_head_must_be_the_one_commit_given(self):
+        for count in (0, 2):
+            with self.subTest(count=count):
+                node = pr_node(1, issue=issue_node(10))
+                commits = node["commits"]["nodes"]
+                node["commits"]["nodes"] = commits * count
+                item = self.item_for(node)
+                self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
+    # ---- counts
+    def test_a_linked_issue_count_unlike_its_rows_is_not_known(self):
+        for total, rows in ((0, 1), (1, 2), (3, 0)):
+            with self.subTest(total=total, rows=rows):
+                node = pr_node(1, issue=issue_node(10))
+                refs = node["closingIssuesReferences"]
+                refs["nodes"] = (refs["nodes"] * 2)[:rows]
+                refs["totalCount"] = total
+                self.assertIsNone(self.item_for(node)["linked_issues"])
+
+    def test_counts_unlike_their_rows_either_way_are_never_whole(self):
+        for delta in (-1, 1):
+            with self.subTest(delta=delta):
+                review = review_node(OWNER, "APPROVED")
+                node = pr_node(
+                    1, issue=issue_node(10), files=("a.html", "b.html"), reviews=(review,)
+                )
+                node["reviews"]["totalCount"] = 1 + delta
+                node["files"]["totalCount"] = 2 + delta
+                pull = self.item_for(node)["task"]["pull_request"]
+                self.assertFalse(pull.get("files_complete", True))
+        data = {
+            "repository": {
+                "open": {"totalCount": 1, "nodes": [{"number": 1}, {"number": 2}]},
+                "closed": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+            }
+        }
+        self.assertEqual(snapshot._listing(REPO_A, data, NOW)[1], True)
+
+    # ---- the list and the details
+    def test_a_pr_the_details_place_outside_the_window_is_kept_and_marked(self):
+        node = pr_node(1, state="MERGED", merged=True, closed_at="2020-01-01T00:00:00Z")
+        node["mergedBy"] = {"__typename": "User", "login": "stranger"}
+        self.fake.prs[REPO_A]["open"] = [node]  # the list still says it is open
+        snap = self.run_refresh()
+        self.assertEqual([i["number"] for i in snap["items"] if i["repo"] == REPO_A], [1])
+        self.assertIn(REPO_A, snap["truncated"])
+
+    def test_details_for_another_number_are_unreadable(self):
+        node = pr_node(1, issue=issue_node(10))
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number: 1)" in body:
+                answer = json.loads(data)
+                answer["data"]["repository"]["p0"]["number"] = 7
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        self.assertIsNone(self.item_for(node, github)["task"])
+
+    def test_a_closed_page_out_of_order_is_never_the_end(self):
+        old = (NOW - timedelta(days=60)).isoformat()
+        recent = (NOW - timedelta(days=1)).isoformat()
+        rows = [
+            {"number": 2, "closedAt": recent, "updatedAt": old},
+            {"number": 3, "closedAt": recent, "updatedAt": recent},
+            {"number": 4, "closedAt": old, "updatedAt": old},
+        ]
+        data = {
+            "repository": {
+                "open": {"totalCount": 0, "nodes": []},
+                "closed": {"nodes": rows, "pageInfo": {"hasNextPage": True, "endCursor": "c"}},
+            }
+        }
+        self.assertTrue(snapshot._listing(REPO_A, data, NOW)[1])
+
+    # ---- actors
+    def test_a_merger_who_is_not_a_user_is_unknown(self):
+        for actor in ({"__typename": "Organization", "login": OWNER}, {"login": OWNER}):
+            with self.subTest(actor=actor):
+                item = self.merged(mergedBy=actor)
+                state = tasks.derive(dict(item["task"], paused=False))
+                self.assertIn(tasks.Flag.MERGER_UNKNOWN, state.flags)
+
+    # ---- text from the config
+    def test_a_path_with_control_characters_is_refused(self):
+        for odd in ("a\x1b[31m", "a\nFAKE", "\x85"):
+            path = f"{self.base}/{odd}/key.pem"
+            with self.subTest(path=path), self.assertRaises(fconfig.ConfigError):
+                fconfig.parse_fetcher(json.dumps(config_data(self.base, key=path)))
 
 
 class NoFifoAnywhere(Base):

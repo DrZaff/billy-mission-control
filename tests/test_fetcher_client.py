@@ -674,6 +674,29 @@ class GitHubClient(Base):
                 github = gh.GitHub(APP_ID, KEY, transport=null, clock=lambda: NOW.timestamp())
                 self.assertFalse(github.revoke(TOKEN))
 
+    def test_an_installation_must_say_it_is_not_suspended_and_have_a_whole_id(self):
+        # Pre-review of 07c3480: a missing suspended_at read as "not suspended", and an id of
+        # true passed as a number.
+        real = self.fake.__call__
+        for change in ({"drop": "suspended_at"}, {"id": True}):
+            with self.subTest(change=change):
+
+                def call(method, path, headers, body, change=change):
+                    status, h, data = real(method, path, headers, body)
+                    if path.endswith("/installation"):
+                        answer = json.loads(data)
+                        if "drop" in change:
+                            del answer[change["drop"]]
+                        else:
+                            answer.update(change)
+                        data = json.dumps(answer).encode()
+                    return status, h, data
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.installation(OWNER, [REPO_A, REPO_B])
+                self.assertEqual(caught.exception.code, "bad-response")
+
     def test_an_odd_or_repeated_repository_row_is_never_skipped(self):
         # Codex's review of df5912d (should fix).
         real = self.fake.__call__
