@@ -849,6 +849,85 @@ class Refresh(Base):
             snapshot._compact([long[0], "evidence/a.json"], ("evidence/*",)), ["evidence/a.json"]
         )
 
+    def test_cutting_a_list_never_erases_that_it_was_clinical(self):
+        # Codex's review of 9dbb868 (blocking): a clinical path over 512 bytes as written, or
+        # the step that nulls every list, erased the evidence, and with it the warning that
+        # clinical files were merged without a clinician.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        long_clinical = "evidence/" + "\u00e9" * 3000  # ~18 KB as written: over the cap
+        node = pr_node(
+            1,
+            state="MERGED",
+            merged=True,
+            closed_at=recent,
+            issue=issue_node(10),
+            files=(long_clinical,),
+        )
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        item = self.run_refresh()["items"][0]
+        pull = item["task"]["pull_request"]
+        self.assertIsNone(pull["files"])
+        self.assertIs(pull["clinical_known"], True)
+        state = tasks.derive(self.task_of(item))
+        self.assertIn(tasks.Flag.CLINICAL, state.flags)
+        self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+        # The same through the step that nulls every remaining list.
+        snap = {
+            "items": [
+                {
+                    "task": {
+                        "clinical_paths": ["evidence/*"],
+                        "pull_request": {"files": ["evidence/a.json"]},
+                    }
+                }
+            ]
+        }
+        snapshot._cut(snap["items"][0]["task"]["pull_request"], ("evidence/*",), False)
+        self.assertEqual(
+            snap["items"][0]["task"]["pull_request"], {"files": None, "clinical_known": True}
+        )
+
+    def test_a_request_that_ends_past_the_time_limit_fails_the_refresh(self):
+        # Codex's review of 9dbb868: the limit was checked only before detail requests.
+        times = iter([0.0] + [10_000.0] * 1000)  # the start, then everything is too late
+        with mock.patch.object(snapshot.time, "monotonic", side_effect=lambda: next(times)):
+            with self.assertRaises(gh.FetchError) as caught:
+                self.run_refresh()
+        self.assertEqual(caught.exception.code, "too-slow")
+
+    def test_a_slow_drip_answer_is_cut_off_by_the_request_limit(self):
+        class Response:
+            status = 200
+
+            def read(self, n):
+                return b"x"
+
+            def getheaders(self):
+                return []
+
+        class Connection:
+            def __init__(self, *a, **k):
+                pass
+
+            def request(self, *a, **k):
+                pass
+
+            def getresponse(self):
+                return Response()
+
+            def close(self):
+                pass
+
+        clock = iter(range(0, 10**6, 5))  # each look: 5 s later
+        with (
+            mock.patch.object(gh.http.client, "HTTPSConnection", Connection),
+            mock.patch.object(gh.time, "monotonic", side_effect=lambda: next(clock)),
+        ):
+            with self.assertRaises(gh.FetchError) as caught:
+                gh.https_transport("GET", "/x", {}, None)
+        self.assertEqual(caught.exception.code, "timeout")
+
     def test_a_contradictory_merge_state_is_never_read_as_the_calmer_half(self):
         # Finding 3: state MERGED with merged false read as closed without merging.
         recent = (NOW - timedelta(days=1)).isoformat()

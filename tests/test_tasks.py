@@ -462,6 +462,33 @@ class Merges(unittest.TestCase):
         value["runs"][-1]["at"] = t(10)  # before the merge: it counts
         self.assertIn(Flag.CLINICAL, derive(value).flags)
 
+    def test_a_fork_pr_is_never_credited_with_billys_records(self):
+        # Codex's review of 9dbb868 (blocking): a fork PR reached AWAITING_OWNER.
+        ready = task(runs=[run("build"), passed(), published()], pull_request=pr())
+        self.assertEqual(derive(ready).state, State.AWAITING_OWNER)
+        fork = copy.deepcopy(ready)
+        fork["pull_request"]["from_fork"] = True
+        s = derive(fork)
+        self.assertEqual(s.state, State.NOT_LINKED)
+        self.assertIn(Flag.FROM_FORK, s.flags)
+        self.assertIsNone(s.reviewed_sha)
+        self.assertTrue(s.needs_attention)
+        merged = copy.deepcopy(fork)
+        merged["pull_request"].update(state="closed", merged=True, merged_by=OWNER)
+        merged["pull_request"]["merged_at"] = "2026-12-31T00:00:00+00:00"
+        s = derive(merged)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.MERGED_UNREVIEWED, s.flags)  # Billy never reviewed fork work
+
+    def test_clinical_known_makes_a_change_clinical(self):
+        value = task(
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(clinical_known=True),  # only app.py is listed
+        )
+        self.assertIn(Flag.CLINICAL, derive(value).flags)
+        value["pull_request"]["clinical_known"] = "yes"
+        self.assertEqual(derive(value).state, State.UNKNOWN)
+
     def test_a_merge_without_its_time_is_unknown(self):
         value = self.merged()
         del value["pull_request"]["merged_at"]

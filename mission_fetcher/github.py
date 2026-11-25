@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 HOST = "api.github.com"
 TIMEOUT = 15.0
+REQUEST_LIMIT = 60.0  # seconds for a whole request
 MAX_RESPONSE = 4 * 1024 * 1024
 # GraphQL error types GitHub gives when a query is too costly to finish.
 HEAVY_KINDS = {"RESOURCE_LIMITS_EXCEEDED", "MAX_NODE_LIMIT_EXCEEDED", "TIMEOUT"}
@@ -78,9 +79,21 @@ def https_transport(method: str, path: str, headers: dict[str, str], body: bytes
     """One HTTPS request to api.github.com. The real transport; tests pass a fake one."""
     conn = http.client.HTTPSConnection(HOST, 443, timeout=TIMEOUT, context=tls_context())
     try:
+        # A whole request has a time limit too, not only each socket operation: a slow drip
+        # could otherwise run far past the refresh's limit (Codex's review of 9dbb868).
+        ends = time.monotonic() + REQUEST_LIMIT
         conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
-        data = resp.read(MAX_RESPONSE + 1)
+        chunks, size = [], 0
+        while size <= MAX_RESPONSE:
+            if time.monotonic() > ends:
+                raise TimeoutError()
+            chunk = resp.read(min(64 * 1024, MAX_RESPONSE + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        data = b"".join(chunks)
         return resp.status, {k.lower(): v for k, v in resp.getheaders()}, data
     except TimeoutError:
         raise FetchError("timeout") from None

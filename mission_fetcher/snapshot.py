@@ -114,6 +114,15 @@ CLOSED_PAGES = 5
 
 BATCH = 10
 REFRESH_DEADLINE = 180.0  # seconds
+
+
+def _on_time(deadline: float | None) -> None:
+    """Checked after every request too: one that finishes past the limit fails the refresh
+    (Codex's review of 9dbb868: the limit was checked only before detail requests)."""
+    if deadline is not None and time.monotonic() > deadline:
+        raise FetchError("too-slow")
+
+
 # Failures that may mean the query was too heavy, not that GitHub is down: the batch is split
 # (Codex's review of 28546f5: GitHub can stop a costly query by time or resources, before the
 # answer reaches the size cap). If a lone pull request read without its heavy parts still
@@ -417,6 +426,38 @@ def _files(pr: dict, clinical_paths: tuple[str, ...]) -> tuple[list[str] | None,
     return paths, complete
 
 
+def _all_paths(pr: dict) -> list[str]:
+    """Every plain path GitHub gave, before any cut; anything odd is simply not matched."""
+    try:
+        nodes = _list(_obj(pr.get("files")).get("nodes"))
+    except FetchError:
+        return []
+    out = []
+    for node in nodes:
+        path = node.get("path") if isinstance(node, dict) else None
+        if isinstance(path, str) and 0 < len(path) <= 4096:
+            out.append(path)
+    return out
+
+
+def _clinical(paths: list[str] | None, clinical_paths: tuple[str, ...]) -> bool:
+    return any(fnmatchcase(p, pattern) for p in paths or () for pattern in clinical_paths)
+
+
+def _cut(pull: dict, clinical_paths: tuple[str, ...], keep_one: bool) -> None:
+    """Cut a pull request's file list to fit, keeping what it proved: if a path matched a
+    clinical rule, `clinical_known` says so, whatever is kept (Codex's review of 9dbb868: a
+    long clinical path, or the step that nulls every list, erased the evidence and with it the
+    warning that clinical files were merged without a clinician)."""
+    if _clinical(pull.get("files"), clinical_paths):
+        pull["clinical_known"] = True
+    pull["files"] = _compact(pull.get("files"), clinical_paths) if keep_one else None
+    if pull["files"] is None:
+        pull.pop("files_complete", None)
+    else:
+        pull["files_complete"] = False
+
+
 def _compact(paths: list[str] | None, clinical_paths: tuple[str, ...]) -> list[str] | None:
     """A file list cut down to fit: one path that matches a clinical rule, kept so the model
     still knows the change is clinical and still warns when a clinician's approval is missing
@@ -646,7 +687,10 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
     try:
         if lite:
             raise _Incomplete()
-        pull["files"], complete = _files(pr, tuple(settings.clinical_paths))
+        patterns = tuple(settings.clinical_paths)
+        if _clinical(_all_paths(pr), patterns):
+            pull["clinical_known"] = True  # survives any later cut (9dbb868)
+        pull["files"], complete = _files(pr, patterns)
         if not complete:
             pull["files_complete"] = False
     except (_Incomplete, *_SHAPE):
@@ -794,10 +838,12 @@ def _details(
         try:
             query = detail_query(batch, lite, core)
             data = github.graphql(token, query, {"owner": owner, "name": name})
+            _on_time(deadline)
         except FetchError as error:
             # Errors on some fields, with the rest of the answer: what GitHub did supply is
             # still judged (Codex's review of c3ee86b). With no usable answer, the error
             # stands and the batch is split as before.
+            _on_time(deadline)
             partial = _partial(error, batch, lite)
             if partial is None:
                 raise
@@ -905,10 +951,13 @@ def repo_items(
     """(items, whether more pull requests may exist than were read)."""
     owner, name = repo.split("/", 1)
     listing = github.graphql(token, LIST_QUERY, {"owner": owner, "name": name})
+    _on_time(deadline)
 
     def more_pages(cursor: str) -> Any:
         variables = {"owner": owner, "name": name, "after": cursor}
-        return github.graphql(token, CLOSED_QUERY, variables)
+        page = github.graphql(token, CLOSED_QUERY, variables)
+        _on_time(deadline)
+        return page
 
     numbers, more = _listing(repo, listing, now, more_pages)
     since = now - timedelta(days=RECENT_DAYS)
@@ -973,6 +1022,7 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
         }
         # Measured exactly as it will be written and read (Codex's review of 1cc6cf8), inside
         # the try so a failed revoke is reported with it too (Codex's review of 23bfb61).
+        _on_time(deadline)
         _fit(snapshot)
     except BaseException as error:
         # The refresh failed, whatever the reason: revoke the token, and say too if it
@@ -1009,20 +1059,14 @@ def _fit(snapshot: dict) -> None:
     ]
     tasks.sort(key=lambda t: len(encode({"f": t["pull_request"]["files"]})), reverse=True)
     for task in tasks:
-        pull = task["pull_request"]
-        pull["files"] = _compact(pull["files"], tuple(task["clinical_paths"]))
-        if pull["files"] is None:
-            pull.pop("files_complete", None)
-        else:
-            pull["files_complete"] = False
+        _cut(task["pull_request"], tuple(task["clinical_paths"]), keep_one=True)
         if size() <= MAX_SNAPSHOT:
             return
     # Then every file list still there: null (Fable's pre-review of 8152df0: lists were kept
     # while whole items, a known unsafe merge among them, were cut).
     for item in snapshot["items"]:
         if item["task"] and item["task"]["pull_request"].get("files"):
-            item["task"]["pull_request"]["files"] = None
-            item["task"]["pull_request"].pop("files_complete", None)
+            _cut(item["task"]["pull_request"], tuple(item["task"]["clinical_paths"]), False)
     if size() <= MAX_SNAPSHOT:
         return
     # Then the clinicians' reviews, largest first: null, "not known", never approved.

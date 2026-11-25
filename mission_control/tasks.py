@@ -50,6 +50,8 @@ clinical_paths may be an explicit empty list.
     pull_request  {"number": int, "state": "open" | "closed", "draft": bool, "merged": bool,
                    "merged_by": "login" | null, "merged_at": ISO 8601 (when merged),
                    "head_sha": "<40 hex>", "from_fork": bool, "files": [path],
+                   "clinical_known": bool (optional; true: a list cut to fit held a clinical
+                   path, so the change is clinical whatever is still listed),
                    "reviews": [{"user": "login", "user_type": "User" | "Bot",
                                 "state": "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" |
                                          "DISMISSED", "commit_id": "<40 hex>", "at": ISO 8601}],
@@ -342,6 +344,7 @@ class _PR:
     merged_by: str | None
     merged_at: datetime | None  # None only when not merged
     from_fork: bool
+    clinical_known: bool  # a cut file list held a clinical path (optional, default false)
     head: str
     files: tuple[str, ...] | None  # None: not known
     files_complete: bool  # False: the list is known to be partial
@@ -426,6 +429,13 @@ def _parse_run(raw: Any, i: int) -> _Run:
     )
 
 
+def _flag(p: Mapping, key: str) -> bool:
+    """An optional true/false that only ever adds a warning: absent means false."""
+    value = p.get(key, False)
+    _req(isinstance(value, bool), f"pull_request.{key} must be true or false")
+    return value
+
+
 def _complete(p: Mapping) -> bool:
     value = p.get("files_complete", True)
     _req(isinstance(value, bool), "pull_request.files_complete must be true or false")
@@ -500,6 +510,7 @@ def _parse_pr(raw: Any) -> _PR:
         merged=merged,
         merged_by=merged_by,
         from_fork=from_fork,
+        clinical_known=_flag(p, "clinical_known"),
         merged_at=_time(_need(p, "merged_at", "pull_request.merged_at"), "pull_request.merged_at")
         if merged
         else None,
@@ -728,6 +739,11 @@ def derive(raw: Any) -> TaskStatus:
             flags.add(Flag.WRONG_BRANCH_RECORD)
         else:
             runs.append(r)
+    if pr and pr.from_fork:
+        # Billy never publishes from a fork, so none of its records can be this pull request's
+        # work: they never credit it with a review or a publish (Codex's review of 9dbb868: a
+        # fork PR reached AWAITING_OWNER on Billy's records).
+        runs = []
 
     merged_at = pr.merged_at if pr and pr.merged else None
     since, last_owner_action = _authorization(task, flags, merged_at)
@@ -779,6 +795,10 @@ def derive(raw: Any) -> TaskStatus:
         if merged_at is None or r.at <= merged_at:
             files.update(r.files)
     if any(fnmatchcase(f, pat) for f in files for pat in task.clinical_paths):
+        flags.add(Flag.CLINICAL)
+    if pr and pr.clinical_known:
+        # The fetcher saw a clinical path before cutting the list to fit (Codex's review of
+        # 9dbb868): clinical, though the path itself is no longer listed.
         flags.add(Flag.CLINICAL)
     # Files not known, or a list known to be partial, may be clinical: gate on that, but
     # never claim either way (A5a). Known clinical paths in a partial list still count.
@@ -855,6 +875,16 @@ def derive(raw: Any) -> TaskStatus:
                 else:
                     flags.add(Flag.CLINICAL_APPROVAL_MISSING)
 
+    if pr and pr.open and pr.from_fork:
+        # Never on the way to a merge: GitHub's own results are shown, and the owner decides
+        # on GitHub (Codex's review of 9dbb868).
+        github_gates()
+        return status(
+            State.NOT_LINKED,
+            "Opened from a fork: not Billy's work, whatever its issue link says. Review it on "
+            "GitHub.",
+            head,
+        )
     if since is None and not task.issue_known:
         github_gates()
         return status(
