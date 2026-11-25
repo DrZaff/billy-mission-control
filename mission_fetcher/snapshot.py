@@ -21,6 +21,7 @@ import json
 import os
 import re
 from datetime import UTC, datetime, timedelta
+from fnmatch import fnmatchcase
 from pathlib import Path
 from string import Template
 from typing import Any
@@ -44,9 +45,10 @@ MAX_TITLE = 200
 MAX_TEXT = 255
 MAX_SNAPSHOT = 2 * 1024 * 1024
 # Bytes of file paths kept per pull request, measured as written (JSON escapes, Codex's review
-# of 72607b3); past it the list is "not known". If the whole snapshot is still over its limit,
-# the largest file lists are dropped to "not known" until it fits (see `_fit`), so pull requests
-# anyone can open never stop every refresh (pre-review of 9537b08).
+# of 72607b3); past it the list is cut to one known clinical path, or else "not known" (see
+# `_compact`). If the whole snapshot is still over its limit, the largest lists are cut the
+# same way until it fits (see `_fit`), so pull requests anyone can open never stop every
+# refresh (pre-review of 9537b08).
 MAX_PATH_BYTES = 16 * 1024
 SHA = re.compile(r"[0-9a-f]{40}")
 CONTROL = re.compile(r"[\x00-\x1f\x7f  ‪-‮⁦-⁩]")
@@ -216,7 +218,7 @@ def _connection(value: Any, limit: int, counted: bool = True) -> list:
     return nodes
 
 
-def _files(pr: dict) -> tuple[list[str], bool]:
+def _files(pr: dict, clinical_paths: tuple[str, ...]) -> tuple[list[str] | None, bool]:
     """(the changed paths exactly as GitHub gives them, whether the list is complete). They are
     only matched against the clinical patterns, never shown, so cleaning them could only make
     two paths look alike and let a clinical one slip past its rule (Codex's review of f772122).
@@ -235,12 +237,23 @@ def _files(pr: dict) -> tuple[list[str], bool]:
         if not isinstance(path, str) or not 0 < len(path) <= 4096 or "\x00" in path:
             raise _Incomplete()
         size += len(json.dumps(path)) + 3  # as written: escapes, comma, newline, indent
-        if size > MAX_PATH_BYTES:
-            raise _Incomplete()
         if n.get("changeType") not in ("ADDED", "MODIFIED", "DELETED", "CHANGED"):
             complete = False
         paths.append(path)
+    if size > MAX_PATH_BYTES:
+        return _compact(paths, clinical_paths), False
     return paths, complete
+
+
+def _compact(paths: list[str] | None, clinical_paths: tuple[str, ...]) -> list[str] | None:
+    """A file list cut down to fit: one path that matches a clinical rule, kept so the model
+    still knows the change is clinical and still warns when a clinician's approval is missing
+    (Codex's review of 69ed8e3), or null ("not known") when none matches. The list is then
+    partial either way: the rest may be clinical too."""
+    for path in paths or ():
+        if any(fnmatchcase(path, pattern) for pattern in clinical_paths):
+            return [path]
+    return None
 
 
 def _reviews(pr: dict) -> list[dict]:
@@ -428,7 +441,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
     # Parts that can't be read whole are null ("not known"): the model never reads them as
     # clean, and still judges everything that is known.
     try:
-        pull["files"], complete = _files(pr)
+        pull["files"], complete = _files(pr, tuple(settings.clinical_paths))
         if not complete:
             pull["files_complete"] = False
     except _Incomplete:
@@ -554,8 +567,9 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
 def _fit(snapshot: dict) -> None:
     """Keep the snapshot under MAX_SNAPSHOT as written. File lists are the one large part
     anyone can make (Codex's review of 72607b3: several repositories of long, escaped paths
-    stopped every refresh), so the largest are dropped to "not known" (null: the model then
-    treats the PR as possibly clinical) until it fits. What remains is bounded: titles and
+    stopped every refresh), so the largest are cut down until it fits: to one known clinical
+    path, so a known clinical change stays known (69ed8e3), or else to "not known" (null);
+    either way the model treats the rest as possibly clinical. What remains is bounded: titles and
     check names are capped, reviews carry no text, and labels come from people with triage
     access. Only if it still doesn't fit does the refresh fail ("too-large")."""
 
@@ -564,12 +578,15 @@ def _fit(snapshot: dict) -> None:
 
     if size() <= MAX_SNAPSHOT:
         return
-    pulls = [i["task"]["pull_request"] for i in snapshot["items"]]
-    pulls = [p for p in pulls if p.get("files")]
-    pulls.sort(key=lambda p: len(encode({"f": p["files"]})), reverse=True)
-    for pull in pulls:
-        pull["files"] = None
-        pull.pop("files_complete", None)
+    tasks = [i["task"] for i in snapshot["items"] if i["task"]["pull_request"].get("files")]
+    tasks.sort(key=lambda t: len(encode({"f": t["pull_request"]["files"]})), reverse=True)
+    for task in tasks:
+        pull = task["pull_request"]
+        pull["files"] = _compact(pull["files"], tuple(task["clinical_paths"]))
+        if pull["files"] is None:
+            pull.pop("files_complete", None)
+        else:
+            pull["files_complete"] = False
         if size() <= MAX_SNAPSHOT:
             return
     raise FetchError("too-large")

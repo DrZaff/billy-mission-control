@@ -377,6 +377,35 @@ class Merges(unittest.TestCase):
         )
         self.assertEqual(derive(done).state, State.MERGED)
 
+    def test_a_review_recorded_after_the_merge_never_makes_it_compliant(self):
+        # Codex's review of 69ed8e3 (blocking).
+        late = task(
+            runs=[run("build"), passed(minute=30), published()],
+            pull_request=pr(state="closed", merged=True, merged_by=OWNER, merged_at=t(20)),
+        )
+        s = derive(late)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.MERGED_UNREVIEWED, s.flags)
+
+    def test_a_clinician_approval_after_the_merge_never_makes_it_compliant(self):
+        late = task(
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(
+                state="closed",
+                merged=True,
+                merged_by=OWNER,
+                merged_at=t(20),
+                files=["evidence/a.json"],
+                reviews=[approval(minute=30)],
+            ),
+        )
+        s = derive(late)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.MERGED_WITHOUT_CLINICIAN, s.flags)
+        on_time = copy.deepcopy(late)
+        on_time["pull_request"]["reviews"] = [approval(minute=10)]
+        self.assertEqual(derive(on_time).state, State.MERGED)
+
     def test_a_merge_without_its_time_is_unknown(self):
         value = self.merged()
         del value["pull_request"]["merged_at"]

@@ -635,17 +635,20 @@ def _checks(task: _Task, head: str, flags: set[Flag]) -> bool:
     return ok
 
 
-def _clinician_approved(task: _Task, head: str) -> bool:
+def _clinician_approved(task: _Task, head: str, until: datetime | None = None) -> bool:
     """A clinician's own GitHub approval of exactly this commit, not later withdrawn, with no
     clinician asking for changes to it. Bots never count, and neither does any review report
     outside GitHub's reviews (such as Codex's). Each clinician's latest decisive review counts;
     two different decisions at the same instant are ambiguous and block, whatever the input
-    order."""
+    order. With `until` (a merge), later reviews never count: an approval after the merge
+    can't make it compliant (Codex's review of 69ed8e3)."""
     if task.pr.reviews is None:
         return False  # not known: no approval (A5a)
     by_user: dict[str, list[_Review]] = {}
     for rv in task.pr.reviews:
         if rv.is_bot or rv.user not in task.clinicians or rv.commit != head:
+            continue
+        if until is not None and rv.at > until:
             continue
         if rv.state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
             by_user.setdefault(rv.user, []).append(rv)
@@ -715,6 +718,10 @@ def derive(raw: Any) -> TaskStatus:
     current = [r for r in runs if since is not None and r.at >= since]
     if since is not None and len(current) < len(runs):
         flags.add(Flag.RECORD_BEFORE_AUTHORIZATION)
+    if merged_at is not None:
+        # A review recorded after the merge can't make that merge compliant (Codex's review
+        # of 69ed8e3).
+        current = [r for r in current if r.at <= merged_at]
 
     # Two finished reviews of the same commit that disagree: nothing about it can be trusted.
     verdicts: dict[str, set[str]] = {}
@@ -763,7 +770,7 @@ def derive(raw: Any) -> TaskStatus:
             problems.append("the merged commit never passed review")
         if maybe_clinical and pr.reviews is None:
             flags.add(Flag.REVIEWS_UNVERIFIED)  # approval not known: no claim either way
-        elif Flag.CLINICAL in flags and not _clinician_approved(task, pr.head):
+        elif Flag.CLINICAL in flags and not _clinician_approved(task, pr.head, merged_at):
             flags.add(Flag.MERGED_WITHOUT_CLINICIAN)
             problems.append("clinical files merged without a clinician's approval of that commit")
         if since is None and task.issue_known:
@@ -871,7 +878,15 @@ def derive(raw: Any) -> TaskStatus:
 
     if not runs_known and head is not None:
         # Without Billy's records nothing is known of its review: no claim that one is
-        # missing or that the PR came before it, and never a passed review.
+        # missing or that the PR came before it, and never a passed review. Everything
+        # GitHub does show is still judged and flagged (Codex's review of 69ed8e3): the
+        # required checks, and for a possibly clinical change, the clinician's approval.
+        if pr:
+            _checks(task, head, flags)
+            if maybe_clinical and not _clinician_approved(task, head):
+                if pr.reviews is None:
+                    flags.add(Flag.REVIEWS_UNVERIFIED)
+                flags.add(Flag.CLINICAL_APPROVAL_MISSING)
         return status(
             State.BUILT,
             f"{head[:12]}: Billy's review records aren't read here, so its review isn't shown.",

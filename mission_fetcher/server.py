@@ -10,6 +10,7 @@ the status file records the time and a short reason code, never a token or a res
 from __future__ import annotations
 
 import fcntl
+import math
 import os
 import socket
 import time
@@ -63,6 +64,26 @@ def read_key(path: Path) -> bytes:
 
 def github_for(cfg: FetcherConfig) -> GitHub:
     return GitHub(cfg.app_id, load_key(read_key(cfg.key)))
+
+
+def _check_status(status: dict) -> None:
+    """A status file must say when the last attempt was, in finite numbers (Codex's review of
+    69ed8e3: missing or non-finite times let a refresh skip the floor). Anything else is
+    malformed: ValueError, handled like unreadable JSON."""
+
+    def finite(value) -> bool:
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        )
+
+    boot = status.get("boot_id")
+    if not finite(status.get("attempt_epoch")) or not finite(status.get("attempt_since_boot")):
+        raise ValueError("status times")
+    if boot is not None and not isinstance(boot, str):
+        raise ValueError("status boot id")
 
 
 class Refresher:
@@ -137,7 +158,10 @@ class Refresher:
         now = self.clock()
         boot_id, since_boot = self.boot()
         try:
-            previous = read_json(self.cfg.snapshot_dir, STATUS, strict=True) or {}
+            previous = read_json(self.cfg.snapshot_dir, STATUS, strict=True)
+            if previous is not None:
+                _check_status(previous)
+            previous = previous or {}
         except OSError:
             # Unreadable is not "no earlier attempt": without it the floor can't be kept.
             return b"failed:status\n"

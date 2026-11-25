@@ -814,6 +814,58 @@ class Refresh(Base):
             if item["task"]["pull_request"]["files"] is None:
                 self.assertIn(tasks.Flag.FILES_UNVERIFIED, tasks.derive(self.task_of(item)).flags)
 
+    def test_a_cut_list_keeps_a_known_clinical_path(self):
+        # Codex's review of 69ed8e3 (blocking): cutting a list erased a path that already made
+        # the change clinical, and so the warning that no clinician approved it.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        long_files = tuple("d/" + "x" * 3990 + f"{i:03d}" for i in range(10))
+        files = (*long_files, "evidence/table.json")
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [
+            pr_node(
+                1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10), files=files
+            )
+        ]
+        item = self.run_refresh()["items"][0]
+        pull = item["task"]["pull_request"]
+        self.assertEqual(pull["files"], ["evidence/table.json"])
+        self.assertIs(pull["files_complete"], False)
+        state = tasks.derive(self.task_of(item))
+        self.assertIn(tasks.Flag.CLINICAL, state.flags)
+        self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+
+    def test_fitting_the_snapshot_keeps_known_clinical_paths(self):
+        paths = tuple(f"d/{i:02d}" + "x" * 100 for i in range(100)) + ("evidence/a.json",)
+        self.fake.prs[REPO_A]["open"] = [
+            pr_node(n, issue=issue_node(10), files=paths) for n in range(1, 5)
+        ]
+        full = len(snapshot.encode(self.run_refresh()))
+        saved = snapshot.MAX_SNAPSHOT
+        snapshot.MAX_SNAPSHOT = full - 15000
+        try:
+            snap = self.run_refresh()
+        finally:
+            snapshot.MAX_SNAPSHOT = saved
+        files = [i["task"]["pull_request"]["files"] for i in snap["items"][:4]]
+        self.assertIn(["evidence/a.json"], files)
+        self.assertNotIn(None, files)
+        for item in snap["items"][:4]:
+            self.assertIn(tasks.Flag.CLINICAL, tasks.derive(self.task_of(item)).flags)
+
+    def test_an_open_pr_still_shows_failing_checks_and_missing_approval(self):
+        # Codex's review of 69ed8e3: with run records not read, an open PR returned before its
+        # checks and clinician approval were judged.
+        node = pr_node(1, issue=issue_node(10), files=("evidence/a.json",))
+        suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+        suite["checkRuns"]["nodes"][0]["conclusion"] = "FAILURE"
+        self.fake.prs[REPO_A]["open"][0] = node
+        state = tasks.derive(self.task_of(self.run_refresh()["items"][0]))
+        self.assertEqual(state.state, tasks.State.BUILT)
+        self.assertIn(tasks.Flag.CHECKS_FAILING, state.flags)
+        self.assertIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, state.flags)
+        self.assertTrue(state.needs_attention)
+
     def test_a_renamed_file_makes_the_file_list_incomplete(self):
         # Codex's review of f37d0c7 (blocking): a rename lists only the new path, so a move out
         # of a clinical folder would hide where it came from.
@@ -1181,6 +1233,28 @@ class RefresherFiles(Base):
                 wall[0] += 1  # the attempt was recorded: still the floor
                 self.assertEqual(self.make(lambda: wall[0]).run(), server.TOO_SOON)
                 wall[0] += 61  # a minute later it goes ahead, with nobody repairing anything
+                self.assertEqual(self.make(lambda: wall[0]).run(), server.OK)
+
+    def test_a_status_file_with_bad_times_keeps_the_floor(self):
+        # Codex's review of 69ed8e3: a status object with missing or non-finite times let a
+        # refresh skip the floor.
+        wall = [NOW.timestamp()]
+        self.assertEqual(self.make(lambda: wall[0]).run(), server.OK)
+        for bad in (
+            b"{}",
+            b'{"attempt_epoch": 1}',
+            b'{"attempt_epoch": Infinity, "attempt_since_boot": 5}',
+            b'{"attempt_epoch": 1, "attempt_since_boot": NaN}',
+            b'{"attempt_epoch": 1, "attempt_since_boot": -5}',
+            b'{"attempt_epoch": 1, "attempt_since_boot": 5, "boot_id": 7}',
+        ):
+            with self.subTest(bad=bad):
+                (self.cfg.snapshot_dir / snapshot.STATUS).write_bytes(bad)
+                wall[0] += 1
+                self.assertEqual(self.make(lambda: wall[0]).run(), b"failed:status\n")
+                wall[0] += 1
+                self.assertEqual(self.make(lambda: wall[0]).run(), server.TOO_SOON)
+                wall[0] += 61
                 self.assertEqual(self.make(lambda: wall[0]).run(), server.OK)
 
     def test_a_failed_write_still_says_when_the_token_outlived_it(self):
