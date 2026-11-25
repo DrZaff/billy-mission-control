@@ -1141,7 +1141,9 @@ def _closed_page(conn: Any, since: datetime) -> tuple[list[int], str | None]:
     last_in_window = (
         bool(nodes) and datetime.fromisoformat(_time(_obj(nodes[-1]).get("updatedAt"))) >= since
     )
-    if has_next and last_in_window:
+    # An empty page that says more follow is never the end: the next is read, or the list is
+    # marked cut off (Codex's review of 9cc8f43).
+    if has_next and (last_in_window or not nodes):
         cursor = info.get("endCursor")
         if not isinstance(cursor, str) or not 0 < len(cursor) <= 512:
             raise _bad()

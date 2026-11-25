@@ -59,26 +59,28 @@ def _login(value: Any, name: str) -> str:
     return value
 
 
-def _repo_settings(name: str, value: Any) -> RepoSettings:
-    d = _keys(value, {"required_checks", "clinical_paths", "checks_app"}, f"repos.{name}")
+def _repo_settings(label: str, value: Any) -> RepoSettings:
+    """One repository's settings; `label` names it by position, never by its key, which is the
+    file's own text (Codex's review of 9cc8f43)."""
+    d = _keys(value, {"required_checks", "clinical_paths", "checks_app"}, label)
     app = d["checks_app"]
     _req(
         isinstance(app, str) and APP_SLUG.fullmatch(app) is not None,
-        f"repos.{name}.checks_app must be a GitHub App's slug, such as github-actions",
+        f"{label}.checks_app must be a GitHub App's slug, such as github-actions",
     )
     checks = d["required_checks"]
     _req(
         isinstance(checks, list)
         and 0 < len(checks) <= 20
         and all(isinstance(c, str) and CHECK_NAME.fullmatch(c) for c in checks),
-        f"repos.{name}.required_checks must name at least one check",
+        f"{label}.required_checks must name at least one check",
     )
     paths = d["clinical_paths"]
     _req(
         isinstance(paths, list)
         and len(paths) <= 50
         and all(isinstance(p, str) and 0 < len(p) <= 200 and "\x00" not in p for p in paths),
-        f"repos.{name}.clinical_paths must be a list of patterns (it may be empty)",
+        f"{label}.clinical_paths must be a list of patterns (it may be empty)",
     )
     for pattern in paths:
         fnmatch.translate(pattern)  # a pattern fnmatch can't read fails here, not at runtime
@@ -120,11 +122,11 @@ def parse_fetcher(text: str) -> FetcherConfig:
         f"repos must name one to {MAX_REPOS} repositories",
     )
     settings = {}
-    for name, value in repos.items():
-        _req(REPO.fullmatch(name) is not None, "repos: a key is not owner/name")
+    for i, (name, value) in enumerate(repos.items()):
+        _req(REPO.fullmatch(name) is not None, f"repos[{i}]'s key is not owner/name")
         # "." and ".." would make a different path on GitHub (audit of 7712dec).
-        _req(name.split("/")[1] not in (".", ".."), "repos: a key is not owner/name")
-        settings[name] = _repo_settings(name, value)
+        _req(name.split("/")[1] not in (".", ".."), f"repos[{i}]'s key is not owner/name")
+        settings[name] = _repo_settings(f"repos[{i}]", value)
     return FetcherConfig(
         account=account,
         client_account=client,

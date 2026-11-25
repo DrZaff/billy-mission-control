@@ -3609,6 +3609,33 @@ class CodexReviewOf9650d02(CodexReviewOf099ef9b):
         self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
 
+class CodexReviewOf9cc8f43(Base):
+    def test_a_repository_is_named_by_position_never_by_its_key(self):
+        # Blocking: a key that passes owner/name was still quoted in later messages.
+        key = "ghp-abcdefghijklmnop/ghp-qrstuvwxyz0123456789"  # credential-shaped, but valid
+        data = config_data(self.base)
+        data["repos"] = {key: {"required_checks": ["lint"], "clinical_paths": []}}
+        with self.assertRaises(fconfig.ConfigError) as caught:
+            fconfig.parse_fetcher(json.dumps(data))
+        message = str(caught.exception)
+        self.assertIn("repos[0]", message)
+        self.assertNotIn("ghp-", message)
+
+    def test_an_empty_page_that_says_more_follow_is_never_the_end(self):
+        # Should fix: it was taken as the end, and recent closures could be missed unmarked.
+        data = {
+            "repository": {
+                "open": {"totalCount": 0, "nodes": []},
+                "closed": {
+                    "nodes": [],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+                },
+            }
+        }
+        numbers, truncated = snapshot._listing(REPO_A, data, NOW)
+        self.assertEqual((numbers, truncated), ([], True))
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now
