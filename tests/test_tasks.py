@@ -2110,13 +2110,14 @@ class FableAuditOfCa7faa9(unittest.TestCase):
         self.assertEqual(s.reviewed_sha, A)
 
     def test_times_are_whole_seconds_in_utc(self):
-        # Even with an offset that has a fraction of a second, the second is the UTC one.
+        # The second is the UTC one, whatever the offset (Codex's review of 980b8b9: an offset
+        # with a fraction of a second isn't parsed alike by every Python, so none is used).
         from datetime import UTC, datetime
 
         from mission_control.tasks import _time
 
-        at = _time("2026-01-01T10:20:00.200000+00:00:00.500000", "at")
-        self.assertEqual(at, datetime(2026, 1, 1, 10, 19, 59, tzinfo=UTC))
+        at = _time("2026-01-01T15:50:00.700000+05:30", "at")
+        self.assertEqual(at, datetime(2026, 1, 1, 10, 20, 0, tzinfo=UTC))
         self.assertEqual((at.microsecond, at.utcoffset().total_seconds()), (0, 0))
 
 
@@ -2213,3 +2214,50 @@ class FableAuditOfBfda232(unittest.TestCase):
             )
         )
         self.assertIn(Flag.CLINICAL, s.flags)
+
+
+class CodexReviewOf980b8b9(unittest.TestCase):
+    """Codex's review of 980b8b9 (blocking): authorised after the issue's closing and merged
+    with it still closed showed as a calm merge, while the open PR was off the path."""
+
+    def ev(self, kind, minute, **extra):
+        return {"event": kind, "actor": OWNER, "at": t(minute), **extra}
+
+    def derive_with(self, timeline, state, merged):
+        over = {"state": "closed", "merged": True, "merged_by": OWNER, "merged_at": t(20)}
+        return derive(
+            task(
+                issue={"number": 7, "state": state, "timeline": timeline},
+                runs=[run("build"), passed(), published()],
+                pull_request=pr(**(over if merged else {})),
+            )
+        )
+
+    def test_a_merge_while_the_issue_was_closed_is_unsafe(self):
+        timeline = [self.ev("closed", 0), {"event": "authorized", "actor": OWNER, "at": t(1)}]
+        self.assertEqual(self.derive_with(timeline, "closed", False).state, State.NOT_LINKED)
+        s = self.derive_with(timeline, "closed", True)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.MERGED_ISSUE_CLOSED, s.flags)
+        self.assertIn("closed when it was merged", s.reasons[0])
+
+    def test_reopened_before_the_merge_is_merged(self):
+        timeline = [
+            self.ev("closed", 0),
+            {"event": "authorized", "actor": OWNER, "at": t(1)},
+            self.ev("reopened", 10),
+            self.ev("closed", 20, closer_pr=12),
+        ]
+        s = self.derive_with(timeline, "closed", True)
+        self.assertEqual(s.state, State.MERGED)
+        self.assertNotIn(Flag.MERGED_ISSUE_CLOSED, s.flags)
+
+    def test_a_reopening_in_the_merges_own_second_reopens_nothing(self):
+        timeline = [
+            self.ev("closed", 0),
+            {"event": "authorized", "actor": OWNER, "at": t(1)},
+            self.ev("reopened", 20),
+        ]
+        s = self.derive_with(timeline, "open", True)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.MERGED_ISSUE_CLOSED, s.flags)

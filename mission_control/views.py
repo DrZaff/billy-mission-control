@@ -80,6 +80,7 @@ FLAG_WORDS = {
     Flag.ISSUE_NOT_LINKED: "No readable, authorised issue is linked to this pull request",
     Flag.ISSUE_CLOSED_PR_OPEN: "The linked issue is closed, but this pull request is open",
     Flag.MERGER_UNKNOWN: "Merged by an account that can't be identified",
+    Flag.MERGED_ISSUE_CLOSED: "Merged while its issue was closed",
 }
 
 SECTIONS = (
@@ -312,6 +313,8 @@ def _path(entry: Entry) -> str:
         )
     elif Flag.AUTHORIZATION_WITHDRAWN in flags:
         authorised = ("!", "withdrawn: agent:ready removed or the issue closed")
+    elif Flag.MERGED_ISSUE_CLOSED in flags:
+        authorised = ("!", "yes, but its issue was closed when it was merged")
     elif Flag.CLOSURE_UNPLACED in flags:
         authorised = ("?", "not known: the issue's closings and reopenings don't add up")
     elif Flag.UNAUTHORIZED_WORK in flags:
