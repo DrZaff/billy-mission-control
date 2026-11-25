@@ -1729,8 +1729,8 @@ class CodexReviewOfCae7658(unittest.TestCase):
             )
         )
 
-    def closed(self, minute, actor=OWNER):
-        return {"event": "closed", "actor": actor, "at": t(minute)}
+    def closed(self, minute, actor=OWNER, closer_pr=None):
+        return {"event": "closed", "actor": actor, "at": t(minute), "closer_pr": closer_pr}
 
     def reopened(self, minute, actor=OWNER):
         return {"event": "reopened", "actor": actor, "at": t(minute)}
@@ -1745,8 +1745,27 @@ class CodexReviewOfCae7658(unittest.TestCase):
                 self.assertIn("withdrawn before the merge", " ".join(s.reasons))
 
     def test_githubs_own_closing_as_the_pr_merges_ends_nothing(self):
-        self.assertEqual(self.merged(self.closed(20)).state, State.MERGED)
-        self.assertEqual(self.merged(self.closed(21)).state, State.MERGED)
+        # In the merge's own second, only a closing by this PR (number 12) is known to come
+        # with the merge (Codex's review of 4f8c1e9).
+        self.assertEqual(self.merged(self.closed(20, closer_pr=12)).state, State.MERGED)
+        self.assertEqual(self.merged(self.closed(21)).state, State.MERGED)  # after: nothing
+
+    def test_any_other_closing_in_the_merges_second_counts(self):
+        for closing in (self.closed(20), self.closed(20, closer_pr=99)):
+            with self.subTest(closing=closing):
+                s = self.merged(closing)
+                self.assertEqual(s.state, State.UNSAFE)
+                self.assertIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
+        # Without the key at all, as data from before closer_pr: the same.
+        closing = self.closed(20)
+        del closing["closer_pr"]
+        self.assertEqual(self.merged(closing).state, State.UNSAFE)
+
+    def test_closer_pr_must_be_a_number_or_null(self):
+        for bad in ("12", True, 1.5):
+            with self.subTest(bad=bad):
+                s = self.merged(self.closed(20, closer_pr=bad))
+                self.assertEqual(s.state, State.UNKNOWN)
 
     def test_reopening_before_the_merge_restores_it(self):
         self.assertEqual(self.merged(self.closed(10), self.reopened(12)).state, State.MERGED)

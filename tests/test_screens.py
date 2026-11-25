@@ -731,3 +731,22 @@ class FableAuditOfB5ac6ddScreens(unittest.TestCase):
         self.assertIn("A clinician approved this commit", body)
         self.assertIn("approved this commit</span>", body)
         self.assertNotIn("approval of the final commit needed", body)
+
+
+class CodexReviewOf4f8c1e9Screens(unittest.TestCase):
+    def test_disagreeing_reviews_of_the_merged_commit_are_never_not_yet(self):
+        raw = entry("example-site-931")
+        runs = raw["task"]["runs"]
+        review = next(r for r in runs if r["step"] == "review")
+        clash = dict(
+            review,
+            verdict="changes_needed",
+            findings=[{"severity": "blocking"}],
+            at="2026-11-14T16:01:00+00:00",
+        )
+        runs.insert(runs.index(review) + 1, clash)
+        state, body = detail(raw)
+        self.assertEqual(state, State.UNSAFE)
+        self.assertIn("reviews disagree", body)
+        self.assertIn("the reviews of this commit disagree", body)
+        self.assertNotIn("not yet", body)

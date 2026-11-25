@@ -34,7 +34,10 @@ clinical_paths may be an explicit empty list.
                    <other>, "label": str, "actor": "login", "at": "ISO 8601 with a time zone"}
                    Only "labeled agent:ready" or "authorized" (an approved-action record, such as
                    the owner's direct instruction) by the owner authorise work. "closed" before a
-                   merge ends the authorisation for that merge, and "reopened" restores it.
+                   merge ends the authorisation for that merge, and "reopened" restores it. A
+                   "closed" event may carry "closer_pr": the number of the pull request that
+                   closed it (GitHub's closer), or null; in the merge's own second only a
+                   closing by the merged PR itself is taken as coming with the merge.
                    Anything else, including the label's mere presence and every comment body, is
                    ignored.
                    A labeled or unlabeled event must name its label.
@@ -347,6 +350,7 @@ class _Event:
     label: str | None
     actor: str
     at: datetime
+    closer_pr: int | None = None  # a "closed" event's closing pull request, when GitHub says
 
 
 @dataclass(frozen=True)
@@ -600,12 +604,18 @@ def parse(raw: Any) -> _Task:
             label = _text(
                 _need(e, "label", f"issue.timeline[{i}].label"), f"issue.timeline[{i}].label"
             )
+        closer_pr = e.get("closer_pr")
+        _req(
+            closer_pr is None or (isinstance(closer_pr, int) and not isinstance(closer_pr, bool)),
+            f"issue.timeline[{i}].closer_pr must be a number or null",
+        )
         timeline.append(
             _Event(
                 kind=kind,
                 label=label if isinstance(label, str) else None,
                 actor=_login(e.get("actor"), f"issue.timeline[{i}].actor"),
                 at=_time(e.get("at"), f"issue.timeline[{i}].at"),
+                closer_pr=closer_pr,
             )
         )
     # "branch", "branch.head" and "pull_request" may be null (none yet), but must be present:
@@ -678,8 +688,9 @@ def _authorization(
 
     For a merge, closing the issue before it, by anyone, also ends the authorisation, as it does
     for an open PR (Codex's review of cae7658); reopening it restores the authorisation it had.
-    A closing in the merge's own second is GitHub closing the linked issue as the PR merges, so
-    it ends nothing. (An open PR is judged on the issue's current state instead.)"""
+    A closing in the merge's own second ends nothing only if it names this PR as its closer
+    (GitHub closing the linked issue as the PR merges); any other closing in that second may
+    have come first, so it counts. (An open PR is judged on the issue's current state.)"""
     since: datetime | None = None
     last: datetime | None = None
     withdrawn = False  # an authorisation existed and was removed
@@ -703,8 +714,14 @@ def _authorization(
         elif e.kind == "unlabeled" and ready:
             withdrawn = withdrawn or since is not None
             since = last = None
-        elif until is not None and e.kind == "closed" and e.at < until:
-            closed = True
+        elif until is not None and e.kind == "closed":
+            # In the merge's own second, only GitHub's closing by this very PR is known to come
+            # with the merge; any other closing then (by hand, or by something else) may have
+            # come first, so it counts: doubt resolves toward caution (Codex's review of
+            # 4f8c1e9).
+            merging = task.pr is not None and e.closer_pr == task.pr.number
+            if e.at < until or not merging:
+                closed = True
         elif until is not None and e.kind == "reopened" and e.at < until:
             closed = False
     if closed:
