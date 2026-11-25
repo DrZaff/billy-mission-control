@@ -189,6 +189,10 @@ def https_transport(method: str, path: str, headers: dict[str, str], body: bytes
         conn.close()
 
 
+# What call() returns for GitHub's 204 No Content: distinct from any JSON body, null included.
+NO_CONTENT = object()
+
+
 def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -271,7 +275,7 @@ class GitHub:
         if status == 401:
             raise FetchError("unauthorised")
         if status == 204:
-            return None
+            return NO_CONTENT
         # Only the successes GitHub gives these calls: 200, and 201 for a new token. Any other,
         # such as 206 Partial Content or 202 Accepted, is never taken as a whole answer
         # (Codex's review of 09f37a5).
@@ -388,7 +392,8 @@ class GitHub:
     def revoke(self, token: str) -> bool:
         """Revoke the installation token. Best effort: it expires within the hour anyway."""
         try:
-            # Only GitHub's 204 No Content confirms it (Codex's review of 09f37a5).
-            return self.call("DELETE", "/installation/token", token, final=True) is None
+            # Only GitHub's 204 No Content confirms it, never a body that reads as null (Codex's
+            # reviews of 09f37a5 and 6e22a60).
+            return self.call("DELETE", "/installation/token", token, final=True) is NO_CONTENT
         except FetchError:
             return False

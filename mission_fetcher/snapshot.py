@@ -409,6 +409,14 @@ def _list(value: Any) -> list:
     return value
 
 
+def _whole(conn: dict, nodes: list, cap: int) -> bool:
+    """Whether a connection's nodes are all there is: its count readable, no more than the
+    nodes given, and within the cap."""
+    total = conn.get("totalCount")
+    good = isinstance(total, int) and not isinstance(total, bool) and total >= 0
+    return good and total <= len(nodes) and len(nodes) <= cap
+
+
 def _int(value: Any) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise _bad()
@@ -669,10 +677,13 @@ def _checks(
     try:
         suites_conn = _obj(commit.get("checkSuites"))
         suites = _list(suites_conn.get("nodes"))
-        if _int(suites_conn.get("totalCount")) > len(suites) or len(suites) > MAX_SUITES:
-            complete = False
     except FetchError:
         suites, complete = [], False
+    else:
+        # A count that can't be read only makes the list partial: what GitHub did give,
+        # a failure among it, is still read (Codex's review of 6e22a60).
+        if not _whole(suites_conn, suites, MAX_SUITES):
+            complete = False
     for suite in suites:
         if not isinstance(suite, dict):
             complete = False
@@ -721,10 +732,11 @@ def _checks(
         try:
             runs_conn = _obj(suite.get("checkRuns"))
             runs = _list(runs_conn.get("nodes"))
-            if _int(runs_conn.get("totalCount")) > len(runs) or len(runs) > MAX_RUNS:
-                complete = False
         except FetchError:
             runs, complete = [], False
+        else:
+            if not _whole(runs_conn, runs, MAX_RUNS):
+                complete = False
         for run in runs:
             if not isinstance(run, dict):
                 complete = False

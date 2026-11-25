@@ -662,6 +662,17 @@ class GitHubClient(Base):
                 self.assertEqual(caught.exception.code, f"http-{status}")
                 self.assertFalse(github.revoke(TOKEN))
         self.assertTrue(client(self.fake).revoke(TOKEN))  # GitHub's 204: confirmed
+        # Nor a success whose body reads as null (Codex's review of 6e22a60).
+        for status in (200, 201):
+            with self.subTest(null_body=status):
+
+                def null(method, path, headers, body, status=status):
+                    if path == "/installation/token" and method == "DELETE":
+                        return status, {}, b"null"
+                    return self.fake(method, path, headers, body)
+
+                github = gh.GitHub(APP_ID, KEY, transport=null, clock=lambda: NOW.timestamp())
+                self.assertFalse(github.revoke(TOKEN))
 
     def test_an_odd_or_repeated_repository_row_is_never_skipped(self):
         # Codex's review of df5912d (should fix).

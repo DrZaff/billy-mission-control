@@ -3453,6 +3453,28 @@ class ChecksFreshUntil(CodexReviewOf099ef9b):
         self.assertIsNone(snapshot._unreadable(REPO_A, 1)["checks_fresh_until"])
 
 
+class CodexReviewOf6e22a60(CodexReviewOf099ef9b):
+    def test_a_count_that_cant_be_read_never_hides_a_failure(self):
+        # Blocking: a missing or malformed totalCount discarded the nodes GitHub did give.
+        for level in ("suites", "runs"):
+            for bad in (None, "2", -1, True):
+                with self.subTest(level=level, bad=bad):
+                    node = pr_node(1, issue=issue_node(10))
+                    suites = node["commits"]["nodes"][0]["commit"]["checkSuites"]
+                    runs = suites["nodes"][0]["checkRuns"]
+                    runs["nodes"][0]["conclusion"] = "FAILURE"
+                    conn = suites if level == "suites" else runs
+                    if bad is None:
+                        del conn["totalCount"]
+                    else:
+                        conn["totalCount"] = bad
+                    self.fake.prs[REPO_A]["open"][0] = node
+                    item = self.run_refresh()["items"][0]
+                    self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+                    flags = tasks.derive(self.reviewed(item)).flags
+                    self.assertIn(tasks.Flag.CHECKS_FAILING, flags)
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now
