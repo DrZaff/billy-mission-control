@@ -36,6 +36,7 @@ from tests.fetcher_fixtures import (
     client,
     config_data,
     issue_node,
+    make_cfg,
     pr_node,
     review_node,
 )
@@ -4127,20 +4128,18 @@ class CodexReviewOfB03ad71(PreReviewOf07c3480):
             at = updated.isoformat()
             return {"number": n, "closedAt": at, "updatedAt": at}
 
-        first = {
-            "nodes": [row(2, recent), row(3, recent - timedelta(hours=1))],
-            "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
-        }
+        full = [row(100 + i, recent - timedelta(minutes=i)) for i in range(snapshot.MAX_CLOSED)]
+        first = {"nodes": full, "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}
         second = {  # starts later than the first page ended: out of order
             "nodes": [row(4, recent + timedelta(hours=2))],
             "pageInfo": {"hasNextPage": False},
         }
         data = {"repository": {"open": {"totalCount": 0, "nodes": []}, "closed": first}}
         pages = {"c1": {"repository": {"closed": second}}}
-        numbers, cut_off = snapshot._listing(REPO_A, data, NOW, pages.get)
-        self.assertEqual((numbers, cut_off), ([2, 3, 4], True))
+        expected = [r["number"] for r in full] + [4]
+        self.assertEqual(snapshot._listing(REPO_A, data, NOW, pages.get), (expected, True))
         second["nodes"] = [row(4, recent - timedelta(hours=2))]  # in order: whole
-        self.assertEqual(snapshot._listing(REPO_A, data, NOW, pages.get), ([2, 3, 4], False))
+        self.assertEqual(snapshot._listing(REPO_A, data, NOW, pages.get), (expected, False))
 
 
 class PreReviewOf6b7da87(PreReviewOf07c3480):
@@ -4267,17 +4266,119 @@ class PreReviewOf6b7da87(PreReviewOf07c3480):
             at = (now - timedelta(days=days)).isoformat()
             return {"number": n, "closedAt": at, "updatedAt": at}
 
-        first = {
-            "nodes": [row(2, 1), row(3, 20), row(4, 2)],  # out of order
-            "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
-        }
-        second = {"nodes": [row(5, 21)], "pageInfo": {"hasNextPage": True, "endCursor": "c2"}}
+        # Full pages, as GitHub gives while more follow.
+        disordered = [row(2, 1), row(3, 20), row(4, 2)] + [
+            row(100 + i, 20 + i / 100) for i in range(snapshot.MAX_CLOSED - 3)
+        ]
+        first = {"nodes": disordered, "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}
+        orderly = [row(200 + i, 21 + i / 100) for i in range(snapshot.MAX_CLOSED)]
+        second = {"nodes": orderly, "pageInfo": {"hasNextPage": True, "endCursor": "c2"}}
         data = {"repository": {"open": {"totalCount": 0, "nodes": []}, "closed": first}}
         pages = {"c1": {"repository": {"closed": second}}}
         self.assertTrue(snapshot._listing(REPO_A, data, NOW, pages.get)[1])
 
     def test_the_detail_query_asks_for_no_field_it_never_reads(self):
         self.assertNotIn("updatedAt", snapshot.detail_query([1], frozenset(), (OWNER,)))
+
+
+class PreReviewOf8c4bfec(PreReviewOf07c3480):
+    def merged_node(self, closed_gap=0, **over):
+        merged_at = NOW - timedelta(days=1)
+        node = pr_node(
+            1,
+            state="MERGED",
+            merged=True,
+            closed_at=(merged_at + timedelta(seconds=closed_gap)).isoformat(),
+            issue=issue_node(10),
+            **over,
+        )
+        node["mergedAt"] = merged_at.isoformat()
+        node["mergedBy"] = {"__typename": "User", "login": "stranger"}
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        return node
+
+    def test_a_merge_closed_a_second_later_is_read(self):
+        # Blocking: real merges close a second after they merge (6 of 85 recent ones).
+        for gap, readable in ((1, True), (5, True), (-1, False), (60, False)):
+            with self.subTest(gap=gap):
+                self.merged_node(closed_gap=gap)
+                task = self.run_refresh()["items"][0]["task"]
+                self.assertEqual(task is not None, readable)
+                if readable:
+                    state = tasks.derive(dict(task, paused=False))
+                    self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, state.flags)
+
+    def test_a_commit_row_that_cant_be_read_never_hides_the_reviews(self):
+        # Should fix: an unreadable row discarded a merge's reviews, losing its unsafe verdict.
+        node = self.merged_node(files=("evidence/a.json",))
+        node["mergedBy"] = {"__typename": "User", "login": OWNER}
+        node["commits"]["nodes"] = [None]
+        task = self.run_refresh()["items"][0]["task"]
+        self.assertEqual(task["pull_request"]["reviews"], [])
+        state = tasks.derive(dict(task, paused=False))
+        self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
+
+    def test_an_open_prs_head_contradicted_by_its_row_reads_no_approval(self):
+        review = review_node(OWNER, "APPROVED")
+        node = pr_node(1, issue=issue_node(10), files=("evidence/a.json",), reviews=(review,))
+        node["commits"]["nodes"][0]["commit"]["oid"] = SHA2
+        self.assertIsNone(self.item_for(node)["task"]["pull_request"]["reviews"])
+
+    def test_the_configured_apps_failure_is_read_whatever_its_suite_says(self):
+        self.cfg = make_cfg(
+            self.base,
+            repos={
+                REPO_A: {"required_checks": ["lint"], "clinical_paths": [], "checks_app": "my-ci"}
+            },
+        )
+        node = pr_node(1, issue=issue_node(10), checks_app="my-ci")
+        suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+        suite["workflowRun"] = {"event": "pull_request"}  # only Actions has one
+        suite["checkRuns"]["nodes"][0]["conclusion"] = "FAILURE"
+        self.fake.installed = [REPO_A]
+        item = self.item_for(node)
+        self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
+
+    def test_a_short_page_that_says_more_follow_is_never_the_end(self):
+        old = (NOW - timedelta(days=20)).isoformat()
+        data = {
+            "repository": {
+                "open": {"totalCount": 0, "nodes": []},
+                "closed": {
+                    "nodes": [{"number": 2, "closedAt": old, "updatedAt": old}],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+                },
+            }
+        }
+        self.assertTrue(snapshot._listing(REPO_A, data, NOW)[1])
+
+    def test_an_empty_check_name_is_not_known(self):
+        node = pr_node(1, issue=issue_node(10))
+        node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][0][
+            "name"
+        ] = ""
+        pull = self.item_for(node)["task"]["pull_request"]
+        self.assertFalse(pull.get("checks_complete", True))
+
+    def test_one_login_twice_is_never_two_clinicians(self):
+        with self.assertRaises(fconfig.ConfigError):
+            make_cfg(self.base, clinicians=[OWNER, OWNER.upper()])
+
+    def test_an_oversized_open_list_is_never_all_read(self):
+        rows = [{"number": n} for n in range(1, snapshot.MAX_OPEN * 3)]
+        data = {
+            "repository": {
+                "open": {"totalCount": len(rows), "nodes": rows},
+                "closed": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+            }
+        }
+        numbers, cut_off = snapshot._listing(REPO_A, data, NOW)
+        self.assertEqual((len(numbers), cut_off), (snapshot.MAX_OPEN, True))
+
+    def test_a_cost_error_on_a_pr_not_asked_for_is_never_partial(self):
+        self.assertTrue(snapshot._optional_place(("repository", "p1", "files"), 2))
+        self.assertFalse(snapshot._optional_place(("repository", "p9", "files"), 2))
 
 
 class NoFifoAnywhere(Base):

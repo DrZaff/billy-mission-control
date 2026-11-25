@@ -333,6 +333,7 @@ class FakeGitHub:
                 json.dumps(
                     {
                         "total_count": len(self.installed),
+                        "repository_selection": "selected",
                         "repositories": [{"full_name": r} for r in self.installed],
                     }
                 ).encode(),

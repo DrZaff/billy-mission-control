@@ -720,7 +720,11 @@ class GitHubClient(Base):
         def rows(method, path, headers, body):
             if path == "/installation/repositories?per_page=100":
                 writable = {"full_name": REPO_B, "permissions": {"push": True}}
-                answer = {"total_count": 2, "repositories": [{"full_name": REPO_A}, writable]}
+                answer = {
+                    "total_count": 2,
+                    "repository_selection": "selected",
+                    "repositories": [{"full_name": REPO_A}, writable],
+                }
                 return 200, {}, json.dumps(answer).encode()
             return real(method, path, headers, body)
 
@@ -728,6 +732,47 @@ class GitHubClient(Base):
         with self.assertRaises(gh.FetchError) as caught:
             github.repositories(TOKEN, [REPO_A, REPO_B])
         self.assertEqual(caught.exception.code, "not-read-only")
+
+    def test_the_list_must_say_its_selection_and_odd_permissions_may_write(self):
+        real = self.fake.__call__
+        for answer in (
+            {"total_count": 2, "repositories": [{"full_name": REPO_A}, {"full_name": REPO_B}]},
+            {
+                "total_count": 2,
+                "repository_selection": "selected",
+                "repositories": [
+                    {"full_name": REPO_A, "permissions": "admin"},
+                    {"full_name": REPO_B},
+                ],
+            },
+        ):
+            with self.subTest(answer=answer):
+
+                def call(method, path, headers, body, answer=answer):
+                    if path == "/installation/repositories?per_page=100":
+                        return 200, {}, json.dumps(answer).encode()
+                    return real(method, path, headers, body)
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.repositories(TOKEN, [REPO_A, REPO_B])
+                self.assertEqual(caught.exception.code, "not-read-only")
+
+    def test_a_token_expiry_in_another_shape_is_refused(self):
+        real = self.fake.__call__
+        for odd in ("2026-11-24", "2026-W48-2T13:00:00Z", "2026-11-24T13:00:00"):
+            with self.subTest(odd=odd):
+
+                def call(method, path, headers, body, odd=odd):
+                    status, h, data = real(method, path, headers, body)
+                    if path.endswith("/access_tokens"):
+                        data = json.dumps(dict(json.loads(data), expires_at=odd)).encode()
+                    return status, h, data
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.token(77)
+                self.assertEqual(caught.exception.code, "token-not-limited")
 
     def test_suspended_by_alone_is_suspended(self):
         self.fake.suspended = None
@@ -780,7 +825,11 @@ class GitHubClient(Base):
 
                 def call(method, path, headers, body, rows=rows, total=total):
                     if path == "/installation/repositories?per_page=100":
-                        answer = {"total_count": total, "repositories": rows}
+                        answer = {
+                            "total_count": total,
+                            "repository_selection": "selected",
+                            "repositories": rows,
+                        }
                         return 200, {}, json.dumps(answer).encode()
                     return real(method, path, headers, body)
 

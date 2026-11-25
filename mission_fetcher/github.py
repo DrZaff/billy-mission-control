@@ -192,6 +192,19 @@ def https_transport(method: str, path: str, headers: dict[str, str], body: bytes
 
 # What call() returns for GitHub's 204 No Content: distinct from any JSON body, null included.
 NO_CONTENT = object()
+# GitHub's own ISO shape for a time, with a zone.
+ISO_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})")
+
+
+def _may_write(row: dict) -> bool:
+    """Whether a repository row says, or may say, the App can write: permissions that aren't
+    an object, or admin, maintain or push that is anything but false."""
+    if "permissions" not in row:
+        return False
+    perms = row["permissions"]
+    if not isinstance(perms, dict):
+        return True
+    return any(k in perms and perms[k] is not False for k in ("admin", "maintain", "push"))
 
 
 def _b64(data: bytes) -> str:
@@ -352,7 +365,7 @@ class GitHub:
         """Whether a token's expires_at is a real time, about an hour away. Bounded loosely, a
         day either way: the machine's clock may be off, and an exact bound would then fail
         every refresh; a token said to last for years is still refused."""
-        if not isinstance(value, str):
+        if not isinstance(value, str) or not ISO_TIME.fullmatch(value):
             return False
         try:
             left = datetime.fromisoformat(value).timestamp() - self.clock()
@@ -373,12 +386,8 @@ class GitHub:
             raise FetchError("bad-response")
         # Nor may the list say the App can write, or reach every repository (pre-review of
         # 6b7da87).
-        selection = answer.get("repository_selection", "selected")
-        writes = any(
-            isinstance(r.get("permissions"), dict)
-            and any(r["permissions"].get(k) for k in ("admin", "maintain", "push"))
-            for r in rows
-        )
+        selection = answer.get("repository_selection")  # GitHub always says
+        writes = any(_may_write(r) for r in rows)
         if selection != "selected" or writes:
             raise FetchError("not-read-only")
         exact = len(names) == len(set(names)) == len(repos) and set(names) == set(repos)

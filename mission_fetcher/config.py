@@ -116,6 +116,10 @@ def parse_fetcher(text: str) -> FetcherConfig:
         isinstance(clinicians, list) and 0 < len(clinicians) <= 10,
         "clinicians must list at least one login",
     )
+    # Logins ignore case: two that differ only in case are one account, listed twice, and
+    # every review would then be in two lists (pre-review of 8c4bfec).
+    folded = [c.casefold() for c in clinicians if isinstance(c, str)]
+    _req(len(set(folded)) == len(folded), "clinicians must not list one login twice")
     repos = d["repos"]
     _req(
         isinstance(repos, dict) and 0 < len(repos) <= MAX_REPOS,

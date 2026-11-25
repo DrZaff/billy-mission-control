@@ -213,10 +213,33 @@ class Retry:
         self.pieces = pieces
 
 
-def _optional_place(path: tuple) -> bool:
-    """Whether a place in a detail answer is inside an optional part of one pull request (one
-    a retry can leave out), not the pull request itself or one of its core fields."""
-    return len(path) >= 3 and path[0] == "repository" and _piece(path[2]) is not None
+def _head_contradicted(pr: dict, head: str) -> bool:
+    """Whether the commit rows GitHub gave can be read, and name only commits other than the
+    head."""
+    try:
+        rows = _list(_obj(pr.get("commits")).get("nodes")) if "commits" in pr else []
+    except FetchError:
+        return False
+    oids = []
+    for row in rows:
+        try:
+            oids.append(_sha(_obj(_obj(row).get("commit")).get("oid")))
+        except FetchError:
+            continue
+    return bool(oids) and head not in oids
+
+
+def _optional_place(path: tuple, size: int) -> bool:
+    """Whether a place in a detail answer is inside an optional part of one of the `size` pull
+    requests asked for (one a retry can leave out), not the pull request itself, one of its
+    core fields, or a pull request not asked for."""
+    aliases = {f"p{i}" for i in range(size)}
+    return (
+        len(path) >= 3
+        and path[0] == "repository"
+        and path[1] in aliases
+        and _piece(path[2]) is not None
+    )
 
 
 def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
@@ -817,8 +840,12 @@ def _checks(
             complete = False  # wrongly shaped: not known, never skipped silently (42a3721)
             continue
         if slug != "github-actions" and suite.get("workflowRun") is not None:
-            complete = False  # only Actions suites have a workflow run (pre-review of 6b7da87)
-            continue
+            # Only Actions suites have a workflow run (pre-review of 6b7da87): not known. The
+            # configured app's own suite is still read on, so a failure in it still fails
+            # (pre-review of 8c4bfec).
+            complete = False
+            if slug != app:
+                continue
         if suite_app is None or slug != app:
             # Not the configured app: its successes never count, but a failing or unfinished
             # run with a required name keeps the checks from passing (pre-review of e995f6a).
@@ -865,7 +892,7 @@ def _checks(
                 complete = False
                 continue
             name = run.get("name")
-            if not isinstance(name, str):
+            if not isinstance(name, str) or not name:
                 complete = False  # wrongly shaped: not known, never skipped (audit of 28009de)
                 continue
             # Only required names. A pass counts only under the exact name (Codex's review of
@@ -1020,7 +1047,7 @@ def _status_cautions(
             complete = False
             continue
         name = context.get("context")
-        if not isinstance(name, str):
+        if not isinstance(name, str) or not name:
             complete = False  # wrongly shaped: not known (audit of 28009de)
             continue
         # GitHub gives one row per context: a repeat may stand for an omitted one (pre-review
@@ -1187,8 +1214,15 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
     # A merged pull request closed when it merged, and neither can be in the future: one time
     # drives the window and the other the cut-off for reviews and authorisation (pre-review
     # of 07c3480). GitHub gives merged_by only for a merged one.
-    if merged and _time(pr.get("mergedAt")) != _time(pr.get("closedAt")):
-        raise _bad()
+    if merged:
+        # GitHub closes a pull request as it merges it, and on real merges the closing time is
+        # often a second later (pre-review of 8c4bfec: 6 of 85 recent merges). Before the merge,
+        # or later than a few seconds, is a contradiction.
+        gap = datetime.fromisoformat(_time(pr.get("closedAt"))) - datetime.fromisoformat(
+            _time(pr.get("mergedAt"))
+        )
+        if not timedelta(0) <= gap <= timedelta(seconds=5):
+            raise _bad()
     if not merged and pr.get("mergedBy") is not None:
         raise _bad()
     try:
@@ -1226,14 +1260,12 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
         pull.pop("files_complete", None)
     merged_at = datetime.fromisoformat(pull["merged_at"]) if merged else None
     try:
-        # The head the reviews are matched against must be the one GitHub's own commit row
-        # names: if the answer contradicts itself, no approval is read (pre-review of 6b7da87).
-        # (An open PR's row is checked with its checks.)
-        if state != "OPEN" and "commits" in pr:
-            rows = _list(_obj(pr.get("commits")).get("nodes"))
-            oids = [_sha(_obj(_obj(r).get("commit")).get("oid")) for r in rows]
-            if oids != [head]:
-                raise _Incomplete()
+        # The head the reviews are matched against must not be contradicted by GitHub's own
+        # commit rows (pre-review of 6b7da87), for an open or a closed PR alike. A row that
+        # can't be read says nothing, as in a lite read: only readable rows that name other
+        # commits, and never the head, leave the reviews not known (pre-review of 8c4bfec).
+        if _head_contradicted(pr, head):
+            raise _Incomplete()
         pull["reviews"] = _reviews(pr, cfg.clinicians, merged_at, now)
     except (_Incomplete, *_SHAPE):
         # null: "not known", so the model still judges what is known (Codex's review of
@@ -1343,7 +1375,11 @@ def _closed_page(
     # A page that can't support stopping (out of order, impossible, empty, or more rows than
     # asked for) is remembered: a later page that looks orderly never clears it (pre-review of
     # 6b7da87).
-    doubtful = has_next and (disordered or impossible or not nodes or len(nodes) > MAX_CLOSED)
+    # GitHub fills a page before it says more follow: a short one is doubtful too (pre-review
+    # of 8c4bfec), and so is one with more rows than asked for, whatever it says.
+    doubtful = (has_next and (disordered or impossible or len(nodes) != MAX_CLOSED)) or len(
+        nodes
+    ) > MAX_CLOSED
     if has_next and (last_in_window or doubtful):
         cursor = info.get("endCursor")
         if not isinstance(cursor, str) or not 0 < len(cursor) <= 512:
@@ -1363,7 +1399,8 @@ def _listing(
     open_nodes = _list(open_conn.get("nodes"))
     more_open = _int(open_conn.get("totalCount")) != len(open_nodes) or len(open_nodes) > MAX_OPEN
     since = now - timedelta(days=RECENT_DAYS)
-    numbers = [_int(_obj(n).get("number")) for n in open_nodes]
+    # More than asked for is flagged, and never all read in detail (pre-review of 8c4bfec).
+    numbers = [_int(_obj(n).get("number")) for n in open_nodes[:MAX_OPEN]]
     rows = list(numbers)  # every row read, older closed ones included
     closed, cursor, page_rows, times, doubt = _closed_page(repository.get("closed"), since)
     numbers += closed
@@ -1413,7 +1450,10 @@ def _details(
         try:
             query = detail_query(batch, omit, clinicians)
             data = github.graphql(
-                token, query, {"owner": owner, "name": name}, placeable=_optional_place
+                token,
+                query,
+                {"owner": owner, "name": name},
+                placeable=lambda path: _optional_place(path, len(batch)),
             )
             _on_time(deadline)
         except FetchError as error:
