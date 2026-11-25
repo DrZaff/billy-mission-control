@@ -87,8 +87,58 @@ FETCHER_ALLOWED_TOP = {
 }
 
 
+# Every module the web app may import, by top-level name (audit of 8c62413: the deny-list above
+# alone let other network clients and process starters in).
+APP_ALLOWED_TOP = {
+    "__future__",
+    "argparse",
+    "base64",
+    "collections",
+    "contextlib",
+    "dataclasses",
+    "datetime",
+    "enum",
+    "fido2",
+    "fnmatch",
+    "hashlib",
+    "hmac",
+    "html",
+    "ipaddress",
+    "itertools",
+    "json",
+    "os",
+    "pathlib",
+    "pwd",
+    "queue",
+    "re",
+    "secrets",
+    "socket",
+    "socketserver",
+    "sqlite3",
+    "stat",
+    "struct",
+    "sys",
+    "threading",
+    "time",
+    "typing",
+    "urllib",
+    "wsgiref",
+}
+# Packages the app may use one part of: urllib's parser, wsgiref's server, fido2's checks.
+APP_ALLOWED_PARTS = {
+    "urllib": {"parse"},
+    "wsgiref": {"simple_server"},
+    "fido2": {"server", "webauthn"},
+}
+# Ways to start a process or signal one through os, banned in both packages.
+PROCESS_NAMES = re.compile(
+    r"system|popen|posix_spawnp?|fork|forkpty|exec[lv]p?e?|spawn[lv]p?e?|startfile|killpg?"
+)
+
 CONNECTION_NAMES = ("HTTPSConnection", "HTTPConnection")
 OUTBOUND_NAMES = ("create_connection", "get_server_certificate", "open_connection", "set_tunnel")
+# A connection's destination, which nothing may set after the connection is made.
+ATTACH_NAMES = ("host", "port", "_tunnel_host", "_tunnel_port", "_tunnel_headers")
 
 
 class Workflows(unittest.TestCase):
@@ -140,6 +190,45 @@ class App(unittest.TestCase):
         for path in sorted((ROOT / "mission_control").rglob("*.py")):
             bad = {m for m in imported_modules(path) if m in FORBIDDEN_IMPORTS}
             self.assertEqual(bad, set(), path.name)
+
+    def test_only_modules_on_the_apps_allow_list(self):
+        # Audit of 8c62413: a deny-list let xmlrpc, imaplib, multiprocessing and asyncio in.
+        for path in sorted((ROOT / "mission_control").rglob("*.py")):
+            modules = imported_modules(path)
+            tops = {m.split(".")[0] for m in modules}
+            self.assertEqual(tops - APP_ALLOWED_TOP, set(), str(path))
+            # Packages allowed for one part only.
+            for module in modules:
+                top = module.split(".")[0]
+                if top in APP_ALLOWED_PARTS:
+                    second = module.split(".")[1] if "." in module else None
+                    self.assertIn(second, APP_ALLOWED_PARTS[top], (str(path), module))
+
+    def test_no_process_is_started_through_os(self):
+        paths = sorted((ROOT / "mission_control").rglob("*.py"))
+        paths += sorted((ROOT / "mission_fetcher").rglob("*.py"))
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            # os is only ever used as os.<name>, never handed on (x = os; x.system).
+            bases = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and node.id == "os":
+                    self.assertIn(id(node), bases, (path.name, node.lineno))
+                names: list[str] = []
+                # os.system(...), and `from os import system`.
+                if isinstance(node, ast.Attribute) and ast.unparse(node.value) == "os":
+                    names.append(node.attr)
+                if isinstance(node, ast.ImportFrom) and node.module == "os":
+                    names += [a.name for a in node.names]
+                # Nor os reached through getattr, or os handed on under another name.
+                if isinstance(node, ast.Call) and ast.unparse(node.func) == "getattr":
+                    self.assertNotEqual(
+                        [ast.unparse(a) for a in node.args[:1]], ["os"], (path.name, node.lineno)
+                    )
+                if isinstance(node, ast.alias) and node.name == "os":
+                    self.assertIn(node.asname, (None, "os"), (path.name, node.lineno))
+                for name in names:
+                    self.assertIsNone(PROCESS_NAMES.fullmatch(name), (path.name, node.lineno))
 
     def test_the_app_never_imports_the_fetcher(self):
         # Phase A5a (issue #16): the fetcher is the only part with network access, in its own
@@ -250,6 +339,55 @@ class App(unittest.TestCase):
                     self.assertNotIn(
                         node.value, CONNECTION_NAMES + OUTBOUND_NAMES, (path.name, node.lineno)
                     )
+
+    def test_the_connection_class_is_used_once_and_never_re_aimed(self):
+        # Audit of 8c62413: another module could import _Connection (or tls_context) and aim
+        # it at any host, and github.py could re-aim its one connection by setting .host.
+        github = ROOT / "mission_fetcher" / "github.py"
+        private = ("_Connection", "tls_context")
+        paths = sorted((ROOT / "mission_control").rglob("*.py"))
+        paths += sorted((ROOT / "mission_fetcher").rglob("*.py"))
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            uses = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and node.id in private:
+                    uses.append(node)
+                if isinstance(node, ast.Attribute) and node.attr in private:
+                    uses.append(node)
+                if isinstance(node, ast.alias) and {node.name, node.asname} & set(private):
+                    uses.append(node)
+                if isinstance(node, ast.Constant) and node.value in private + ATTACH_NAMES:
+                    uses.append(node)
+                # Nothing sets where a connection goes once it is made.
+                targets: list[ast.AST] = []
+                if isinstance(node, ast.Assign):
+                    targets = list(node.targets)
+                if isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                    targets = [node.target]
+                for target in targets:
+                    for part in ast.walk(target):
+                        if isinstance(part, ast.Attribute):
+                            self.assertNotIn(part.attr, ATTACH_NAMES, (path.name, part.lineno))
+                if isinstance(node, ast.Call) and ast.unparse(node.func) in ("setattr", "vars"):
+                    self.fail((path.name, node.lineno, "setattr/vars"))
+            if path != github:
+                self.assertEqual(uses, [], path.name)
+                continue
+            # In github.py: exactly the one call _Connection(..., context=tls_context()).
+            names = [n for n in uses if isinstance(n, ast.Name)]
+            self.assertEqual(len(uses), len(names), "only plain names in github.py")
+            made = [
+                n
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Call) and ast.unparse(n.func) == "_Connection"
+            ]
+            self.assertEqual(len(made), 1)
+            context = [k.value for k in made[0].keywords if k.arg == "context"]
+            self.assertEqual([ast.unparse(c) for c in context], ["tls_context()"])
+            self.assertEqual(
+                {id(n) for n in names}, {id(made[0].func), id(context[0].func)}, "github.py"
+            )
 
     def test_the_fetcher_talks_to_api_github_com_only(self):
         tree = ast.parse((ROOT / "mission_fetcher" / "github.py").read_text(encoding="utf-8"))

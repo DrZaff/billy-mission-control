@@ -78,7 +78,7 @@ clinical_paths may be an explicit empty list.
                    nothing, and removing it afterwards withdraws nothing).
     The task's "issue" may be null: no readable, authorised issue is linked (none, several,
     one in another repository, or one whose events couldn't be read; issue #15, decision
-    A5-2). An open PR then shows as NOT_LINKED, calmly, rather than UNSAFE; a merged one is
+    A5-2). An open PR then shows as NOT_LINKED, an alert, rather than UNSAFE; a merged one is
     still judged on everything else, with ISSUE_NOT_LINKED instead of a claim that the work
     was never authorised.
 

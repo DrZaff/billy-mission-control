@@ -1218,9 +1218,10 @@ class NotKnown(unittest.TestCase):
         self.assertIn(Flag.MERGER_UNKNOWN, s.flags)
         self.assertNotIn(Flag.UNAUTHORIZED_MERGE, s.flags)  # it doesn't claim who
 
-    def test_no_linked_issue_is_calm_when_open_and_still_judged_when_merged(self):
+    def test_no_linked_issue_is_an_alert_when_open_and_still_judged_when_merged(self):
         open_pr = derive(task(issue=None, pull_request=pr()))
         self.assertEqual(open_pr.state, State.NOT_LINKED)
+        self.assertTrue(open_pr.needs_attention)  # an alert, not UNSAFE (audit of 8c62413)
         self.assertIn(Flag.ISSUE_NOT_LINKED, open_pr.flags)
         self.assertNotIn(Flag.UNAUTHORIZED_WORK, open_pr.flags)
         merged = derive(
@@ -1669,3 +1670,27 @@ class AuditOfAd78f34(unittest.TestCase):
         )
         self.assertEqual(s.state, State.UNSAFE)
         self.assertIn(Flag.UNAUTHORIZED_WORK, s.flags)
+
+
+class AuditOf8c62413(unittest.TestCase):
+    def test_unread_reviews_on_known_clinical_files_always_need_a_look(self):
+        # Audit of 8c62413: every earlier case also carried FILES_UNVERIFIED, which hid this.
+        from mission_control import views
+
+        merged = pr(
+            files=("evidence/x.json",),
+            state="closed",
+            merged=True,
+            merged_by=OWNER,
+            merged_at=t(20),
+        )
+        merged["reviews"] = None
+        opened = pr(files=("evidence/x.json",))
+        opened["reviews"] = None
+        for name, value in (("merged", merged), ("open", opened)):
+            with self.subTest(name):
+                s = derive(task(runs=[run("build"), passed(), published()], pull_request=value))
+                self.assertIn(Flag.REVIEWS_UNVERIFIED, s.flags)
+                self.assertNotIn(Flag.FILES_UNVERIFIED, s.flags)
+                self.assertTrue(s.needs_attention)
+                self.assertEqual(views.section(s), "alerts")

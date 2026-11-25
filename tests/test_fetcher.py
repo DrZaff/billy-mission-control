@@ -11,6 +11,7 @@ import socket
 import stat
 import tempfile
 import threading
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -3457,10 +3458,36 @@ class AuditOfE58b933(Base):
         self.assertEqual(calls, [1])  # no GitHub work within the minute
 
     def test_every_start_up_check_is_run(self):
-        names = set(StartupChecks.checks(self._startup()))
-        for expected in ("not root", "reader key", "snapshot folder"):
-            self.assertTrue(any(expected in n for n in names), (expected, sorted(names)))
-        self.assertGreaterEqual(len(names), 12)
+        startup = self._startup()
+        names = list(StartupChecks.checks(startup))
+        # The exact list: dropping any one check fails here (audit of 8c62413).
+        expected = {
+            "not root",
+            "runs as fetcher-account",
+            "web app account web-account",
+            "config fetcher.json",
+            "folders above fetcher.json",
+            "reader key",
+            "folders above key.pem",
+            "snapshot folder",
+            "snapshot folder's files",
+            "snapshot folder shared with the web app only",
+            "no ACLs on the snapshot folder or its files",
+            "folders above snapshot",
+            "web-account can reach the snapshot folder",
+        }
+        expected |= {f"cannot read {p}" for p in startup.cfg.forbidden_paths}
+        self.assertEqual(set(names), expected)
+        self.assertTrue(startup.cfg.forbidden_paths)
+        # And each is made by fetcher_checks itself, once.
+        made = fetcher_checks(
+            startup.cfg,
+            startup.config_path,
+            uid=startup.uid,
+            account_of=lambda uid: "fetcher-account",
+            gid_of=lambda a: startup.gid,
+        )
+        self.assertEqual(sorted(c.name for c in made), sorted(expected))
 
     def _startup(self):
         startup = StartupChecks("test_a_readable_key_fails")
@@ -3783,6 +3810,26 @@ class AuditOf80e8fb3(Base):
             gh.https_transport("GET", "/x", {}, None)
         self.assertEqual(asked, [gh.MAX_RESPONSE + 1])
 
+    def test_more_runs_than_returned_never_pass(self):
+        # Audit of 8c62413: a matrix of more than the runs GitHub returned.
+        node = pr_node(1, issue=issue_node(10))
+        suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+        suite["checkRuns"]["totalCount"] = len(suite["checkRuns"]["nodes"]) + 1
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertFalse(item["task"]["pull_request"]["checks_complete"])
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+        self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, tasks.derive(self.reviewed(item)).flags)
+
+    def test_results_for_another_commit_are_never_read(self):
+        # Audit of 8c62413: every required name passed, but on a commit that isn't the head.
+        node = pr_node(1, issue=issue_node(10))
+        node["commits"]["nodes"][0]["commit"]["oid"] = "c" * 40
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertIsNone(item["task"]["pull_request"]["checks"])
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
     def test_a_symlinked_key_or_folder_is_never_followed(self):
         real_key = self.base / "real.pem"
         real_key.write_text("synthetic")
@@ -3813,3 +3860,17 @@ class AuditOf80e8fb3(Base):
         with self.assertRaises(gh.FetchError) as caught:
             github.installation(OWNER, [REPO_A, REPO_B])
         self.assertEqual(caught.exception.code, "several-installations")
+
+
+class AuditOf8c62413(unittest.TestCase):
+    def test_the_floor_is_measured_on_the_boot_clock(self):
+        # Audit of 8c62413: every test injects its own clock, so the real one wasn't held.
+        asked = []
+
+        def clock_gettime(which):
+            asked.append(which)
+            return 42.0
+
+        with mock.patch.object(server.time, "clock_gettime", clock_gettime):
+            self.assertEqual(server.boot_clock()[1], 42.0)
+        self.assertEqual(asked, [time.CLOCK_BOOTTIME])

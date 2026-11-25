@@ -635,3 +635,35 @@ class AuditOf80e8fb3Screens(unittest.TestCase):
         e = demo.entries[0]
         self.assertIn(Flag.RUNS_UNVERIFIED, e.status.flags)
         self.assertIsNone(demo.command(e))
+
+
+class AuditOf8c62413Screens(unittest.TestCase):
+    def test_an_open_pr_with_no_linked_issue_is_an_alert(self):
+        raw = entry("example-tools-62")
+        demo = load(json.dumps(with_tasks(raw)))
+        e = demo.entries[0]
+        self.assertEqual(e.status.state, State.NOT_LINKED)
+        self.assertEqual(views.section(e.status), "alerts")
+
+    def test_no_issue_and_pr_in_a_repository_share_a_number(self):
+        # GitHub numbers issues and PRs from one sequence (audit of 8c62413).
+        data = json.loads(DEMO_FILE.read_text(encoding="utf-8"))
+        issues: dict[str, set[int]] = {}
+        pulls: dict[str, set[int]] = {}
+        branches: set[tuple[str, str]] = set()
+        for item in data["tasks"]:
+            t = item["task"]
+            repo = t["repo"]
+            if isinstance(t.get("issue"), dict):
+                issues.setdefault(repo, set()).add(t["issue"]["number"])
+            pull = t.get("pull_request")
+            if isinstance(pull, dict):
+                pulls.setdefault(repo, set()).add(pull["number"])
+            branch = t.get("branch")
+            if isinstance(branch, dict):
+                # And each task has its own branch.
+                key = (repo, branch["name"])
+                self.assertNotIn(key, branches, item["id"])
+                branches.add(key)
+        for repo in issues:
+            self.assertEqual(issues[repo] & pulls.get(repo, set()), set(), repo)
