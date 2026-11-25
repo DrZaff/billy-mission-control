@@ -444,6 +444,23 @@ class Merges(unittest.TestCase):
         late["runs"] = [run("build"), passed(minute=30)]  # after the merge: never counts
         self.assertIn(Flag.MERGED_UNREVIEWED, derive(late).flags)
 
+    def test_files_recorded_after_the_merge_never_make_it_clinical(self):
+        # Codex's review of c5ccf49 (blocking).
+        value = task(
+            runs=[
+                run("build"),
+                passed(),
+                published(),
+                run("build", minute=30, files=["evidence/a.json"]),
+            ],
+            pull_request=pr(state="closed", merged=True, merged_by=OWNER, merged_at=t(20)),
+        )
+        s = derive(value)
+        self.assertEqual(s.state, State.MERGED)
+        self.assertNotIn(Flag.CLINICAL, s.flags)
+        value["runs"][-1]["at"] = t(10)  # before the merge: it counts
+        self.assertIn(Flag.CLINICAL, derive(value).flags)
+
     def test_a_merge_without_its_time_is_unknown(self):
         value = self.merged()
         del value["pull_request"]["merged_at"]

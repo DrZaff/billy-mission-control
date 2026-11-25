@@ -747,7 +747,7 @@ def encode(data: dict) -> bytes:
 # ---------------------------------------------------------------- files
 
 
-def write_json(folder: Path, name: str, data: dict) -> None:
+def write_json(folder: Path, name: str, data: dict, durable: bool = False) -> None:
     """Write `name` in `folder` whole, then rename it into place: a reader never sees half a
     file. Never through a symlink (the folder is opened with O_NOFOLLOW and used by its file
     descriptor); private while being written, then readable by the folder's group (the web
@@ -790,10 +790,14 @@ def write_json(folder: Path, name: str, data: dict) -> None:
         # The new file is already in place and readable: a failed sync of the folder must not
         # report the write as failed (Codex's review of 198a66e). It only makes the rename's
         # survival of a sudden power cut less certain.
+        # With `durable`, the write counts only once the folder is synced too: the attempt
+        # recorded before any network work must survive a power cut, or a refresh could repeat
+        # within the minute after a restart (Codex's review of c5ccf49).
         try:
             os.fsync(folder_fd)
         except OSError:
-            pass
+            if durable:
+                raise
     finally:
         os.close(folder_fd)
 

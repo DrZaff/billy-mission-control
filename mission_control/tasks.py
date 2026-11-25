@@ -764,7 +764,10 @@ def derive(raw: Any) -> TaskStatus:
     # doubt, clinical.
     files = set(pr.files or () if pr else ())
     for r in runs:
-        files.update(r.files)
+        # A record made after a merge is later work: it never makes the finished merge
+        # clinical (Codex's review of c5ccf49).
+        if merged_at is None or r.at <= merged_at:
+            files.update(r.files)
     if any(fnmatchcase(f, pat) for f in files for pat in task.clinical_paths):
         flags.add(Flag.CLINICAL)
     # Files not known, or a list known to be partial, may be clinical: gate on that, but

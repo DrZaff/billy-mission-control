@@ -1581,6 +1581,27 @@ class RefresherFiles(Base):
     def test_a_failed_folder_sync_after_the_rename_is_not_a_failed_write(self):
         # Codex's review of 198a66e: the new snapshot was in place, but the refresh said it
         # failed and the status kept the old time.
+        # (The attempt recorded before any network work is synced first; only later syncs
+        # fail here.)
+        real = os.fsync
+        folder_syncs = []
+
+        def fsync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                folder_syncs.append(fd)
+                if len(folder_syncs) > 1:
+                    raise OSError(5, "sync failed")
+            return real(fd)
+
+        with mock.patch.object(snapshot.os, "fsync", side_effect=fsync):
+            self.assertEqual(self.make(lambda: NOW.timestamp()).run(), server.OK)
+        status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+        self.assertEqual(status["snapshot_at"], NOW.isoformat())
+
+    def test_no_network_work_without_a_durably_recorded_attempt(self):
+        # Codex's review of c5ccf49 (blocking): a failed folder sync of the attempt record was
+        # ignored, so after a power cut the attempt could vanish and a refresh repeat within
+        # the minute.
         real = os.fsync
 
         def fsync(fd):
@@ -1589,9 +1610,8 @@ class RefresherFiles(Base):
             return real(fd)
 
         with mock.patch.object(snapshot.os, "fsync", side_effect=fsync):
-            self.assertEqual(self.make(lambda: NOW.timestamp()).run(), server.OK)
-        status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
-        self.assertEqual(status["snapshot_at"], NOW.isoformat())
+            self.assertEqual(self.make(lambda: NOW.timestamp()).run(), b"failed:write\n")
+        self.assertEqual(self.fake.calls, [])  # nothing sent to GitHub
 
     def test_a_token_that_could_not_be_revoked_is_reported(self):
         # Codex's review of 1cc6cf8: a good refresh said "ok" while the token stayed valid.

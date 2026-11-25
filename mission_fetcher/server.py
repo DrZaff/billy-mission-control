@@ -200,9 +200,9 @@ class Refresher:
             "reason": None,
         }
         try:
-            write_json(self.cfg.snapshot_dir, STATUS, status)
+            write_json(self.cfg.snapshot_dir, STATUS, status, durable=True)
         except OSError:
-            return b"failed:write\n"  # without a recorded attempt, no network work
+            return b"failed:write\n"  # without a durably recorded attempt, no network work
         snapshot = None
         try:
             snapshot = refresh(self.cfg, self.github(self.cfg), stamp)
