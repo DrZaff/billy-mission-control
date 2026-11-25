@@ -462,6 +462,19 @@ class Merges(unittest.TestCase):
         value["runs"][-1]["at"] = t(10)  # before the merge: it counts
         self.assertIn(Flag.CLINICAL, derive(value).flags)
 
+    def test_a_closed_issue_ends_the_authorisation_of_an_open_pr(self):
+        # Codex's review of 0cf099c (blocking): closing the issue left the open PR eligible for
+        # AWAITING_OWNER, beside an alert saying the issue was closed.
+        ready = task(runs=[run("build"), passed(), published()], pull_request=pr())
+        self.assertEqual(derive(ready).state, State.AWAITING_OWNER)
+        closed = copy.deepcopy(ready)
+        closed["issue"]["state"] = "closed"
+        s = derive(closed)
+        self.assertEqual(s.state, State.NOT_LINKED)
+        self.assertIn(Flag.ISSUE_CLOSED_PR_OPEN, s.flags)
+        self.assertIn(Flag.CHECKS_PASSED, s.flags)  # GitHub's own results are still shown
+        self.assertTrue(s.needs_attention)
+
     def test_a_fork_pr_is_never_credited_with_billys_records(self):
         # Codex's review of 9dbb868 (blocking): a fork PR reached AWAITING_OWNER.
         ready = task(runs=[run("build"), passed(), published()], pull_request=pr())

@@ -854,8 +854,11 @@ def derive(raw: Any) -> TaskStatus:
         )
 
     # A closed issue never makes an open PR look finished: anyone can open a PR that "fixes"
-    # a closed issue (pre-review of 9537b08). The PR goes on through every gate, flagged.
-    if pr and pr.open and not task.issue_open:
+    # a closed issue (pre-review of 9537b08). Nor ready: closing the issue ends the owner's
+    # authorisation, so the PR never reaches a merge-ready state (Codex's review of 0cf099c);
+    # it is shown, flagged, below.
+    issue_closed = bool(pr and pr.open and not task.issue_open)
+    if issue_closed:
         flags.add(Flag.ISSUE_CLOSED_PR_OPEN)
     elif (pr and not pr.open) or not task.issue_open:
         return status(State.CLOSED, "Closed without merging.", head)
@@ -875,6 +878,14 @@ def derive(raw: Any) -> TaskStatus:
                 else:
                     flags.add(Flag.CLINICAL_APPROVAL_MISSING)
 
+    if issue_closed:
+        github_gates()
+        return status(
+            State.NOT_LINKED,
+            "Its linked issue is closed, which ends your authorisation: reopen the issue to go "
+            "on, or close the pull request.",
+            head,
+        )
     if pr and pr.open and pr.from_fork:
         # Never on the way to a merge: GitHub's own results are shown, and the owner decides
         # on GitHub (Codex's review of 9dbb868).

@@ -761,7 +761,6 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
     # makes no authorisation claim either way; the merger is still checked. The link is still
     # shown (issue_screen).
     task["issue"] = None if merged else issue
-    short = repo.split("/", 1)[1]
     try:
         title = _str(pr.get("title"), MAX_TITLE) or NO_TITLE  # nothing left once cleaned
     except _SHAPE:
@@ -769,7 +768,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
         # request unreadable and hide what is known about it (Codex's review of c3ee86b).
         title = NO_TITLE
     return {
-        "id": f"{short}-{number}",
+        "id": f"{repo}#{number}",  # unique across owners (Codex's review of 0cf099c)
         "repo": repo,
         "number": number,
         "title": title,
@@ -938,9 +937,8 @@ NO_TITLE = "(this pull request's title couldn't be read)"
 def _unreadable(repo: str, number: int) -> dict:
     """A pull request that couldn't be read: shown, with task null, which the model shows as
     UNKNOWN (an alert). Never left out: that would look calmer than GitHub."""
-    short = repo.split("/", 1)[1]
     return {
-        "id": f"{short}-{number}",
+        "id": f"{repo}#{number}",  # unique across owners (Codex's review of 0cf099c)
         "repo": repo,
         "number": number,
         "title": "(this pull request couldn't be read)",

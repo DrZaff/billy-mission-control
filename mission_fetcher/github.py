@@ -104,13 +104,36 @@ def https_transport(method: str, path: str, headers: dict[str, str], body: bytes
             except OSError:
                 pass
 
-    watchdog = threading.Timer(_LIMIT.get(), stop)
+    limit = _LIMIT.get()
+    started = time.monotonic()
+    watchdog = threading.Timer(limit, stop)
     watchdog.daemon = True
     watchdog.start()
     try:
-        conn.connect()  # bounded per operation by TIMEOUT
+        # Connection setup (name lookup, TCP, TLS handshake) happens in a helper thread that
+        # is waited for only until the limit: the watchdog can't reach a socket that isn't
+        # connected yet (Codex's review of 0cf099c). One that finishes late closes itself.
+        connected = threading.Event()
+        failure: list[BaseException] = []
+
+        def connect() -> None:
+            try:
+                conn.connect()
+            except BaseException as error:  # noqa: BLE001 - handed to the waiting thread
+                failure.append(error)
+            finally:
+                connected.set()
+                if expired.is_set():
+                    conn.close()
+
+        threading.Thread(target=connect, daemon=True).start()
+        if not connected.wait(max(0.0, limit - (time.monotonic() - started))):
+            expired.set()
+            raise TimeoutError()
+        if failure:
+            raise failure[0]
         held.append(conn.sock)
-        if expired.is_set():  # the limit passed while connecting
+        if expired.is_set():  # the limit passed just as it connected
             raise TimeoutError()
         conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()

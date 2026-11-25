@@ -508,14 +508,16 @@ class Refresh(Base):
     def test_the_snapshot_feeds_the_task_model(self):
         snap = self.run_refresh()
         self.assertEqual(snap["repos"], [REPO_A, REPO_B])
-        self.assertEqual([i["id"] for i in snap["items"]], ["site-1", "site-2", "tools-3"])
+        self.assertEqual(
+            [i["id"] for i in snap["items"]], [f"{REPO_A}#1", f"{REPO_A}#2", f"{REPO_B}#3"]
+        )
         linked = [i for i in snap["items"] if i["linked_issues"] == 1]
         self.assertEqual(len(linked), 2)
         for item in linked:
             tasks.parse(self.task_of(item))  # passes the model's input checks
             self.assertNotEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNKNOWN)
             self.assertIsNone(item["task"]["runs"])  # not read; never "no review"
-        unlinked = next(i for i in snap["items"] if i["id"] == "site-2")
+        unlinked = next(i for i in snap["items"] if i["id"] == f"{REPO_A}#2")
         self.assertIsNone(unlinked["task"]["issue"])
         self.assertEqual(tasks.derive(self.task_of(unlinked)).state, tasks.State.NOT_LINKED)
         self.assertEqual(self.fake.revoked, 1)
@@ -544,8 +546,8 @@ class Refresh(Base):
             pr_node(5, state="CLOSED", closed_at=old),
         ]
         ids = [i["id"] for i in self.run_refresh()["items"]]
-        self.assertIn("tools-4", ids)
-        self.assertNotIn("tools-5", ids)
+        self.assertIn(f"{REPO_B}#4", ids)
+        self.assertNotIn(f"{REPO_B}#5", ids)
 
     def test_an_incomplete_part_is_left_out_so_the_model_says_unknown(self):
         self.fake.prs[REPO_A]["open"][0] = pr_node(
@@ -895,6 +897,43 @@ class Refresh(Base):
             with self.assertRaises(gh.FetchError) as caught:
                 self.run_refresh()
         self.assertEqual(caught.exception.code, "too-slow")
+
+    def test_a_slow_connection_setup_is_cut_off_by_the_request_limit(self):
+        # Codex's review of 0cf099c: the watchdog couldn't reach a socket still connecting
+        # (name lookup, TCP, TLS).
+        import time as tm
+
+        closed = []
+
+        class SlowConnection:
+            def __init__(self, *a, **k):
+                self.sock = None
+
+            def connect(self):
+                tm.sleep(2)  # setup that takes far longer than the limit
+
+            def close(self):
+                closed.append(1)
+
+        limit = gh._LIMIT.set(0.3)
+        started = tm.monotonic()
+        try:
+            with mock.patch.object(gh.http.client, "HTTPSConnection", SlowConnection):
+                with self.assertRaises(gh.FetchError) as caught:
+                    gh.https_transport("GET", "/x", {}, None)
+        finally:
+            gh._LIMIT.reset(limit)
+        self.assertEqual(caught.exception.code, "timeout")
+        self.assertLess(tm.monotonic() - started, 1.5)
+        tm.sleep(2)  # the late connection closes itself too
+        self.assertGreaterEqual(len(closed), 2)
+
+    def test_item_ids_are_unique_across_owners(self):
+        # Codex's review of 0cf099c: IDs held the short name only.
+        self.assertNotEqual(
+            snapshot._unreadable("one/site", 1)["id"], snapshot._unreadable("two/site", 1)["id"]
+        )
+        self.assertEqual(self.run_refresh()["items"][0]["id"], f"{REPO_A}#1")
 
     def test_a_slow_drip_answer_is_cut_off_by_the_request_limit(self):
         # Codex's review of 9dbb868, and Fable's pre-review of a21bd27: a check between reads
