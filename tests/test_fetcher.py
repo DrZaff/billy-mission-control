@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
 import signal
 import socket
 import stat
@@ -4345,7 +4346,7 @@ class PreReviewOfB8b1ca7(PreReviewOf07c3480):
         self.assertEqual((len(numbers), cut_off), (snapshot.MAX_CLOSED, True))
 
     def test_an_actions_suites_failure_is_read_whatever_its_workflow_run(self):
-        for workflow_run in ("left out", None, {"event": 7}):
+        for workflow_run in ("left out", None, {"event": 7}, {"event": ""}):
             with self.subTest(workflow_run=workflow_run):
                 node = pr_node(1, issue=issue_node(10))
                 suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
@@ -4359,7 +4360,7 @@ class PreReviewOfB8b1ca7(PreReviewOf07c3480):
                 self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
 
     def test_a_failure_in_a_suite_of_unknown_app_still_fails(self):
-        for suite_app in ("left out", 7, {"slug": 7}):
+        for suite_app in ("left out", 7, {"slug": 7}, {"slug": ""}):
             for conclusion in ("FAILURE", "SUCCESS"):
                 with self.subTest(app=suite_app, conclusion=conclusion):
                     node = pr_node(1, issue=issue_node(10))
@@ -4641,9 +4642,18 @@ class CodexReviewOfB7d0915(Base):
         child = subprocess.Popen(
             [sys.executable, "-c", code], cwd=root, env=env, stdout=subprocess.PIPE, text=True
         )
-        folder = Path(child.stdout.readline().strip())
+        self.addCleanup(child.stdout.close)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)  # never left running, whatever fails
+
+        def line():
+            # Never a read that could wait for ever (Codex's review of 9044492).
+            self.assertTrue(select.select([child.stdout], [], [], 30)[0], "no answer")
+            return child.stdout.readline().strip()
+
+        folder = Path(line())
         self.assertTrue(folder.is_absolute() and folder.is_relative_to(self.base), folder)
-        self.assertEqual(child.stdout.readline().strip(), "reading")
+        self.assertEqual(line(), "reading")
         child.send_signal(signal.SIGTERM)
         out, _ = child.communicate(timeout=60)
         self.assertEqual(child.returncode, -signal.SIGTERM)

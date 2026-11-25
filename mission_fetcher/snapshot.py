@@ -837,9 +837,10 @@ def _checks(
                 run_ids.add(run_id)
         suite_app = suite.get("app")
         slug = suite_app.get("slug") if isinstance(suite_app, dict) else None
-        if "app" not in suite or (suite_app is not None and not isinstance(slug, str)):
+        if "app" not in suite or (suite_app is not None and not (isinstance(slug, str) and slug)):
             # Left out or wrongly shaped: not known (28009de, 42a3721), yet read as the
-            # configured app's, so a failure in it still fails (Codex's review of 0f323f6).
+            # configured app's, so a failure in it still fails (Codex, 0f323f6). Empty
+            # is not a name either (Codex's review of 9044492).
             complete = False
             suite_app, slug = {}, app
         if slug != "github-actions" and suite.get("workflowRun") is not None:
@@ -867,7 +868,7 @@ def _checks(
             # runs are still read, so a failure in them still fails (pre-review of b8b1ca7);
             # being partial, the list never passes on them.
             unknown_event = "workflowRun" not in suite or (
-                workflow_run is not None and not isinstance(event, str)
+                workflow_run is not None and not (isinstance(event, str) and event)
             )
             if (
                 workflow_run is None
