@@ -4024,6 +4024,45 @@ class PreReviewOf07c3480(CodexReviewOf099ef9b):
                 fconfig.parse_fetcher(json.dumps(config_data(self.base, key=path)))
 
 
+class CodexReviewOfCc29d6e(PreReviewOf07c3480):
+    def test_a_run_in_a_skipped_suite_and_a_counted_one_is_a_repeat(self):
+        node = pr_node(1, issue=issue_node(10))
+        suites = node["commits"]["nodes"][0]["commit"]["checkSuites"]
+        for i, r in enumerate(suites["nodes"][0]["checkRuns"]["nodes"]):
+            r["id"] = f"CR_{i}"
+        other = json.loads(json.dumps(suites["nodes"][0]))
+        other["app"] = {"slug": "another-ci"}  # passed over before its runs are read
+        suites["nodes"].insert(0, other)
+        suites["totalCount"] = 2
+        item = self.item_for(node)
+        self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
+    def test_the_heads_row_is_read_wherever_it_is(self):
+        node = pr_node(1, issue=issue_node(10))
+        head_row = node["commits"]["nodes"][0]
+        head_row["commit"]["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][0]["conclusion"] = (
+            "FAILURE"
+        )
+        other_row = json.loads(json.dumps(head_row))
+        other_row["commit"]["oid"] = "c" * 40
+        node["commits"]["nodes"] = [other_row, head_row]
+        item = self.item_for(node)
+        self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
+
+    def test_an_update_before_its_closing_is_never_the_end(self):
+        recent = (NOW - timedelta(days=1)).isoformat()
+        old = (NOW - timedelta(days=60)).isoformat()
+        rows = [{"number": 2, "closedAt": recent, "updatedAt": old}]
+        data = {
+            "repository": {
+                "open": {"totalCount": 0, "nodes": []},
+                "closed": {"nodes": rows, "pageInfo": {"hasNextPage": True, "endCursor": "c"}},
+            }
+        }
+        self.assertTrue(snapshot._listing(REPO_A, data, NOW)[1])
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now

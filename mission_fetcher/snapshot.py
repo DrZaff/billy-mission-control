@@ -740,9 +740,15 @@ def _checks(
         if not commits:
             return [], False
         complete = False
-    commit = _obj(_obj(commits[0]).get("commit"))
-    if _sha(commit.get("oid")) != head:
+    # The head's own row, wherever it is: with several, a later one may be the head, and its
+    # failures still count (Codex's review of cc29d6e).
+    rows = [_obj(_obj(c).get("commit")) for c in commits]
+    heads = [c for c in rows if _sha(c.get("oid")) == head]
+    if not heads:
         raise _Incomplete()  # results for another commit: none of them apply
+    commit = heads[0]
+    if len(heads) > 1:
+        complete = False
     run_ids: set[str] = set()
     try:
         suites_conn = _obj(commit.get("checkSuites"))
@@ -758,6 +764,16 @@ def _checks(
         if not isinstance(suite, dict):
             complete = False
             continue
+        # A run in two suites may stand for an omitted one: every suite's runs are counted here,
+        # before any suite is passed over (pre-review of 07c3480; Codex's review of cc29d6e).
+        raw_runs = suite.get("checkRuns")
+        raw_runs = raw_runs.get("nodes") if isinstance(raw_runs, dict) else None
+        for raw in raw_runs if isinstance(raw_runs, list) else ():
+            run_id = raw.get("id") if isinstance(raw, dict) else None
+            if isinstance(run_id, str):
+                if run_id in run_ids:
+                    complete = False
+                run_ids.add(run_id)
         if "app" not in suite:
             complete = False  # left out: not known (audit of 28009de)
             continue
@@ -811,13 +827,6 @@ def _checks(
             if not isinstance(run, dict):
                 complete = False
                 continue
-            # A run in two suites may stand for an omitted one, as a repeat within a suite may
-            # (pre-review of 07c3480).
-            run_id = run.get("id")
-            if isinstance(run_id, str):
-                if run_id in run_ids:
-                    complete = False
-                run_ids.add(run_id)
             name = run.get("name")
             if not isinstance(name, str):
                 complete = False  # wrongly shaped: not known, never skipped (audit of 28009de)
@@ -1225,6 +1234,7 @@ def _closed_page(conn: Any, since: datetime) -> tuple[list[int], str | None, lis
     conn = _obj(conn)
     nodes = _list(conn.get("nodes"))
     numbers, rows, updated = [], [], []
+    impossible = False
     for node in nodes:
         node = _obj(node)
         number = _int(node.get("number"))
@@ -1233,6 +1243,9 @@ def _closed_page(conn: Any, since: datetime) -> tuple[list[int], str | None, lis
         # A closed pull request always has a closing time: one without is a bad answer, never
         # skipped quietly (Fable's pre-review of 8152df0).
         closed_at = datetime.fromisoformat(_time(node.get("closedAt")))
+        # Closing updates a pull request: an update before its closing can't be, and the page's
+        # update times then say nothing about the next (Codex's review of cc29d6e).
+        impossible = impossible or updated[-1] < closed_at
         if closed_at >= since:
             numbers.append(number)
     info = _obj(conn.get("pageInfo"))
@@ -1247,7 +1260,7 @@ def _closed_page(conn: Any, since: datetime) -> tuple[list[int], str | None, lis
     disordered = any(a < b for a, b in zip(updated, updated[1:], strict=False))
     # An empty page that says more follow is never the end: the next is read, or the list is
     # marked cut off (Codex's review of 9cc8f43).
-    if has_next and (last_in_window or disordered or not nodes):
+    if has_next and (last_in_window or disordered or impossible or not nodes):
         cursor = info.get("endCursor")
         if not isinstance(cursor, str) or not 0 < len(cursor) <= 512:
             raise _bad()
