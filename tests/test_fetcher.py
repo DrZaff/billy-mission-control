@@ -812,6 +812,69 @@ class Refresh(Base):
 
         return gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
 
+    def test_a_pr_nulled_whole_for_an_optional_field_is_read_by_its_core(self):
+        # Codex's review of 8152df0 (blocking): an error on a non-null optional field (the
+        # title) makes GitHub null the whole pull request; it was marked unreadable, hiding a
+        # merge by someone other than the owner.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
+        node["mergedBy"] = {"login": "someone-else"}
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        core_fields = (
+            "number",
+            "state",
+            "isDraft",
+            "merged",
+            "closedAt",
+            "mergedAt",
+            "mergedBy",
+            "headRefOid",
+        )
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number:" in body:
+                answer = json.loads(data)
+                repository = answer["data"]["repository"]
+                if b"number state isDraft" in body:  # the core query: only what it asks for
+                    for alias, pr in repository.items():
+                        repository[alias] = {k: pr[k] for k in core_fields}
+                else:
+                    for alias in repository:
+                        repository[alias] = None
+                    answer["errors"] = [
+                        {"type": "SERVICE_UNAVAILABLE", "path": ["repository", a, "title"]}
+                        for a in repository
+                    ]
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
+        self.assertIsNotNone(item["task"])
+        self.assertEqual(item["title"], snapshot.NO_TITLE)
+        pull = item["task"]["pull_request"]
+        self.assertEqual((pull["files"], pull["reviews"], pull["checks"]), (None, None, None))
+        state = tasks.derive(self.task_of(item))
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, state.flags)
+
+    def test_tasks_the_model_rejects_never_replace_the_snapshot(self):
+        # Codex's review of 8152df0 (blocking): any built task counted as readable.
+        real_item = snapshot._item
+
+        def rejected(*args, **kwargs):
+            item = real_item(*args, **kwargs)
+            item["task"]["pull_request"]["head_sha"] = "not a sha"  # the model rejects it
+            return item
+
+        with mock.patch.object(snapshot, "_item", side_effect=rejected):
+            with self.assertRaises(gh.FetchError) as caught:
+                self.run_refresh()
+        self.assertEqual(caught.exception.code, "bad-response")
+
     def test_an_error_on_an_optional_field_never_hides_a_known_unsafe_merge(self):
         # Codex's review of c3ee86b (blocking): a GraphQL error on one optional field threw
         # away the whole partial answer, so a merge by someone else showed as UNKNOWN.

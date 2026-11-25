@@ -26,7 +26,7 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
-from mission_control.tasks import READY_LABEL
+from mission_control.tasks import READY_LABEL, InvalidInput, parse
 
 from .config import FetcherConfig
 from .github import FetchError, GitHub
@@ -143,6 +143,10 @@ class _Errored:
 
 
 ERRORED = _Errored()
+# A pull request GitHub nulled whole for an error on an optional field (a non-null one, such as
+# its title, nulls its parent): it is asked for again with only the core fields, so what is
+# known about the merge is still judged (Codex's review of 8152df0).
+RETRY = object()
 
 
 def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
@@ -171,7 +175,9 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
         alias = f"p{i}"
         node = repository.get(alias)
         fields = marks.get(alias, set())
-        if not isinstance(node, dict) or fields is None:
+        if not isinstance(node, dict) and fields:
+            node = RETRY  # nulled whole, but only for optional fields: ask for its core
+        elif not isinstance(node, dict) or fields is None:
             node = UNREADABLE
         elif fields:
             node = {**node, **dict.fromkeys(fields, ERRORED)}
@@ -234,9 +240,15 @@ FRAGMENT = Template("fragment pr on PullRequest {" + _BASE_FIELDS + _HEAVY_FIELD
     _LIMITS
 )
 LITE_FRAGMENT = Template("fragment pr on PullRequest {" + _BASE_FIELDS + "}").substitute(_LIMITS)
+# Only what the merge verdict needs; every other part is then "not known".
+CORE_FRAGMENT = """fragment pr on PullRequest {
+  number state isDraft merged closedAt mergedAt
+  mergedBy { login }
+  headRefOid
+}"""
 
 
-def detail_query(numbers: list[int], lite: bool = False) -> str:
+def detail_query(numbers: list[int], lite: bool = False, core: bool = False) -> str:
     """The details of these pull requests, by number. Numbers are checked integers, so they
     can be written into the query; everything else is a variable."""
     if not numbers or not all(type(n) is int and 0 < n < 2**31 for n in numbers):
@@ -249,7 +261,7 @@ def detail_query(numbers: list[int], lite: bool = False) -> str:
         "  repository(owner: $owner, name: $name) {\n"
         f"{fields}\n"
         "  }\n"
-        "}\n" + (LITE_FRAGMENT if lite else FRAGMENT)
+        "}\n" + (CORE_FRAGMENT if core else LITE_FRAGMENT if lite else FRAGMENT)
     )
 
 
@@ -696,9 +708,10 @@ def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[in
     """[(number, node, lite)] for these pull requests, in order; node UNREADABLE when GitHub's
     answer didn't hold it whole."""
 
-    def fetch(batch: list[int], lite: bool) -> list:
+    def fetch(batch: list[int], lite: bool, core: bool = False) -> list:
         try:
-            data = github.graphql(token, detail_query(batch, lite), {"owner": owner, "name": name})
+            query = detail_query(batch, lite, core)
+            data = github.graphql(token, query, {"owner": owner, "name": name})
         except FetchError as error:
             # Errors on some fields, with the rest of the answer: what GitHub did supply is
             # still judged (Codex's review of c3ee86b). With no usable answer, the error
@@ -712,14 +725,33 @@ def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[in
         # unreadable; one deleted since the list is gone from the next refresh's list.
         return [(n, repository.get(f"p{i}") or UNREADABLE, lite) for i, n in enumerate(batch)]
 
-    # At most about three requests per pull request: splitting to one and reading it lite.
-    budget = [3 * len(numbers) + 2]
+    # At most about four requests per pull request: splitting to one, reading it lite, and
+    # its core.
+    budget = [4 * len(numbers) + 2]
 
-    def fetch_counted(batch: list[int], lite: bool) -> list:
+    def fetch_counted(batch: list[int], lite: bool, core: bool = False) -> list:
         if budget[0] <= 0:
             raise FetchError("too-heavy")
         budget[0] -= 1
-        return fetch(batch, lite)
+        return resolve(fetch(batch, lite, core))
+
+    def resolve(entries: list) -> list:
+        """Each RETRY asked for again with its core fields only (read as lite: files, reviews
+        and checks not known). Still nothing usable: unreadable."""
+        out = []
+        for number, node, lite in entries:
+            if node is RETRY:
+                try:
+                    ((_, node, _),) = fetch_counted([number], True, core=True)
+                except FetchError as error:
+                    if not _its_own(error, 1):
+                        raise
+                    node = UNREADABLE
+                if node is RETRY:
+                    node = UNREADABLE
+                lite = True
+            out.append((number, node, lite))
+        return out
 
     def read(batch: list[int]) -> list:
         try:
@@ -744,6 +776,20 @@ def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[in
 
 
 UNREADABLE = object()  # a pull request whose own data GitHub couldn't give whole
+
+
+def _model_reads(task: dict | None) -> bool:
+    """Whether the task model accepts this task: only then is the pull request readable
+    (Codex's review of 8152df0: a built task the model rejects is UNKNOWN all the same)."""
+    if task is None:
+        return False
+    try:
+        parse(dict(task, paused=False))  # paused comes from the stop marker (A5b)
+    except (InvalidInput, TypeError, ValueError, KeyError, AttributeError, OverflowError):
+        return False
+    return True
+
+
 NO_TITLE = "(this pull request's title couldn't be read)"
 
 
@@ -785,7 +831,7 @@ def repo_items(repo: str, cfg: FetcherConfig, github: GitHub, token: str, now: d
             # fetcher's own (Codex's review of 48929aa: an unhashable review state raised
             # TypeError and failed the refresh for every repository).
             item = _unreadable(repo, number)
-        readable = readable or item["task"] is not None
+        readable = readable or _model_reads(item["task"])
         # A pull request closed between the list and its details still belongs here; one
         # closed before the window (possible only if the list was wrong) does not.
         if item["closed_at"] is None or datetime.fromisoformat(item["closed_at"]) >= since:
