@@ -23,7 +23,15 @@ from mission_control.stopper import TIMEOUT, LineLog, _read_request, log_line, p
 
 from .config import FetcherConfig
 from .github import FetchError, GitHub, load_key
-from .snapshot import SNAPSHOT, STATUS, open_regular, read_json, refresh, write_json
+from .snapshot import (
+    PUBLISH_WITHIN,
+    SNAPSHOT,
+    STATUS,
+    open_regular,
+    read_json,
+    refresh,
+    write_json,
+)
 
 REQUEST = b"REFRESH\n"
 OK = b"ok\n"
@@ -196,6 +204,9 @@ class Refresher:
 
     def _locked(self, work: Callable[[], list] | None = None) -> bytes:
         now = self.clock()
+        # The snapshot's freshness is judged from `now`: it is published within PUBLISH_WITHIN
+        # of it, or not at all (Codex's review of d9a70f4).
+        publish_by = time.monotonic() + PUBLISH_WITHIN
         boot_id, since_boot = self.boot()
         try:
             previous = read_json(self.cfg.snapshot_dir, STATUS, strict=True)
@@ -292,7 +303,7 @@ class Refresher:
         snapshot = None
         try:
             snapshot = refresh(self.cfg, self.github(self.cfg), stamp)
-            write_json(self.cfg.snapshot_dir, SNAPSHOT, snapshot)
+            write_json(self.cfg.snapshot_dir, SNAPSHOT, snapshot, by=publish_by)
         except FetchError as error:
             reply, status["result"], status["reason"] = (
                 f"failed:{error.code}\n".encode(),

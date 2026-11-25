@@ -613,10 +613,12 @@ def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) 
 
 
 CHECK_FRESH = timedelta(days=7)
-# A success counts only if it stays fresh until the snapshot is written: the refresh can run
-# until its deadline after `now`, then the token's revocation, then the write (Codex's reviews
-# of 05062fc and a34154f: one that expired before then still passed). A minute covers the write.
-FRESH_UNTIL = CHECK_FRESH - timedelta(seconds=REFRESH_DEADLINE + REVOKE_LIMIT + 60)
+# A snapshot is published within this long of the refresh's start, or not at all (Codex's
+# review of d9a70f4: a stalled write could publish it later): the refresh's limit, the token's
+# revocation and a minute to write it. A success counts only if it stays fresh until then
+# (Codex's reviews of 05062fc and a34154f).
+PUBLISH_WITHIN = REFRESH_DEADLINE + REVOKE_LIMIT + 60
+FRESH_UNTIL = CHECK_FRESH - timedelta(seconds=PUBLISH_WITHIN)
 
 
 def _checks(
@@ -1533,11 +1535,14 @@ def encode(data: dict) -> bytes:
 # ---------------------------------------------------------------- files
 
 
-def write_json(folder: Path, name: str, data: dict, durable: bool = False) -> None:
+def write_json(
+    folder: Path, name: str, data: dict, durable: bool = False, by: float | None = None
+) -> None:
     """Write `name` in `folder` whole, then rename it into place: a reader never sees half a
-    file. Never through a symlink (the folder is opened with O_NOFOLLOW and used by its file
-    descriptor); private while being written, then readable by the folder's group (the web
-    app's account) only."""
+    file. With `by` (a time.monotonic() deadline), a file not ready by then is never put in
+    place (OSError), and the one there stays. Never through a symlink (the folder is opened
+    with O_NOFOLLOW and used by its file descriptor); private while being written, then
+    readable by the folder's group (the web app's account) only."""
     text = encode(data)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     folder_fd = os.open(folder, flags)
@@ -1566,6 +1571,8 @@ def write_json(folder: Path, name: str, data: dict, durable: bool = False) -> No
                 os.fchmod(fd, 0o640)
             finally:
                 os.close(fd)
+            if by is not None and time.monotonic() > by:
+                raise OSError("too late to publish")
             os.replace(tmp, name, src_dir_fd=folder_fd, dst_dir_fd=folder_fd)
         except BaseException:
             try:

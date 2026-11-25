@@ -4335,6 +4335,43 @@ class CodexReviewOfA34154f(CodexReviewOf099ef9b):
         self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
 
+class PublishedOnTimeOrNotAtAll(Base):
+    """Codex's review of d9a70f4 (blocking): a stalled write could publish a snapshot whose
+    results had expired since; one not ready in time is never put in place."""
+
+    def test_a_late_write_never_replaces_the_snapshot(self):
+        folder = self.base / "snapshot"
+        snapshot.write_json(folder, snapshot.SNAPSHOT, {"old": True})
+        with self.assertRaises(OSError):
+            snapshot.write_json(folder, snapshot.SNAPSHOT, {"new": True}, by=0.0)
+        self.assertEqual(snapshot.read_json(folder, snapshot.SNAPSHOT), {"old": True})
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), [snapshot.SNAPSHOT])
+        snapshot.write_json(folder, snapshot.SNAPSHOT, {"new": True}, by=time.monotonic() + 60)
+        self.assertEqual(snapshot.read_json(folder, snapshot.SNAPSHOT), {"new": True})
+
+    def test_the_refresh_publishes_by_its_deadline(self):
+        # A refresh whose write comes too late fails, and the last snapshot stays.
+        published = []
+        real = server.write_json
+
+        def write(folder, name, data, durable=False, by=None):
+            if name == snapshot.SNAPSHOT:
+                published.append(by)
+            return real(folder, name, data, durable, by)
+
+        start = time.monotonic()
+        with mock.patch.object(server, "write_json", write):
+            server.Refresher(self.cfg, lambda cfg: client(self.fake)).run()
+        self.assertEqual(len(published), 1)
+        self.assertIsNotNone(published[0])
+        self.assertLessEqual(published[0], start + snapshot.PUBLISH_WITHIN + 5)
+        self.assertGreater(snapshot.FRESH_UNTIL.total_seconds(), 0)
+        self.assertEqual(
+            snapshot.CHECK_FRESH - snapshot.FRESH_UNTIL,
+            timedelta(seconds=snapshot.PUBLISH_WITHIN),
+        )
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now
