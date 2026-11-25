@@ -431,6 +431,13 @@ class CodexReviewOfCaa5552(unittest.TestCase):
         # Nor does the Flags list say so (Codex's review of dc1eb14).
         self.assertNotIn("No clinician has approved", body)
 
+    def test_an_unidentifiable_merger_is_an_unsafe_merge_on_the_path(self):
+        # Codex's review of 48929aa.
+        e = DEMO.entry("example-tools-64")
+        body = views.task_detail(DEMO, e)
+        self.assertIn(Flag.MERGER_UNKNOWN, e.status.flags)
+        self.assertEqual(path_row(body, "Owner"), "!")
+
     def test_a_merge_with_no_linked_issue_never_shows_authorisation(self):
         # Codex's review of 72607b3 (blocking): MERGED is reachable with ISSUE_NOT_LINKED.
         raw = entry("example-site-921")

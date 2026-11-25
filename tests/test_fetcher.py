@@ -722,6 +722,36 @@ class Refresh(Base):
             else:
                 self.assertEqual(item["task"]["pull_request"]["files"], ["site/a.html"])
 
+    def test_a_pr_missing_from_githubs_answer_is_never_silently_dropped(self):
+        # Codex's review of 48929aa (blocking).
+        self.fake.prs[REPO_A]["open"] = [pr_node(n, issue=issue_node(10)) for n in range(1, 4)]
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number: 2)" in body:
+                answer = json.loads(data)
+                answer["data"]["repository"] = {
+                    k: v for k, v in answer["data"]["repository"].items() if v and v["number"] != 2
+                }
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        items = [i for i in snapshot.refresh(self.cfg, github, NOW)["items"] if i["repo"] == REPO_A]
+        self.assertEqual([i["number"] for i in items], [1, 2, 3])
+        self.assertIsNone(next(i for i in items if i["number"] == 2)["task"])  # unreadable
+
+    def test_any_wrongly_shaped_value_makes_only_that_pr_unreadable(self):
+        # Codex's review of 48929aa (blocking): an unhashable review state raised TypeError.
+        bad_review = review_node()
+        bad_review["state"] = ["APPROVED"]
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10), reviews=[bad_review])
+        items = self.run_refresh()["items"]
+        self.assertEqual([i["number"] for i in items], [1, 2, 3])
+        self.assertIsNone(items[0]["task"])
+        self.assertIsNotNone(items[1]["task"])
+
     def test_another_apps_checks_need_no_workflow_run(self):
         # Codex's review of de9a6fb: suites of an app other than GitHub Actions have no
         # workflow run, so their required checks showed as missing.

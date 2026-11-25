@@ -600,13 +600,15 @@ def _listing(repo: str, data: Any, now: datetime) -> tuple[list[int], bool]:
 
 
 def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[int]) -> list:
-    """[(number, node, lite)] for these pull requests, in order; node None: unreadable. A pull
-    request gone since the list (deleted, or moved) is skipped."""
+    """[(number, node, lite)] for these pull requests, in order; node UNREADABLE when GitHub's
+    answer didn't hold it whole."""
 
     def fetch(batch: list[int], lite: bool) -> list:
         data = github.graphql(token, detail_query(batch, lite), {"owner": owner, "name": name})
         repository = _obj(_obj(data).get("repository"))
-        return [(n, repository.get(f"p{i}"), lite) for i, n in enumerate(batch)]
+        # Missing or null: never silently dropped (Codex's review of 48929aa). It is shown as
+        # unreadable; one deleted since the list is gone from the next refresh's list.
+        return [(n, repository.get(f"p{i}") or UNREADABLE, lite) for i, n in enumerate(batch)]
 
     # At most about three requests per pull request: splitting to one and reading it lite.
     budget = [3 * len(numbers) + 2]
@@ -636,7 +638,7 @@ def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[in
     out = []
     for i in range(0, len(numbers), BATCH):
         out += read(numbers[i : i + BATCH])
-    return [(n, node, lite) for n, node, lite in out if node is not None]
+    return out
 
 
 UNREADABLE = object()  # a pull request whose own data GitHub couldn't give whole
@@ -673,7 +675,10 @@ def repo_items(repo: str, cfg: FetcherConfig, github: GitHub, token: str, now: d
             item = _item(repo, cfg, node, lite)
             if item["number"] != number:
                 raise _bad()
-        except FetchError:  # bad-response: this pull request's own data
+        except (FetchError, TypeError, ValueError, AttributeError, KeyError, OverflowError):
+            # This pull request's own data is wrongly shaped. Any such error, not only the
+            # fetcher's own (Codex's review of 48929aa: an unhashable review state raised
+            # TypeError and failed the refresh for every repository).
             item = _unreadable(repo, number)
         # A pull request closed between the list and its details still belongs here; one
         # closed before the window (possible only if the list was wrong) does not.

@@ -347,6 +347,7 @@ def _path(entry: Entry) -> str:
     if st.state is State.MERGED:
         rows.append(("done", "Owner", "merged"))
     elif st.state is State.UNSAFE and st.flags & {
+        Flag.MERGER_UNKNOWN,  # Codex's review of 48929aa
         Flag.UNAUTHORIZED_MERGE,
         Flag.MERGED_UNREVIEWED,
         Flag.MERGED_WITHOUT_CLINICIAN,
