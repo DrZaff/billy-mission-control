@@ -3732,6 +3732,30 @@ class CodexReviewOf07c05d4(Base):
         self.assertEqual(snapshot._listing(REPO_A, data, NOW), ([5], False))
 
 
+class CodexReviewOf96cb8a9(Base):
+    def test_a_repeated_path_never_makes_the_file_list_whole(self):
+        # Blocking: a repeated path could fill the row of an omitted clinical one.
+        node = pr_node(1, issue=issue_node(10), files=("site/a.html", "site/a.html"))
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = snapshot.refresh(self.cfg, client(self.fake), NOW)["items"][0]
+        self.assertFalse(item["task"]["pull_request"].get("files_complete", True))
+        flags = tasks.derive(dict(item["task"], paused=False)).flags
+        self.assertIn(tasks.Flag.FILES_UNVERIFIED, flags)
+
+    def test_a_repeated_older_closed_row_marks_the_list_cut_off(self):
+        # Should fix: rows closed before the window were dropped before the repeat check.
+        old = (NOW - timedelta(days=60)).isoformat()
+        recent = (NOW - timedelta(days=1)).isoformat()
+        row = {"number": 9, "closedAt": old, "updatedAt": recent}
+        data = {
+            "repository": {
+                "open": {"totalCount": 0, "nodes": []},
+                "closed": {"nodes": [row, row], "pageInfo": {"hasNextPage": False}},
+            }
+        }
+        self.assertEqual(snapshot._listing(REPO_A, data, NOW), ([], True))
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now

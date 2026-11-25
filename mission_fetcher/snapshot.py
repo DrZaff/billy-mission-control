@@ -535,6 +535,10 @@ def _files(pr: dict, clinical_paths: tuple[str, ...]) -> tuple[list[str] | None,
         if n.get("changeType") not in ("ADDED", "MODIFIED", "DELETED", "CHANGED"):
             complete = False
         paths.append(path)
+    if len(set(paths)) != len(paths):
+        # A repeated path fills a row another path should have, perhaps a clinical one: the
+        # list is partial whatever its count says (Codex's review of 96cb8a9).
+        complete = False
     if size > MAX_PATH_BYTES:
         return _compact(paths, clinical_paths), False
     return paths, complete
@@ -1129,18 +1133,21 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
     }
 
 
-def _closed_page(conn: Any, since: datetime) -> tuple[list[int], str | None]:
-    """(numbers closed in the window, the cursor of the next page if it may hold more)."""
+def _closed_page(conn: Any, since: datetime) -> tuple[list[int], str | None, list[int]]:
+    """(numbers closed in the window, the cursor of the next page if it may hold more, every
+    row's number, for finding repeats)."""
     conn = _obj(conn)
     nodes = _list(conn.get("nodes"))
-    numbers = []
+    numbers, rows = [], []
     for node in nodes:
         node = _obj(node)
+        number = _int(node.get("number"))
+        rows.append(number)
         # A closed pull request always has a closing time: one without is a bad answer, never
         # skipped quietly (Fable's pre-review of 8152df0).
         closed_at = datetime.fromisoformat(_time(node.get("closedAt")))
         if closed_at >= since:
-            numbers.append(_int(node.get("number")))
+            numbers.append(number)
     info = _obj(conn.get("pageInfo"))
     has_next = info.get("hasNextPage")
     if not isinstance(has_next, bool):
@@ -1156,8 +1163,8 @@ def _closed_page(conn: Any, since: datetime) -> tuple[list[int], str | None]:
         cursor = info.get("endCursor")
         if not isinstance(cursor, str) or not 0 < len(cursor) <= 512:
             raise _bad()
-        return numbers, cursor
-    return numbers, None
+        return numbers, cursor, rows
+    return numbers, None, rows
 
 
 def _listing(
@@ -1172,17 +1179,21 @@ def _listing(
     more_open = _int(open_conn.get("totalCount")) != len(open_nodes)
     since = now - timedelta(days=RECENT_DAYS)
     numbers = [_int(_obj(n).get("number")) for n in open_nodes]
-    closed, cursor = _closed_page(repository.get("closed"), since)
+    rows = list(numbers)  # every row read, older closed ones included
+    closed, cursor, page_rows = _closed_page(repository.get("closed"), since)
     numbers += closed
+    rows += page_rows
     pages = 1
     while cursor is not None and more_pages is not None and pages < CLOSED_PAGES:
         page = _obj(_obj(more_pages(cursor)).get("repository")).get("closed")
-        closed, cursor = _closed_page(page, since)
+        closed, cursor, page_rows = _closed_page(page, since)
         numbers += closed
+        rows += page_rows
         pages += 1
-    # Any repeat, within a page, across pages or between the lists, means the list changed while
-    # it was read, or GitHub's answer is odd: one may be missing (Codex's review of 07c05d4).
-    repeated = len(set(numbers)) != len(numbers)
+    # Any repeat among every row read, within a page, across pages or between the lists, older
+    # ones included, means the list changed while it was read, or GitHub's answer is odd: one
+    # may be missing (Codex's reviews of 07c05d4 and 96cb8a9).
+    repeated = len(set(rows)) != len(rows)
     return list(dict.fromkeys(numbers)), more_open or repeated or cursor is not None
 
 
