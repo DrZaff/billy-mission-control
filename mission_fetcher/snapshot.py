@@ -91,6 +91,11 @@ query($$owner: String!, $$name: String!) {
 """).substitute(open=MAX_OPEN, closed=MAX_CLOSED)
 
 BATCH = 10
+# Failures that may mean the query was too heavy, not that GitHub is down: the batch is split
+# (Codex's review of 28546f5: GitHub can stop a costly query by time or resources, before the
+# answer reaches the size cap). If a lone pull request read without its heavy parts still
+# fails, or the request budget runs out, the refresh fails with GitHub's own error.
+HEAVY = {"too-large", "too-heavy", "timeout", "http-502", "http-503", "http-504"}
 
 _BASE_FIELDS = """
   number title state isDraft merged closedAt mergedAt
@@ -541,7 +546,11 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
     # null when no readable, authorised issue is linked: the model shows an open PR as
     # NOT_LINKED and still judges a merged one (Codex's review of 3f7d3c2: leaving the key out
     # made the whole PR unreadable).
-    task["issue"] = issue
+    # A merged PR's issue link is GitHub's current one, not the link at the merge: it is no
+    # evidence of which issue authorised the merge (Codex's review of 28546f5). The model then
+    # makes no authorisation claim either way; the merger is still checked. The link is still
+    # shown (issue_screen).
+    task["issue"] = None if merged else issue
     short = repo.split("/", 1)[1]
     return {
         "id": f"{short}-{number}",
@@ -591,16 +600,25 @@ def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[in
         repository = _obj(_obj(data).get("repository"))
         return [(repository.get(f"p{i}"), lite) for i in range(len(batch))]
 
+    # At most about three requests per pull request: splitting to one and reading it lite.
+    budget = [3 * len(numbers) + 2]
+
+    def fetch_counted(batch: list[int], lite: bool) -> list:
+        if budget[0] <= 0:
+            raise FetchError("too-heavy")
+        budget[0] -= 1
+        return fetch(batch, lite)
+
     def read(batch: list[int]) -> list:
         try:
-            return fetch(batch, False)
+            return fetch_counted(batch, False)
         except FetchError as error:
-            if error.code != "too-large":
+            if error.code not in HEAVY:
                 raise
         if len(batch) > 1:
             half = len(batch) // 2
             return read(batch[:half]) + read(batch[half:])
-        return fetch(batch, True)
+        return fetch_counted(batch, True)
 
     out = []
     for i in range(0, len(numbers), BATCH):

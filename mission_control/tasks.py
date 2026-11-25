@@ -152,6 +152,8 @@ class Flag(StrEnum):
     # A clinician's approval of the head was checked and found (set only where it is checked:
     # Codex's review of 877fd21, the view had to guess from the state).
     CLINICIAN_APPROVED = "clinician_approved"
+    # A merged PR with no issue: its authorisation can't be verified (A5a, GitHub data only).
+    AUTHORIZATION_UNVERIFIED = "authorization_unverified"
     UNAUTHORIZED_MERGE = "unauthorized_merge"  # merged by someone other than the owner
     MERGED_UNREVIEWED = "merged_unreviewed"  # the merged commit never passed review
     MERGED_WITHOUT_CLINICIAN = "merged_without_clinician"
@@ -722,7 +724,10 @@ def derive(raw: Any) -> TaskStatus:
     merged_at = pr.merged_at if pr and pr.merged else None
     since, last_owner_action = _authorization(task, flags, merged_at)
     if not task.issue_known:
-        flags.add(Flag.ISSUE_NOT_LINKED)
+        # A merged PR: what authorised it can't be verified from GitHub's current link, and it
+        # is history, so a calm note, not an alert (Codex's review of 28546f5).
+        merged_pr = bool(pr and pr.merged)
+        flags.add(Flag.AUTHORIZATION_UNVERIFIED if merged_pr else Flag.ISSUE_NOT_LINKED)
 
     # Only records from within the owner's current authorisation are this task's work. Earlier
     # records (before it began, or from a withdrawn one) never count, and are reported.
@@ -940,6 +945,15 @@ def derive(raw: Any) -> TaskStatus:
     # The head commit passed review.
     if not pr:
         return status(State.REVIEWED, f"{head[:12]} passed review; not published yet.", head, head)
+    # Clinician approval is judged before the checks gate, so a PR waiting on its checks
+    # never shows approval as needed when it is given (Codex's review of 28546f5).
+    approved = maybe_clinical and _clinician_approved(task, head)
+    if approved:
+        flags.add(Flag.CLINICIAN_APPROVED)
+    elif maybe_clinical and pr.reviews is None:
+        flags.add(Flag.REVIEWS_UNVERIFIED)
+    elif maybe_clinical:
+        flags.add(Flag.CLINICAL_APPROVAL_MISSING)
     if not _checks(task, head, flags):
         return status(
             State.PUBLISHED,
@@ -947,13 +961,7 @@ def derive(raw: Any) -> TaskStatus:
             head,
             head,
         )
-    if maybe_clinical and _clinician_approved(task, head):
-        flags.add(Flag.CLINICIAN_APPROVED)
-    elif maybe_clinical:
-        if pr.reviews is None:
-            flags.add(Flag.REVIEWS_UNVERIFIED)
-        else:
-            flags.add(Flag.CLINICAL_APPROVAL_MISSING)
+    if maybe_clinical and not approved:
         return status(
             State.CLINICAL_REVIEW,
             f"Clinical files: waiting for a clinician's approval of {head[:12]}.",

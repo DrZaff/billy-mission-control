@@ -26,6 +26,8 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 HOST = "api.github.com"
 TIMEOUT = 15.0
 MAX_RESPONSE = 4 * 1024 * 1024
+# GraphQL error types GitHub gives when a query is too costly to finish.
+HEAVY_KINDS = {"RESOURCE_LIMITS_EXCEEDED", "MAX_NODE_LIMIT_EXCEEDED", "TIMEOUT"}
 USER_AGENT = "billy-mission-control-fetcher"
 API_VERSION = "2022-11-28"
 # Exactly these, all read-only (issue #15, decision 3). Metadata is GitHub's mandatory one.
@@ -219,7 +221,11 @@ class GitHub:
         errors = answer.get("errors")
         if errors:
             kinds = {e.get("type") for e in errors if isinstance(e, dict)}
-            raise FetchError("rate-limited" if "RATE_LIMITED" in kinds else "graphql-error")
+            if "RATE_LIMITED" in kinds:
+                raise FetchError("rate-limited")
+            if kinds & HEAVY_KINDS:
+                raise FetchError("too-heavy")  # GitHub stopped the query for its cost
+            raise FetchError("graphql-error")
         data = answer.get("data")
         if not isinstance(data, dict):
             raise FetchError("bad-response")

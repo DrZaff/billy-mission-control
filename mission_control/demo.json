@@ -2231,7 +2231,7 @@
   },
   {
    "id": "example-tools-60",
-   "title": "Footer link colour (merged; files, reviews and checks not verified here)",
+   "title": "Footer link colour (merged; issue link, files, reviews and checks not verified here)",
    "risk": "low",
    "task": {
     "repo": "example-org/example-tools",
@@ -2250,18 +2250,7 @@
     ],
     "max_fix_rounds": 1,
     "paused": false,
-    "issue": {
-     "number": 60,
-     "state": "open",
-     "timeline": [
-      {
-       "event": "labeled",
-       "actor": "example-owner",
-       "at": "2026-11-14T09:00:00+00:00",
-       "label": "agent:ready"
-      }
-     ]
-    },
+    "issue": null,
     "branch": {
      "name": "claude/footer-link-colour",
      "head": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9"

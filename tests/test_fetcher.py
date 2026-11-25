@@ -206,6 +206,8 @@ class FakeGitHub:
         self.queries = []
         self.too_large = set()  # PR numbers whose details are too large to read whole
         self.max_batch_ok = {}  # repo -> the largest batch that can be read
+        self.batch_failure = (200, {}, b"x" * (gh.MAX_RESPONSE + 1))  # too large to read
+        self.down = False  # every detail query fails, as when GitHub is down
 
     def _jwt_ok(self, bearer: str) -> bool:
         try:
@@ -298,8 +300,10 @@ class FakeGitHub:
                 return 200, {}, json.dumps({"data": {"repository": listing}}).encode()
             wanted = [int(n) for n in re.findall(r"pullRequest\(number: (\d+)\)", query)]
             lite = "files(" not in query
+            if self.down:
+                return 502, {}, b""
             if not lite and len(wanted) > self.max_batch_ok.get(repo, 10**6):
-                return 200, {}, b"x" * (gh.MAX_RESPONSE + 1)  # too large to read
+                return self.batch_failure
             if not lite and set(wanted) & self.too_large:
                 return 200, {}, b"x" * (gh.MAX_RESPONSE + 1)
             by_number = {n["number"]: n for n in data["open"] + data["closed"]}
@@ -1032,6 +1036,61 @@ class Refresh(Base):
             self.assertEqual(item["task"]["pull_request"]["files"], ["site/a.html"])  # whole
         self.assertNotIn(REPO_A, snap["truncated"])
 
+    def test_a_query_github_stops_for_its_cost_is_split_too(self):
+        # Codex's review of 28546f5 (blocking): GitHub can stop a costly query by time or
+        # resources, before the answer reaches the size cap.
+        heavy = json.dumps(
+            {"data": None, "errors": [{"type": "RESOURCE_LIMITS_EXCEEDED", "message": "x"}]}
+        ).encode()
+        for failure in ((200, {}, heavy), (502, {}, b""), (504, {}, b""), TimeoutError()):
+            with self.subTest(failure=repr(failure)[:40]):
+                self.fake.prs[REPO_A]["open"] = [
+                    pr_node(n, issue=issue_node(10)) for n in range(1, 8)
+                ]
+                self.fake.max_batch_ok[REPO_A] = 2
+                if isinstance(failure, Exception):
+                    real = self.fake.__call__
+
+                    def call(method, path, headers, body, real=real):
+                        if path == "/graphql" and body.count(b"pullRequest(number:") > 2:
+                            raise TimeoutError()
+                        return real(method, path, headers, body)
+
+                    fake = call
+                else:
+                    self.fake.batch_failure = failure
+                    fake = self.fake
+                github = gh.GitHub(APP_ID, KEY, transport=fake, clock=lambda: NOW.timestamp())
+                snap = snapshot.refresh(self.cfg, github, NOW)
+                numbers = [i["number"] for i in snap["items"] if i["repo"] == REPO_A]
+                self.assertEqual(numbers, list(range(1, 8)))
+
+    def test_when_github_is_down_the_refresh_fails_after_a_bounded_number_of_requests(self):
+        self.fake.prs[REPO_A]["open"] = [pr_node(n, issue=issue_node(10)) for n in range(1, 21)]
+        self.fake.down = True
+        with self.assertRaises(gh.FetchError) as caught:
+            self.run_refresh()
+        self.assertEqual(caught.exception.code, "http-502")
+        detail_calls = sum("pullRequest(number:" in q for q in self.fake.queries)
+        self.assertLessEqual(detail_calls, 3 * 20 + 2)
+
+    def test_a_merged_prs_current_issue_link_is_no_evidence_of_authorisation(self):
+        # Codex's review of 28546f5 (blocking): GitHub shows a PR's closing issue as it is
+        # now, not as it was at the merge.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [
+            pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
+        ]
+        item = self.run_refresh()["items"][0]
+        self.assertIsNone(item["task"]["issue"])
+        self.assertEqual(item["issue"]["number"], 10)  # still shown
+        state = tasks.derive(self.task_of(item))
+        self.assertEqual(state.state, tasks.State.MERGED)
+        self.assertIn(tasks.Flag.AUTHORIZATION_UNVERIFIED, state.flags)
+        self.assertNotIn(tasks.Flag.ISSUE_NOT_LINKED, state.flags)
+        self.assertFalse(state.needs_attention)
+
     def test_one_pull_request_too_large_is_read_without_its_heavy_parts(self):
         self.fake.prs[REPO_A]["open"] = [
             pr_node(1, issue=issue_node(10), files=("evidence/a.json",)),
@@ -1114,7 +1173,7 @@ class Refresh(Base):
         state = tasks.derive(self.task_of(item))
         self.assertEqual(state.state, tasks.State.UNSAFE)
         self.assertIn(tasks.Flag.MERGER_UNKNOWN, state.flags)
-        self.assertIn(tasks.Flag.ISSUE_NOT_LINKED, state.flags)
+        self.assertIn(tasks.Flag.AUTHORIZATION_UNVERIFIED, state.flags)
 
     def test_a_known_clinical_path_in_a_renamed_list_still_counts(self):
         # Codex's review of 3f7d3c2: a rename threw away paths that showed clinical content.

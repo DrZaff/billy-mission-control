@@ -55,6 +55,7 @@ FLAG_WORDS = {
     Flag.CLINICAL: "Clinical files",
     Flag.CLINICAL_APPROVAL_MISSING: "No clinician has approved this commit",
     Flag.CLINICIAN_APPROVED: "A clinician approved this commit",
+    Flag.AUTHORIZATION_UNVERIFIED: "Your authorisation of this merge can't be verified here",
     Flag.UNAUTHORIZED_MERGE: "Merged by someone other than you",
     Flag.MERGED_UNREVIEWED: "The merged commit never passed review",
     Flag.MERGED_WITHOUT_CLINICIAN: "Clinical files merged without a clinician's approval",
@@ -274,6 +275,8 @@ def _path(entry: Entry) -> str:
         authorised = ("!", "no")
     elif st.state is State.PROPOSED:
         authorised = ("-", "not yet")
+    elif Flag.AUTHORIZATION_UNVERIFIED in flags:
+        authorised = ("?", "not verifiable: GitHub shows only the current issue link")
     elif Flag.ISSUE_NOT_LINKED in flags:
         # A merged PR with no readable linked issue (Codex's review of 72607b3).
         authorised = ("?", "not shown: no linked issue to show it")

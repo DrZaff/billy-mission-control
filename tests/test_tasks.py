@@ -406,6 +406,23 @@ class Merges(unittest.TestCase):
         on_time["pull_request"]["reviews"] = [approval(minute=10)]
         self.assertEqual(derive(on_time).state, State.MERGED)
 
+    def test_an_approval_is_shown_while_checks_are_still_failing(self):
+        # Codex's review of 28546f5: the checks gate returned before the approval was judged.
+        value = task(
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(
+                files=["evidence/a.json"],
+                checks=[check("lint", A), check("test", A, conclusion="failure")],
+                reviews=[approval()],
+            ),
+        )
+        s = derive(value)
+        self.assertEqual(s.state, State.PUBLISHED)
+        self.assertIn(Flag.CLINICIAN_APPROVED, s.flags)
+        self.assertNotIn(Flag.CLINICAL_APPROVAL_MISSING, s.flags)
+        value["pull_request"]["reviews"] = []
+        self.assertIn(Flag.CLINICAL_APPROVAL_MISSING, derive(value).flags)
+
     def test_a_merge_without_its_time_is_unknown(self):
         value = self.merged()
         del value["pull_request"]["merged_at"]
@@ -1129,7 +1146,9 @@ class NotKnown(unittest.TestCase):
         )
         self.assertEqual(merged.state, State.UNSAFE)
         self.assertIn(Flag.UNAUTHORIZED_MERGE, merged.flags)
-        self.assertIn(Flag.ISSUE_NOT_LINKED, merged.flags)
+        self.assertIn(
+            Flag.AUTHORIZATION_UNVERIFIED, merged.flags
+        )  # calm, not ISSUE_NOT_LINKED (28546f5)
         self.assertNotIn(Flag.UNAUTHORIZED_WORK, merged.flags)  # not claimed: not known
 
     def test_an_absent_issue_key_is_still_unreadable(self):
