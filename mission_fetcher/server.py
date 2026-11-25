@@ -87,6 +87,18 @@ def _check_status(status: dict) -> None:
         raise ValueError("status boot id")
 
 
+def _snapshot_at(value) -> str | None:
+    """The last good snapshot's time, carried over only as a short ISO time (Fable's
+    pre-review of 8152df0: any value was copied into every new status file)."""
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return value if parsed.tzinfo is not None else None
+
+
 class Refresher:
     """Runs refreshes, at most one every MIN_INTERVAL seconds, and keeps the status file."""
 
@@ -162,6 +174,11 @@ class Refresher:
             previous = read_json(self.cfg.snapshot_dir, STATUS, strict=True)
             if previous is not None:
                 _check_status(previous)
+                # In this boot, an attempt recorded later than now can't be: malformed, not a
+                # reason to wait until the uptime catches up (Fable's pre-review of 8152df0).
+                same_boot = boot_id is not None and previous.get("boot_id") == boot_id
+                if same_boot and previous["attempt_since_boot"] > since_boot:
+                    raise ValueError("attempt in the future")
             previous = previous or {}
         except OSError:
             # Unreadable is not "no earlier attempt": without it the floor can't be kept.
@@ -195,7 +212,7 @@ class Refresher:
             "attempt_since_boot": since_boot,
             "attempt_epoch": now,
             "attempt_at": stamp.isoformat(),
-            "snapshot_at": previous.get("snapshot_at"),
+            "snapshot_at": _snapshot_at(previous.get("snapshot_at")),
             "result": "running",
             "reason": None,
         }

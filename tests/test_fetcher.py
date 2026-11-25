@@ -97,6 +97,7 @@ def pr_node(
         "title": title,
         "state": state,
         "isDraft": False,
+        "isCrossRepository": False,
         "merged": merged,
         "closedAt": closed_at,
         "updatedAt": updated_at or closed_at or "2026-11-23T00:00:00Z",
@@ -208,6 +209,7 @@ class FakeGitHub:
         self.max_batch_ok = {}  # repo -> the largest batch that can be read
         self.batch_failure = (200, {}, b"x" * (gh.MAX_RESPONSE + 1))  # too large to read
         self.down = False  # every detail query fails, as when GitHub is down
+        self.closed_page = 30  # closed pull requests per list page
 
     def _jwt_ok(self, bearer: str) -> bool:
         try:
@@ -284,19 +286,23 @@ class FakeGitHub:
             repo = f"{variables['owner']}/{variables['name']}"
             data = self.prs[repo]
             self.queries.append(query)
-            if "pullRequest(number:" not in query:  # the list
-                listing = {
-                    "open": {
-                        "totalCount": len(data["open"]),
-                        "nodes": [{"number": n["number"]} for n in data["open"]],
-                    },
-                    "closed": {
-                        "nodes": [
-                            {k: n[k] for k in ("number", "closedAt", "updatedAt")}
-                            for n in data["closed"]
-                        ]
+            if "pullRequest(number:" not in query:  # the list, or a further closed page
+                start = int(variables.get("after", "0"))
+                page = data["closed"][start : start + self.closed_page]
+                more = start + self.closed_page < len(data["closed"])
+                closed = {
+                    "nodes": [{k: n[k] for k in ("number", "closedAt", "updatedAt")} for n in page],
+                    "pageInfo": {
+                        "hasNextPage": more,
+                        "endCursor": str(start + self.closed_page) if more else None,
                     },
                 }
+                listing = {"closed": closed}
+                if "after" not in variables:
+                    listing["open"] = {
+                        "totalCount": len(data["open"]),
+                        "nodes": [{"number": n["number"]} for n in data["open"]],
+                    }
                 return 200, {}, json.dumps({"data": {"repository": listing}}).encode()
             wanted = [int(n) for n in re.findall(r"pullRequest\(number: (\d+)\)", query)]
             lite = "files(" not in query
@@ -812,6 +818,111 @@ class Refresh(Base):
 
         return gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
 
+    # ------------------------------------------------ Fable's pre-review of 8152df0
+
+    def test_cutting_the_snapshot_never_drops_an_unsafe_merge_for_strangers_lists(self):
+        # Finding 1: long clinical-looking paths kept strangers' lists while a known unsafe
+        # merge was cut as an old closed item.
+        recent = (NOW - timedelta(days=12)).isoformat()
+        merge = pr_node(5, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
+        merge["mergedBy"] = {"login": "someone-else"}
+        long = ("evidence/" + "\x01" * 1000,)
+        self.fake.prs[REPO_A]["open"] = [
+            pr_node(100 + n, issue=issue_node(10), files=long) for n in range(12)
+        ]
+        self.fake.prs[REPO_A]["closed"] = [merge]
+        full = len(snapshot.encode(self.run_refresh()))
+        saved = snapshot.MAX_SNAPSHOT
+        snapshot.MAX_SNAPSHOT = full - 20000
+        try:
+            snap = self.run_refresh()
+        finally:
+            snapshot.MAX_SNAPSHOT = saved
+        kept = next(i for i in snap["items"] if i["number"] == 5)
+        self.assertEqual(tasks.derive(self.task_of(kept)).state, tasks.State.UNSAFE)
+        for item in snap["items"]:  # a cut list never keeps a long path as its clinical one
+            pull = item["task"]["pull_request"] if item["task"] else {}
+            if pull.get("files") and pull.get("files_complete") is False:
+                self.assertTrue(all(len(json.dumps(f)) <= 512 for f in pull["files"]))
+        self.assertEqual(snapshot._compact(list(long), ("evidence/*",)), None)
+        self.assertEqual(
+            snapshot._compact([long[0], "evidence/a.json"], ("evidence/*",)), ["evidence/a.json"]
+        )
+
+    def test_a_contradictory_merge_state_is_never_read_as_the_calmer_half(self):
+        # Finding 3: state MERGED with merged false read as closed without merging.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
+        node["merged"] = False
+        self.fake.prs[REPO_A]["closed"] = [node]
+        item = next(i for i in self.run_refresh()["items"] if i["number"] == 1)
+        self.assertIsNone(item["task"])  # unreadable: UNKNOWN, an alert
+        self.assertIsNone(item["linked_issues"])  # finding 5: not known, never 0
+
+    def test_a_pr_from_a_fork_always_needs_attention(self):
+        # Finding 4: a stranger's fork PR claiming an authorised issue looked like Billy's work.
+        node = pr_node(1, issue=issue_node(10))
+        node["isCrossRepository"] = True
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertIs(item["task"]["pull_request"]["from_fork"], True)
+        state = tasks.derive(self.task_of(item))
+        self.assertIn(tasks.Flag.FROM_FORK, state.flags)
+        self.assertTrue(state.needs_attention)
+
+    def test_every_pr_read_only_lite_fails_rather_than_say_ok(self):
+        # Finding 6: full queries all failing, lite ones working, gave "ok" with everything
+        # not known.
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            if path == "/graphql" and b"files(" in body:
+                return 502, {}, b""
+            return real(method, path, headers, body)
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        with self.assertRaises(gh.FetchError) as caught:
+            snapshot.refresh(self.cfg, github, NOW)
+        self.assertEqual(caught.exception.code, "too-heavy")
+
+    def test_hidden_characters_and_lone_surrogates_are_cleaned_or_refused(self):
+        # Finding 7.
+        node = pr_node(1, issue=issue_node(10), title="\u202e\u202e\u200e\u200b")
+        node["headRefName"] = "claude/x\ud800"
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertEqual(item["title"], snapshot.NO_TITLE)  # nothing left once cleaned
+        self.assertIsNone(item["task"]["branch"])  # not plain text: not known
+        self.assertEqual(snapshot._str("a\u200eb\u0085c\u2028d"), "a b c d")
+
+    def test_deeply_nested_json_from_github_is_a_bad_response(self):
+        # Finding 8.
+        github = gh.GitHub(
+            APP_ID,
+            KEY,
+            transport=lambda *a: (200, {}, b"[" * 200000 + b"]" * 200000),
+            clock=lambda: NOW.timestamp(),
+        )
+        with self.assertRaises(gh.FetchError) as caught:
+            github.graphql(TOKEN, "query { x }", {})
+        self.assertEqual(caught.exception.code, "bad-response")
+
+    def test_a_closed_pr_without_a_closing_time_is_a_bad_answer(self):
+        recent = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(1, state="CLOSED", closed_at=recent)
+        node["closedAt"] = None
+        self.fake.prs[REPO_A]["closed"] = [node]
+        with self.assertRaises(gh.FetchError) as caught:
+            self.run_refresh()
+        self.assertEqual(caught.exception.code, "bad-response")
+
+    def test_a_refresh_has_an_overall_time_limit(self):
+        clock = iter(range(0, 10**6, 100))  # each look at the clock: 100 s later
+        with mock.patch.object(snapshot.time, "monotonic", side_effect=lambda: next(clock)):
+            with self.assertRaises(gh.FetchError) as caught:
+                self.run_refresh()
+        self.assertEqual(caught.exception.code, "too-slow")
+
     def test_a_pr_nulled_whole_for_an_optional_field_is_read_by_its_core(self):
         # Codex's review of 8152df0 (blocking): an error on a non-null optional field (the
         # title) makes GitHub null the whole pull request; it was marked unreadable, hiding a
@@ -825,6 +936,7 @@ class Refresh(Base):
             "number",
             "state",
             "isDraft",
+            "isCrossRepository",
             "merged",
             "closedAt",
             "mergedAt",
@@ -1584,16 +1696,35 @@ class Refresh(Base):
                 item = self.run_refresh()["items"][0]
                 self.assertIn(flag, tasks.derive(self.reviewed(item)).flags)
 
-    def test_a_full_page_of_recently_updated_closed_prs_is_flagged(self):
+    def test_closed_pages_are_read_while_they_reach_into_the_window(self):
         # Codex's review of f37d0c7: more closed pull requests could lie past the first page.
+        # Fable's pre-review of 8152df0: so pages are read while the last one is in the window,
+        # and only past CLOSED_PAGES is the repository marked truncated.
         recent = (NOW - timedelta(days=2)).isoformat()
+        total = snapshot.CLOSED_PAGES * self.fake.closed_page + 1
         self.fake.prs[REPO_B]["closed"] = [
-            pr_node(100 + i, state="CLOSED", closed_at=recent) for i in range(snapshot.MAX_CLOSED)
+            pr_node(100 + i, state="CLOSED", closed_at=recent) for i in range(total)
         ]
         self.assertIn(REPO_B, self.run_refresh()["truncated"])
-        old = (NOW - timedelta(days=30)).isoformat()
-        self.fake.prs[REPO_B]["closed"][-1] = pr_node(199, state="CLOSED", closed_at=old)
+        self.fake.prs[REPO_B]["closed"].pop()  # exactly CLOSED_PAGES full pages: no more
         self.assertNotIn(REPO_B, self.run_refresh()["truncated"])
+
+    def test_bumped_old_prs_never_push_a_recent_unsafe_merge_off_the_list(self):
+        # Fable's pre-review of 8152df0: a comment on 30 old closed pull requests put a recent
+        # merge by someone else 31st, past the only page read.
+        old = (NOW - timedelta(days=60)).isoformat()
+        bumped = (NOW - timedelta(hours=1)).isoformat()
+        recent = (NOW - timedelta(days=4)).isoformat()
+        merge = pr_node(500, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
+        merge["mergedBy"] = {"login": "someone-else"}
+        self.fake.prs[REPO_A]["closed"] = [
+            pr_node(400 + i, state="CLOSED", closed_at=old, updated_at=bumped) for i in range(30)
+        ] + [merge]
+        snap = self.run_refresh()
+        item = next(i for i in snap["items"] if i["number"] == 500)
+        state = tasks.derive(self.task_of(item))
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertNotIn(REPO_A, snap["truncated"])
 
     def test_a_failed_refresh_says_when_the_token_outlived_it(self):
         # Codex's review of bf76866: a failed revoke was reported only on success.
@@ -1879,6 +2010,23 @@ class RefresherFiles(Base):
                 self.assertEqual(self.make(lambda: wall[0]).run(), server.TOO_SOON)
                 wall[0] += 61
                 self.assertEqual(self.make(lambda: wall[0]).run(), server.OK)
+
+    def test_an_attempt_recorded_in_the_future_never_freezes_refreshes(self):
+        # Fable's pre-review of 8152df0, finding 9: in the same boot, a recorded time since
+        # boot later than now made every request "too-soon" until the uptime caught up.
+        wall = [NOW.timestamp()]
+        boot = lambda: ("boot-1", 100.0)  # noqa: E731
+        status = {"boot_id": "boot-1", "attempt_since_boot": 2**53, "attempt_epoch": 1}
+        (self.cfg.snapshot_dir / snapshot.STATUS).write_text(json.dumps(status))
+        self.assertEqual(self.make(lambda: wall[0], boot=boot).run(), b"failed:status\n")
+        later = lambda: ("boot-1", 161.0)  # noqa: E731
+        self.assertEqual(self.make(lambda: wall[0], boot=later).run(), server.OK)
+
+    def test_only_a_short_iso_time_is_carried_over_as_the_last_snapshot(self):
+        for bad in (["x"], "x" * 100, "yesterday", "2026-11-24T10:00:00"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(server._snapshot_at(bad))
+        self.assertEqual(server._snapshot_at(NOW.isoformat()), NOW.isoformat())
 
     def test_a_failed_write_still_says_when_the_token_outlived_it(self):
         # Pre-review of 9537b08: a failed revoke was lost when the snapshot write then failed.

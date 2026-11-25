@@ -103,7 +103,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -203,7 +204,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -849,7 +851,8 @@
        "status": "in_progress",
        "conclusion": null
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -1027,7 +1030,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -1124,7 +1128,8 @@
        "status": "completed",
        "conclusion": "failure"
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -1545,7 +1550,8 @@
       "site/footer.html"
      ],
      "reviews": [],
-     "checks": []
+     "checks": [],
+     "from_fork": false
     }
    }
   },
@@ -1643,7 +1649,8 @@
        "conclusion": "success"
       }
      ],
-     "merged_at": "2026-11-14T16:45:00+00:00"
+     "merged_at": "2026-11-14T16:45:00+00:00",
+     "from_fork": false
     }
    }
   },
@@ -1744,7 +1751,8 @@
        "conclusion": "success"
       }
      ],
-     "merged_at": "2026-11-14T17:05:00+00:00"
+     "merged_at": "2026-11-14T17:05:00+00:00",
+     "from_fork": false
     }
    }
   },
@@ -1820,7 +1828,8 @@
        "conclusion": "success"
       }
      ],
-     "merged_at": "2026-11-14T18:00:00+00:00"
+     "merged_at": "2026-11-14T18:00:00+00:00",
+     "from_fork": false
     }
    }
   },
@@ -1960,7 +1969,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -2058,7 +2068,8 @@
        "conclusion": "success"
       }
      ],
-     "merged_at": "2026-11-14T17:25:00+00:00"
+     "merged_at": "2026-11-14T17:25:00+00:00",
+     "from_fork": false
     }
    }
   },
@@ -2133,7 +2144,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "from_fork": false
     }
    }
   },
@@ -2225,7 +2237,8 @@
        "conclusion": "success"
       }
      ],
-     "merged_at": "2026-11-14T17:55:00+00:00"
+     "merged_at": "2026-11-14T17:55:00+00:00",
+     "from_fork": false
     }
    }
   },
@@ -2266,7 +2279,8 @@
      "files": null,
      "reviews": null,
      "checks": null,
-     "merged_at": "2026-11-14T10:00:00+00:00"
+     "merged_at": "2026-11-14T10:00:00+00:00",
+     "from_fork": false
     }
    }
   },
@@ -2308,7 +2322,8 @@
       "site/about.html"
      ],
      "reviews": [],
-     "checks": []
+     "checks": [],
+     "from_fork": false
     }
    }
   },
@@ -2393,7 +2408,8 @@
      ],
      "reviews": [],
      "checks": null,
-     "merged_at": "2026-11-14T17:55:00+00:00"
+     "merged_at": "2026-11-14T17:55:00+00:00",
+     "from_fork": false
     }
    }
   },
@@ -2446,7 +2462,8 @@
       "site/menu.html"
      ],
      "reviews": [],
-     "checks": []
+     "checks": [],
+     "from_fork": false
     }
    }
   },
@@ -2555,7 +2572,51 @@
        "conclusion": "success"
       }
      ],
-     "merged_at": "2026-11-14T17:05:00+00:00"
+     "merged_at": "2026-11-14T17:05:00+00:00",
+     "from_fork": false
+    }
+   }
+  },
+  {
+   "id": "example-tools-68",
+   "title": "Typo fix from a fork (claims an authorised issue)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": null,
+    "branch": {
+     "name": "claude/about-typo",
+     "head": "d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0"
+    },
+    "runs": [],
+    "pull_request": {
+     "number": 68,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0",
+     "files": [
+      "site/about.html"
+     ],
+     "reviews": [],
+     "checks": [],
+     "from_fork": true
     }
    }
   }

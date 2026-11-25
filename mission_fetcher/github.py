@@ -161,7 +161,8 @@ class GitHub:
             raise FetchError(f"http-{status}" if 100 <= status < 600 else "http-bad-status")
         try:
             return json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            # RecursionError: deeply nested JSON (Fable's pre-review of 8152df0).
             raise FetchError("bad-response") from None
 
     # ------------------------------------------------------------ the read-only App

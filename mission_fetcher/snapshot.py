@@ -20,13 +20,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+import unicodedata
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
 from pathlib import Path
 from string import Template
 from typing import Any
 
-from mission_control.tasks import READY_LABEL, InvalidInput, parse
+from mission_control.tasks import READY_LABEL, InvalidInput, derive, parse
 
 from .config import FetcherConfig
 from .github import FetchError, GitHub
@@ -52,7 +55,9 @@ MAX_SNAPSHOT = 2 * 1024 * 1024
 # same way until it fits (see `_fit`), so pull requests anyone can open never stop every
 # refresh (pre-review of 9537b08).
 MAX_PATH_BYTES = 16 * 1024
+MAX_KEPT_PATH = 512  # a clinical path kept in a cut list, as written
 SHA = re.compile(r"[0-9a-f]{40}")
+HIDDEN = {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"}
 CONTROL = re.compile(r"[\x00-\x1f\x7f  ‪-‮⁦-⁩]")
 REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"}
 STATUS_STATES = ("ERROR", "EXPECTED", "FAILURE", "PENDING", "SUCCESS")
@@ -85,12 +90,30 @@ query($$owner: String!, $$name: String!) {
     closed: pullRequests(states: [CLOSED, MERGED], first: $closed,
                          orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes { number closedAt updatedAt }
+      pageInfo { hasNextPage endCursor }
     }
   }
 }
 """).substitute(open=MAX_OPEN, closed=MAX_CLOSED)
+# Further pages of closed pull requests, newest-updated first. Anyone can bump an old pull
+# request's update time (a comment), so one page could push a recent merge off the list (Fable's
+# pre-review of 8152df0): pages are read while the last one is still in the window, up to
+# CLOSED_PAGES; past that the repository is marked truncated.
+CLOSED_QUERY = Template("""
+query($$owner: String!, $$name: String!, $$after: String!) {
+  repository(owner: $$owner, name: $$name) {
+    closed: pullRequests(states: [CLOSED, MERGED], first: $closed, after: $$after,
+                         orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { number closedAt updatedAt }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+""").substitute(closed=MAX_CLOSED)
+CLOSED_PAGES = 5
 
 BATCH = 10
+REFRESH_DEADLINE = 180.0  # seconds
 # Failures that may mean the query was too heavy, not that GitHub is down: the batch is split
 # (Codex's review of 28546f5: GitHub can stop a costly query by time or resources, before the
 # answer reaches the size cap). If a lone pull request read without its heavy parts still
@@ -186,7 +209,7 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
 
 
 _BASE_FIELDS = """
-  number title state isDraft merged closedAt mergedAt
+  number title state isDraft merged closedAt mergedAt isCrossRepository
   mergedBy { login }
   headRefName headRefOid
   updatedAt
@@ -242,7 +265,7 @@ FRAGMENT = Template("fragment pr on PullRequest {" + _BASE_FIELDS + _HEAVY_FIELD
 LITE_FRAGMENT = Template("fragment pr on PullRequest {" + _BASE_FIELDS + "}").substitute(_LIMITS)
 # Only what the merge verdict needs; every other part is then "not known".
 CORE_FRAGMENT = """fragment pr on PullRequest {
-  number state isDraft merged closedAt mergedAt
+  number state isDraft merged closedAt mergedAt isCrossRepository
   mergedBy { login }
   headRefOid
 }"""
@@ -298,10 +321,14 @@ def _int(value: Any) -> int:
 
 
 def _str(value: Any, limit: int = MAX_TEXT) -> str:
-    """Untrusted text, cleaned: no control or direction-changing characters, capped."""
+    """Untrusted text, cleaned: no control, format (direction-changing, zero-width) or lone
+    surrogate characters, capped (Fable's pre-review of 8152df0: U+200E, zero-width and C1
+    characters, and lone surrogates, which can't be written as UTF-8, got through)."""
     if not isinstance(value, str):
         raise _bad()
-    return " ".join(CONTROL.sub(" ", value).split())[:limit]
+    text = CONTROL.sub(" ", value)
+    text = "".join(" " if unicodedata.category(c) in HIDDEN else c for c in text)
+    return " ".join(text.split())[:limit]
 
 
 def _exact(value: Any, limit: int = MAX_TEXT) -> str:
@@ -312,6 +339,10 @@ def _exact(value: Any, limit: int = MAX_TEXT) -> str:
     plain, bounded string leaves its part out, so the model shows UNKNOWN."""
     if not isinstance(value, str) or not 0 < len(value) <= limit or "\x00" in value:
         raise _Incomplete()
+    try:
+        value.encode("utf-8")  # a lone surrogate can't be written or shown (8152df0)
+    except UnicodeEncodeError:
+        raise _Incomplete() from None
     return value
 
 
@@ -373,6 +404,10 @@ def _files(pr: dict, clinical_paths: tuple[str, ...]) -> tuple[list[str] | None,
         path = n.get("path")
         if not isinstance(path, str) or not 0 < len(path) <= 4096 or "\x00" in path:
             raise _Incomplete()
+        try:
+            path.encode("utf-8")
+        except UnicodeEncodeError:
+            raise _Incomplete() from None
         size += len(json.dumps(path)) + 3  # as written: escapes, comma, newline, indent
         if n.get("changeType") not in ("ADDED", "MODIFIED", "DELETED", "CHANGED"):
             complete = False
@@ -387,9 +422,13 @@ def _compact(paths: list[str] | None, clinical_paths: tuple[str, ...]) -> list[s
     still knows the change is clinical and still warns when a clinician's approval is missing
     (Codex's review of 69ed8e3), or null ("not known") when none matches. The list is then
     partial either way: the rest may be clinical too."""
-    for path in paths or ():
-        if any(fnmatchcase(path, pattern) for pattern in clinical_paths):
-            return [path]
+    # The shortest match, and only a short one: a stranger's long clinical-looking paths must
+    # not keep a large list alive while known facts are cut (Fable's pre-review of 8152df0).
+    matches = [p for p in paths or () if any(fnmatchcase(p, pattern) for pattern in clinical_paths)]
+    if matches:
+        shortest = min(matches, key=lambda p: len(json.dumps(p)))
+        if len(json.dumps(shortest)) <= MAX_KEPT_PATH:
+            return [shortest]
     return None
 
 
@@ -533,7 +572,7 @@ def _issue(repo: str, pr: dict) -> tuple[int, dict | None, dict | None]:
     state = node.get("state")
     if state not in ("OPEN", "CLOSED"):
         raise _bad()
-    screen = {"number": number, "title": _str(node.get("title"), MAX_TITLE)}
+    screen = {"number": number, "title": _str(node.get("title"), MAX_TITLE) or "(untitled)"}
     try:
         events = _connection(node.get("timelineItems"), MAX_EVENTS)
     except _Incomplete:
@@ -581,7 +620,12 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
         raise _bad()
     merged = pr.get("merged")
     draft = pr.get("isDraft")
-    if not isinstance(merged, bool) or not isinstance(draft, bool):
+    fork = pr.get("isCrossRepository")
+    if not all(isinstance(v, bool) for v in (merged, draft, fork)):
+        raise _bad()
+    # A contradictory answer is never read as the calmer half (Fable's pre-review of 8152df0:
+    # state MERGED with merged false read as closed without merging).
+    if merged != (state == "MERGED") or merged != (pr.get("mergedAt") is not None):
         raise _bad()
     settings = cfg.repos[repo]
     pull = {
@@ -593,6 +637,9 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
         # Authorisation counts only up to the merge (Codex's review of 72607b3).
         "merged_at": _time(pr.get("mergedAt")) if merged else None,
         "head_sha": head,
+        # Billy never publishes from a fork: a pull request from one is flagged, however its
+        # issue link looks (Fable's pre-review of 8152df0).
+        "from_fork": fork,
     }
     # Parts that can't be read whole are null ("not known"): the model never reads them as
     # clean, and still judges everything that is known.
@@ -635,7 +682,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
     try:
         linked, issue, issue_screen = _issue(repo, pr)
     except _SHAPE:
-        linked, issue, issue_screen = 0, None, None  # not known: no claim from it
+        linked, issue, issue_screen = None, None, None  # not known: no claim from it
     task = {
         "repo": repo,
         "owner": cfg.owner,
@@ -660,7 +707,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
     task["issue"] = None if merged else issue
     short = repo.split("/", 1)[1]
     try:
-        title = _str(pr.get("title"), MAX_TITLE)
+        title = _str(pr.get("title"), MAX_TITLE) or NO_TITLE  # nothing left once cleaned
     except _SHAPE:
         # Only shown, never judged: a title that can't be read must not make the whole pull
         # request unreadable and hide what is known about it (Codex's review of c3ee86b).
@@ -680,31 +727,66 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
     }
 
 
-def _listing(repo: str, data: Any, now: datetime) -> tuple[list[int], bool]:
+def _closed_page(conn: Any, since: datetime) -> tuple[list[int], str | None]:
+    """(numbers closed in the window, the cursor of the next page if it may hold more)."""
+    conn = _obj(conn)
+    nodes = _list(conn.get("nodes"))
+    numbers = []
+    for node in nodes:
+        node = _obj(node)
+        # A closed pull request always has a closing time: one without is a bad answer, never
+        # skipped quietly (Fable's pre-review of 8152df0).
+        closed_at = datetime.fromisoformat(_time(node.get("closedAt")))
+        if closed_at >= since:
+            numbers.append(_int(node.get("number")))
+    info = _obj(conn.get("pageInfo"))
+    has_next = info.get("hasNextPage")
+    if not isinstance(has_next, bool):
+        raise _bad()
+    # Newest-updated first: if the last one was still updated in the window, more may lie past
+    # it (Codex's review of f37d0c7).
+    last_in_window = (
+        bool(nodes) and datetime.fromisoformat(_time(_obj(nodes[-1]).get("updatedAt"))) >= since
+    )
+    if has_next and last_in_window:
+        cursor = info.get("endCursor")
+        if not isinstance(cursor, str) or not 0 < len(cursor) <= 512:
+            raise _bad()
+        return numbers, cursor
+    return numbers, None
+
+
+def _listing(
+    repo: str, data: Any, now: datetime, more_pages: Callable[[str], Any] | None = None
+) -> tuple[list[int], bool]:
     """(the numbers to read in detail, whether more pull requests may exist than the list
-    shows: open ones past the first page, or closed ones in the 14-day window past it)."""
+    shows: open ones past the first page, or closed ones in the 14-day window past the last
+    page read)."""
     repository = _obj(_obj(data).get("repository"))
     open_conn = _obj(repository.get("open"))
     open_nodes = _list(open_conn.get("nodes"))
     more_open = _int(open_conn.get("totalCount")) > len(open_nodes)
     since = now - timedelta(days=RECENT_DAYS)
     numbers = [_int(_obj(n).get("number")) for n in open_nodes]
-    closed_nodes = _list(_obj(repository.get("closed")).get("nodes"))
-    for node in closed_nodes:
-        closed_at = _obj(node).get("closedAt")
-        if closed_at is not None and datetime.fromisoformat(_time(closed_at)) >= since:
-            numbers.append(_int(_obj(node).get("number")))
-    # Closed pull requests come newest-updated first: if the last one on a full page was
-    # still updated in the window, more may lie past it. Say so rather than drop them
-    # silently (Codex's review of f37d0c7).
-    more_closed = False
-    if len(closed_nodes) >= MAX_CLOSED:
-        last = _obj(closed_nodes[-1]).get("updatedAt")
-        more_closed = last is None or datetime.fromisoformat(_time(last)) >= since
-    return list(dict.fromkeys(numbers)), more_open or more_closed
+    closed, cursor = _closed_page(repository.get("closed"), since)
+    numbers += closed
+    pages = 1
+    while cursor is not None and more_pages is not None and pages < CLOSED_PAGES:
+        page = _obj(_obj(more_pages(cursor)).get("repository")).get("closed")
+        closed, cursor = _closed_page(page, since)
+        numbers += closed
+        pages += 1
+    return list(dict.fromkeys(numbers)), more_open or cursor is not None
 
 
-def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[int]) -> list:
+def _details(
+    github: GitHub,
+    token: str,
+    owner: str,
+    name: str,
+    numbers: list[int],
+    deadline: float | None = None,
+) -> list:
     """[(number, node, lite)] for these pull requests, in order; node UNREADABLE when GitHub's
     answer didn't hold it whole."""
 
@@ -732,6 +814,8 @@ def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[in
     def fetch_counted(batch: list[int], lite: bool, core: bool = False) -> list:
         if budget[0] <= 0:
             raise FetchError("too-heavy")
+        if deadline is not None and time.monotonic() > deadline:
+            raise FetchError("too-slow")  # not in HEAVY: never split, the refresh ends
         budget[0] -= 1
         return resolve(fetch(batch, lite, core))
 
@@ -804,20 +888,32 @@ def _unreadable(repo: str, number: int) -> dict:
         "title": "(this pull request couldn't be read)",
         "url": f"https://github.com/{repo}/pull/{number}",
         "closed_at": None,
-        "linked_issues": 0,
+        "linked_issues": None,  # not known
         "issue": None,
         "task": None,
     }
 
 
-def repo_items(repo: str, cfg: FetcherConfig, github: GitHub, token: str, now: datetime):
+def repo_items(
+    repo: str,
+    cfg: FetcherConfig,
+    github: GitHub,
+    token: str,
+    now: datetime,
+    deadline: float | None = None,
+):
     """(items, whether more pull requests may exist than were read)."""
     owner, name = repo.split("/", 1)
     listing = github.graphql(token, LIST_QUERY, {"owner": owner, "name": name})
-    numbers, more = _listing(repo, listing, now)
+
+    def more_pages(cursor: str) -> Any:
+        variables = {"owner": owner, "name": name, "after": cursor}
+        return github.graphql(token, CLOSED_QUERY, variables)
+
+    numbers, more = _listing(repo, listing, now, more_pages)
     since = now - timedelta(days=RECENT_DAYS)
     items = []
-    details = _details(github, token, owner, name, numbers)
+    details = _details(github, token, owner, name, numbers, deadline)
     readable = False
     for number, node, lite in details:
         try:
@@ -836,6 +932,11 @@ def repo_items(repo: str, cfg: FetcherConfig, github: GitHub, token: str, now: d
         # closed before the window (possible only if the list was wrong) does not.
         if item["closed_at"] is None or datetime.fromisoformat(item["closed_at"]) >= since:
             items.append(item)
+    if len(details) > 1 and all(lite for _, _, lite in details):
+        # Every pull request read without its files, reviews and checks is no per-PR problem
+        # either: fail, keeping the last good snapshot, rather than replace known results with
+        # "not known" under an "ok" (Fable's pre-review of 8152df0).
+        raise FetchError("too-heavy")
     if details and not readable:
         # Every pull request unreadable is no per-PR problem: fail, keeping the last good
         # snapshot, rather than replace it with nothing but unreadable entries (7faf35a).
@@ -850,13 +951,16 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
     repositories, read each one, and return the snapshot. The token is revoked whatever
     happens."""
     repos = sorted(cfg.repos)
+    # A whole refresh has a time limit: a slow but answering GitHub must not hold the lock
+    # (and every later request, "busy") for long (Fable's pre-review of 8152df0).
+    deadline = time.monotonic() + REFRESH_DEADLINE
     installation = github.installation(cfg.owner, repos)
     token = github.token(installation)
     try:
         github.repositories(token, repos)
         items, truncated = [], []
         for repo in repos:
-            repo_list, more = repo_items(repo, cfg, github, token, now)
+            repo_list, more = repo_items(repo, cfg, github, token, now, deadline)
             items += repo_list
             if more:
                 truncated.append(repo)
@@ -913,6 +1017,14 @@ def _fit(snapshot: dict) -> None:
             pull["files_complete"] = False
         if size() <= MAX_SNAPSHOT:
             return
+    # Then every file list still there: null (Fable's pre-review of 8152df0: lists were kept
+    # while whole items, a known unsafe merge among them, were cut).
+    for item in snapshot["items"]:
+        if item["task"] and item["task"]["pull_request"].get("files"):
+            item["task"]["pull_request"]["files"] = None
+            item["task"]["pull_request"].pop("files_complete", None)
+    if size() <= MAX_SNAPSHOT:
+        return
     # Then the clinicians' reviews, largest first: null, "not known", never approved.
     pulls = [i["task"]["pull_request"] for i in snapshot["items"] if i["task"]]
     pulls = [p for p in pulls if p.get("reviews")]
@@ -929,13 +1041,25 @@ def _fit(snapshot: dict) -> None:
         pull["checks"] = None
         if size() <= MAX_SNAPSHOT:
             return
-    # Last, whole items: the oldest closed first, then the least recently updated open ones,
-    # each repository so cut listed in "truncated", as when GitHub's list is cut off. A stale
-    # snapshot for every repository would be worse (Codex's review of dc1eb14).
+    # Last, whole items, each repository so cut listed in "truncated", as when GitHub's list is
+    # cut off. A stale snapshot for every repository would be worse (Codex's review of
+    # dc1eb14). Unreadable items go first, then calm ones (oldest closed, then least recently
+    # updated open), and items that need attention last, so a known unsafe merge is the last
+    # thing cut (Fable's pre-review of 8152df0).
     items = snapshot["items"]
-    closed = sorted((i for i in items if i["closed_at"] is not None), key=lambda i: i["closed_at"])
-    opened = [i for i in items if i["closed_at"] is None][::-1]
-    for item in closed + opened:
+
+    def calm(item: dict) -> bool:
+        if item["task"] is None:
+            return True
+        return not derive(dict(item["task"], paused=False)).needs_attention
+
+    unreadable = [i for i in items if i["task"] is None]
+    rest = [i for i in items if i["task"] is not None]
+    closed = sorted((i for i in rest if i["closed_at"] is not None), key=lambda i: i["closed_at"])
+    opened = [i for i in rest if i["closed_at"] is None][::-1]
+    order = unreadable + [i for i in closed + opened if calm(i)]
+    order += [i for i in closed + opened if not calm(i)]
+    for item in order:
         items.remove(item)
         if item["repo"] not in snapshot["truncated"]:
             snapshot["truncated"].append(item["repo"])

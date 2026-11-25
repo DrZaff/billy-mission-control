@@ -84,7 +84,8 @@
           "status": "completed",
           "conclusion": "success"
         }
-      ]
+      ],
+      "from_fork": false
     }
   },
   "expected": {

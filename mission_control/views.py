@@ -55,6 +55,7 @@ FLAG_WORDS = {
     Flag.CLINICAL: "Clinical files",
     Flag.CLINICAL_APPROVAL_MISSING: "No clinician has approved this commit",
     Flag.CLINICIAN_APPROVED: "A clinician approved this commit",
+    Flag.FROM_FORK: "Opened from a fork: not Billy's work, whatever its issue link says",
     Flag.AUTHORIZATION_UNVERIFIED: "Your authorisation of this merge can't be verified here",
     Flag.UNAUTHORIZED_MERGE: "Merged by someone other than you",
     Flag.MERGED_UNREVIEWED: "The merged commit never passed review",

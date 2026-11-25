@@ -78,6 +78,7 @@ def pr(head=A, checks=None, files=("app.py",), reviews=(), **over):
         "merged": False,
         "merged_by": None,
         "head_sha": head,
+        "from_fork": False,
         "files": list(files),
         "reviews": list(reviews),
         "checks": [check("lint", head), check("test", head)] if checks is None else checks,

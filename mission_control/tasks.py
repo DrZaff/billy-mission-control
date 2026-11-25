@@ -49,7 +49,7 @@ clinical_paths may be an explicit empty list.
                    "files": [path]}                            (optional, any step)
     pull_request  {"number": int, "state": "open" | "closed", "draft": bool, "merged": bool,
                    "merged_by": "login" | null, "merged_at": ISO 8601 (when merged),
-                   "head_sha": "<40 hex>", "files": [path],
+                   "head_sha": "<40 hex>", "from_fork": bool, "files": [path],
                    "reviews": [{"user": "login", "user_type": "User" | "Bot",
                                 "state": "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" |
                                          "DISMISSED", "commit_id": "<40 hex>", "at": ISO 8601}],
@@ -154,6 +154,9 @@ class Flag(StrEnum):
     CLINICIAN_APPROVED = "clinician_approved"
     # A merged PR with no issue: its authorisation can't be verified (A5a, GitHub data only).
     AUTHORIZATION_UNVERIFIED = "authorization_unverified"
+    # Opened from a fork: Billy never publishes from one, whatever the PR's issue link says
+    # (Fable's pre-review of 8152df0: a stranger's "Fixes #N" PR looked like Billy's work).
+    FROM_FORK = "from_fork"
     UNAUTHORIZED_MERGE = "unauthorized_merge"  # merged by someone other than the owner
     MERGED_UNREVIEWED = "merged_unreviewed"  # the merged commit never passed review
     MERGED_WITHOUT_CLINICIAN = "merged_without_clinician"
@@ -195,6 +198,7 @@ ATTENTION_FLAGS = frozenset(
         Flag.MERGED_WITH_CHECKS_NOT_PASSED,
         Flag.ISSUE_NOT_LINKED,
         Flag.ISSUE_CLOSED_PR_OPEN,
+        Flag.FROM_FORK,
         # Unknown files or reviews can hide a clinical change merged without a clinician, so
         # they always need a look (pre-review of 9537b08).
         Flag.FILES_UNVERIFIED,
@@ -337,6 +341,7 @@ class _PR:
     merged: bool
     merged_by: str | None
     merged_at: datetime | None  # None only when not merged
+    from_fork: bool
     head: str
     files: tuple[str, ...] | None  # None: not known
     files_complete: bool  # False: the list is known to be partial
@@ -440,6 +445,8 @@ def _parse_pr(raw: Any) -> _PR:
     merged_by = _need(p, "merged_by", "pull_request.merged_by")
     if merged:
         merged_by = None if merged_by is None else _login(merged_by, "pull_request.merged_by")
+    from_fork = _need(p, "from_fork", "pull_request.from_fork")
+    _req(isinstance(from_fork, bool), "pull_request.from_fork must be true or false")
     reviews = []
     raw_reviews = _need(p, "reviews", "pull_request.reviews")
     for i, raw_review in enumerate(
@@ -492,6 +499,7 @@ def _parse_pr(raw: Any) -> _PR:
         draft=draft,
         merged=merged,
         merged_by=merged_by,
+        from_fork=from_fork,
         merged_at=_time(_need(p, "merged_at", "pull_request.merged_at"), "pull_request.merged_at")
         if merged
         else None,
@@ -723,6 +731,8 @@ def derive(raw: Any) -> TaskStatus:
 
     merged_at = pr.merged_at if pr and pr.merged else None
     since, last_owner_action = _authorization(task, flags, merged_at)
+    if pr and pr.from_fork:
+        flags.add(Flag.FROM_FORK)
     if not task.issue_known:
         # A merged PR: what authorised it can't be verified from GitHub's current link, and it
         # is history, so a calm note, not an alert (Codex's review of 28546f5).
