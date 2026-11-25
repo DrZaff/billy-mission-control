@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import socket
 import stat
 import tempfile
@@ -18,7 +19,7 @@ from unittest import mock
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from mission_control import tasks
+from mission_control import tasks, views
 from mission_fetcher import config as fconfig
 from mission_fetcher import github as gh
 from mission_fetcher import server, snapshot
@@ -202,6 +203,9 @@ class FakeGitHub:
         self.calls = []
         self.revoked = 0
         self.jwts = []
+        self.queries = []
+        self.too_large = set()  # PR numbers whose details are too large to read whole
+        self.max_batch_ok = {}  # repo -> the largest batch that can be read
 
     def _jwt_ok(self, bearer: str) -> bool:
         try:
@@ -273,23 +277,34 @@ class FakeGitHub:
                 ).encode(),
             )
         if path == "/graphql":
-            variables = json.loads(body)["variables"]
+            request = json.loads(body)
+            variables, query = request["variables"], request["query"]
             repo = f"{variables['owner']}/{variables['name']}"
             data = self.prs[repo]
-            return (
-                200,
-                {},
-                json.dumps(
-                    {
-                        "data": {
-                            "repository": {
-                                "open": {"totalCount": len(data["open"]), "nodes": data["open"]},
-                                "closed": {"nodes": data["closed"]},
-                            }
-                        }
-                    }
-                ).encode(),
-            )
+            self.queries.append(query)
+            if "pullRequest(number:" not in query:  # the list
+                listing = {
+                    "open": {
+                        "totalCount": len(data["open"]),
+                        "nodes": [{"number": n["number"]} for n in data["open"]],
+                    },
+                    "closed": {
+                        "nodes": [
+                            {k: n[k] for k in ("number", "closedAt", "updatedAt")}
+                            for n in data["closed"]
+                        ]
+                    },
+                }
+                return 200, {}, json.dumps({"data": {"repository": listing}}).encode()
+            wanted = [int(n) for n in re.findall(r"pullRequest\(number: (\d+)\)", query)]
+            lite = "files(" not in query
+            if not lite and len(wanted) > self.max_batch_ok.get(repo, 10**6):
+                return 200, {}, b"x" * (gh.MAX_RESPONSE + 1)  # too large to read
+            if not lite and set(wanted) & self.too_large:
+                return 200, {}, b"x" * (gh.MAX_RESPONSE + 1)
+            by_number = {n["number"]: n for n in data["open"] + data["closed"]}
+            nodes = {f"p{i}": by_number.get(n) for i, n in enumerate(wanted)}
+            return 200, {}, json.dumps({"data": {"repository": nodes}}).encode()
         if path == "/installation/token" and method == "DELETE":
             self.revoked += 1
             return 204, {}, b""
@@ -1003,6 +1018,49 @@ class Refresh(Base):
         state = tasks.derive(self.task_of(self.run_refresh()["items"][0]))
         self.assertIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, state.flags)
         self.assertTrue(state.needs_attention)
+
+    def test_details_too_large_for_one_answer_are_read_in_smaller_batches(self):
+        # Codex's review of 877fd21 (blocking): one answer held every pull request's details,
+        # and a large but valid one exceeded the transport's limit before anything could be
+        # cut, failing every refresh.
+        self.fake.prs[REPO_A]["open"] = [pr_node(n, issue=issue_node(10)) for n in range(1, 8)]
+        self.fake.max_batch_ok[REPO_A] = 2
+        snap = self.run_refresh()
+        items = [i for i in snap["items"] if i["repo"] == REPO_A]
+        self.assertEqual([i["number"] for i in items], list(range(1, 8)))
+        for item in items:
+            self.assertEqual(item["task"]["pull_request"]["files"], ["site/a.html"])  # whole
+        self.assertNotIn(REPO_A, snap["truncated"])
+
+    def test_one_pull_request_too_large_is_read_without_its_heavy_parts(self):
+        self.fake.prs[REPO_A]["open"] = [
+            pr_node(1, issue=issue_node(10), files=("evidence/a.json",)),
+            pr_node(2, issue=issue_node(10)),
+        ]
+        self.fake.too_large = {1}
+        snap = self.run_refresh()
+        heavy, fine = snap["items"][:2]
+        pull = heavy["task"]["pull_request"]
+        self.assertEqual((pull["files"], pull["reviews"], pull["checks"]), (None, None, None))
+        state = tasks.derive(self.task_of(heavy))
+        for flag in (
+            tasks.Flag.FILES_UNVERIFIED,
+            tasks.Flag.REVIEWS_UNVERIFIED,
+            tasks.Flag.CHECKS_UNVERIFIED,
+        ):
+            self.assertIn(flag, state.flags)  # "not known", never clean
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, state.flags)
+        self.assertEqual(fine["task"]["pull_request"]["files"], ["site/a.html"])
+
+    def test_an_approved_open_clinical_pr_shows_the_approval(self):
+        # Codex's review of 877fd21: with Billy's records unread, the view showed approval as
+        # still needed, guessing from the state.
+        node = pr_node(1, issue=issue_node(10), files=("evidence/a.json",), reviews=[review_node()])
+        self.fake.prs[REPO_A]["open"][0] = node
+        state = tasks.derive(self.task_of(self.run_refresh()["items"][0]))
+        self.assertIn(tasks.Flag.CLINICIAN_APPROVED, state.flags)
+        self.assertNotIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, state.flags)
+        self.assertTrue(views.clinician_approved(state))
 
     def test_a_renamed_file_makes_the_file_list_incomplete(self):
         # Codex's review of f37d0c7 (blocking): a rename lists only the new path, so a move out

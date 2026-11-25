@@ -69,45 +69,34 @@ CHECK_EVENTS = (
 )
 CHECK_STATUS = {"QUEUED": "queued", "IN_PROGRESS": "in_progress", "COMPLETED": "completed"}
 
-QUERY = Template("""
+# One small request lists each repository's pull requests; their details come in batches, so no
+# answer, however large the pull requests, can exceed the transport's limit and stop every
+# refresh (Codex's review of 877fd21). A batch that is too large is split in half, down to one
+# pull request, and one still too large is read without its files, reviews and checks, which
+# are then "not known".
+LIST_QUERY = Template("""
 query($$owner: String!, $$name: String!) {
   repository(owner: $$owner, name: $$name) {
     open: pullRequests(states: OPEN, first: $open,
                        orderBy: {field: UPDATED_AT, direction: DESC}) {
       totalCount
-      nodes { ...pr }
+      nodes { number }
     }
     closed: pullRequests(states: [CLOSED, MERGED], first: $closed,
                          orderBy: {field: UPDATED_AT, direction: DESC}) {
-      nodes { ...pr }
+      nodes { number closedAt updatedAt }
     }
   }
 }
-fragment pr on PullRequest {
+""").substitute(open=MAX_OPEN, closed=MAX_CLOSED)
+
+BATCH = 10
+
+_BASE_FIELDS = """
   number title state isDraft merged closedAt mergedAt
   mergedBy { login }
   headRefName headRefOid
-  potentialMergeCommit {
-    oid
-    status { contexts { context } }
-    checkSuites(first: 1) { totalCount }
-  }
   updatedAt
-  files(first: $files) { totalCount nodes { path changeType } }
-  reviews(last: $reviews) {
-    totalCount
-    nodes { state submittedAt author { __typename login } commit { oid } }
-  }
-  commits(last: 1) {
-    nodes { commit { oid status { contexts { context state } } checkSuites(first: $suites) {
-      totalCount
-      nodes {
-        app { slug }
-        workflowRun { event }
-        checkRuns(first: $runs) { totalCount nodes { name status conclusion } }
-      }
-    } } }
-  }
   closingIssuesReferences(first: $issues) {
     totalCount
     nodes {
@@ -123,17 +112,58 @@ fragment pr on PullRequest {
       }
     }
   }
+"""
+_HEAVY_FIELDS = """
+  potentialMergeCommit {
+    oid
+    status { contexts { context } }
+    checkSuites(first: 1) { totalCount }
+  }
+  files(first: $files) { totalCount nodes { path changeType } }
+  reviews(last: $reviews) {
+    totalCount
+    nodes { state submittedAt author { __typename login } commit { oid } }
+  }
+  commits(last: 1) {
+    nodes { commit { oid status { contexts { context state } } checkSuites(first: $suites) {
+      totalCount
+      nodes {
+        app { slug }
+        workflowRun { event }
+        checkRuns(first: $runs) { totalCount nodes { name status conclusion } }
+      }
+    } } }
+  }
+"""
+_LIMITS = {
+    "files": MAX_FILES,
+    "reviews": MAX_REVIEWS,
+    "suites": MAX_SUITES,
+    "runs": MAX_RUNS,
+    "issues": MAX_ISSUES,
+    "events": MAX_EVENTS,
 }
-""").substitute(
-    open=MAX_OPEN,
-    closed=MAX_CLOSED,
-    files=MAX_FILES,
-    reviews=MAX_REVIEWS,
-    suites=MAX_SUITES,
-    runs=MAX_RUNS,
-    issues=MAX_ISSUES,
-    events=MAX_EVENTS,
+FRAGMENT = Template("fragment pr on PullRequest {" + _BASE_FIELDS + _HEAVY_FIELDS + "}").substitute(
+    _LIMITS
 )
+LITE_FRAGMENT = Template("fragment pr on PullRequest {" + _BASE_FIELDS + "}").substitute(_LIMITS)
+
+
+def detail_query(numbers: list[int], lite: bool = False) -> str:
+    """The details of these pull requests, by number. Numbers are checked integers, so they
+    can be written into the query; everything else is a variable."""
+    if not numbers or not all(type(n) is int and 0 < n < 2**31 for n in numbers):
+        raise _bad()
+    fields = "\n".join(
+        f"    p{i}: pullRequest(number: {n}) {{ ...pr }}" for i, n in enumerate(numbers)
+    )
+    return (
+        "query($owner: String!, $name: String!) {\n"
+        "  repository(owner: $owner, name: $name) {\n"
+        f"{fields}\n"
+        "  }\n"
+        "}\n" + (LITE_FRAGMENT if lite else FRAGMENT)
+    )
 
 
 class _Incomplete(Exception):
@@ -432,7 +462,9 @@ def _event(event: Any) -> dict:
     }
 
 
-def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
+def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
+    """One pull request as a snapshot item. `lite`: read without its files, reviews and checks
+    (it was too large to read whole), which are then "not known"."""
     pr = _obj(node)
     number = _int(pr.get("number"))
     head = _sha(pr.get("headRefOid"))
@@ -457,6 +489,8 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
     # Parts that can't be read whole are null ("not known"): the model never reads them as
     # clean, and still judges everything that is known.
     try:
+        if lite:
+            raise _Incomplete()
         pull["files"], complete = _files(pr, tuple(settings.clinical_paths))
         if not complete:
             pull["files_complete"] = False
@@ -467,7 +501,10 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
     # the test merge commit it judged, so no reading of the checks can match its verdict; the
     # merge box enforced them at the time (owner's decision, 2026-11-25, after Codex's review
     # of a1e05e5).
-    if state == "OPEN":
+    if lite:
+        parts = []
+        pull["reviews"] = pull["checks"] = None
+    elif state == "OPEN":
         parts.append(
             (
                 "checks",
@@ -521,20 +558,20 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
     }
 
 
-def repo_items(repo: str, cfg: FetcherConfig, data: dict, now: datetime) -> tuple[list, bool]:
-    """(items, whether more pull requests may exist than one request returned: open ones
-    past the first page, or closed ones in the 14-day window past it)."""
+def _listing(repo: str, data: Any, now: datetime) -> tuple[list[int], bool]:
+    """(the numbers to read in detail, whether more pull requests may exist than the list
+    shows: open ones past the first page, or closed ones in the 14-day window past it)."""
     repository = _obj(_obj(data).get("repository"))
     open_conn = _obj(repository.get("open"))
     open_nodes = _list(open_conn.get("nodes"))
     more_open = _int(open_conn.get("totalCount")) > len(open_nodes)
     since = now - timedelta(days=RECENT_DAYS)
-    items = [_item(repo, cfg, n) for n in open_nodes]
+    numbers = [_int(_obj(n).get("number")) for n in open_nodes]
     closed_nodes = _list(_obj(repository.get("closed")).get("nodes"))
     for node in closed_nodes:
         closed_at = _obj(node).get("closedAt")
         if closed_at is not None and datetime.fromisoformat(_time(closed_at)) >= since:
-            items.append(_item(repo, cfg, node))
+            numbers.append(_int(_obj(node).get("number")))
     # Closed pull requests come newest-updated first: if the last one on a full page was
     # still updated in the window, more may lie past it. Say so rather than drop them
     # silently (Codex's review of f37d0c7).
@@ -542,7 +579,49 @@ def repo_items(repo: str, cfg: FetcherConfig, data: dict, now: datetime) -> tupl
     if len(closed_nodes) >= MAX_CLOSED:
         last = _obj(closed_nodes[-1]).get("updatedAt")
         more_closed = last is None or datetime.fromisoformat(_time(last)) >= since
-    return items, more_open or more_closed
+    return list(dict.fromkeys(numbers)), more_open or more_closed
+
+
+def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[int]) -> list:
+    """[(node, lite)] for these pull requests, in order. A pull request gone since the list
+    (deleted, or moved) is skipped."""
+
+    def fetch(batch: list[int], lite: bool) -> list:
+        data = github.graphql(token, detail_query(batch, lite), {"owner": owner, "name": name})
+        repository = _obj(_obj(data).get("repository"))
+        return [(repository.get(f"p{i}"), lite) for i in range(len(batch))]
+
+    def read(batch: list[int]) -> list:
+        try:
+            return fetch(batch, False)
+        except FetchError as error:
+            if error.code != "too-large":
+                raise
+        if len(batch) > 1:
+            half = len(batch) // 2
+            return read(batch[:half]) + read(batch[half:])
+        return fetch(batch, True)
+
+    out = []
+    for i in range(0, len(numbers), BATCH):
+        out += read(numbers[i : i + BATCH])
+    return [(node, lite) for node, lite in out if node is not None]
+
+
+def repo_items(repo: str, cfg: FetcherConfig, github: GitHub, token: str, now: datetime):
+    """(items, whether more pull requests may exist than were read)."""
+    owner, name = repo.split("/", 1)
+    listing = github.graphql(token, LIST_QUERY, {"owner": owner, "name": name})
+    numbers, more = _listing(repo, listing, now)
+    since = now - timedelta(days=RECENT_DAYS)
+    items = []
+    for node, lite in _details(github, token, owner, name, numbers):
+        item = _item(repo, cfg, node, lite)
+        # A pull request closed between the list and its details still belongs here; one
+        # closed before the window (possible only if the list was wrong) does not.
+        if item["closed_at"] is None or datetime.fromisoformat(item["closed_at"]) >= since:
+            items.append(item)
+    return items, more
 
 
 def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
@@ -556,9 +635,7 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
         github.repositories(token, repos)
         items, truncated = [], []
         for repo in repos:
-            owner, name = repo.split("/", 1)
-            data = github.graphql(token, QUERY, {"owner": owner, "name": name})
-            repo_list, more = repo_items(repo, cfg, data, now)
+            repo_list, more = repo_items(repo, cfg, github, token, now)
             items += repo_list
             if more:
                 truncated.append(repo)

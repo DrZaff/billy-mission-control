@@ -2460,6 +2460,115 @@
      "checks": []
     }
    }
+  },
+  {
+   "id": "example-site-931",
+   "title": "Evidence table: corrected study row (clinician approved)",
+   "risk": "high",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 919,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/evidence-table",
+     "head": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/evidence-table",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T15:50:00+00:00",
+      "status": "finished",
+      "files": [
+       "evidence/ai-vs-human.json"
+      ]
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/evidence-table",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T16:00:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-c0ffee1",
+      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "at": "2026-11-14T16:05:00+00:00",
+      "pr": 920
+     }
+    ],
+    "pull_request": {
+     "number": 931,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+     "files": [
+      "evidence/ai-vs-human.json"
+     ],
+     "reviews": [
+      {
+       "user": "example-clinician",
+       "user_type": "User",
+       "state": "APPROVED",
+       "commit_id": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "at": "2026-11-14T16:35:00+00:00"
+      }
+     ],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ],
+     "merged_at": "2026-11-14T17:05:00+00:00"
+    }
+   }
   }
  ]
 }

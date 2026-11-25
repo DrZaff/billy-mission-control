@@ -54,6 +54,7 @@ FLAG_WORDS = {
     Flag.CHECKS_FAILING: "A required check failed",
     Flag.CLINICAL: "Clinical files",
     Flag.CLINICAL_APPROVAL_MISSING: "No clinician has approved this commit",
+    Flag.CLINICIAN_APPROVED: "A clinician approved this commit",
     Flag.UNAUTHORIZED_MERGE: "Merged by someone other than you",
     Flag.MERGED_UNREVIEWED: "The merged commit never passed review",
     Flag.MERGED_WITHOUT_CLINICIAN: "Clinical files merged without a clinician's approval",
@@ -113,21 +114,10 @@ def section(status: TaskStatus) -> str:
 
 
 def clinician_approved(status: TaskStatus) -> bool:
-    """Whether the model established a clinician's approval of the head. It checks approval only
-    on a safe merge, or as the last gate before the owner's decision, after review and checks
-    pass. AWAITING_OWNER from exhausted fix rounds is decided earlier, so it proves nothing."""
-    if Flag.CLINICAL not in status.flags or Flag.MERGED_WITHOUT_CLINICIAN in status.flags:
-        return False
-    if status.state is State.MERGED:
-        # Unread reviews prove nothing (Codex's review of 72607b3).
-        return Flag.REVIEWS_UNVERIFIED not in status.flags
-    return (
-        status.state is State.AWAITING_OWNER
-        and Flag.FIX_ROUNDS_EXHAUSTED not in status.flags
-        and Flag.CHECKS_PASSED in status.flags
-        and status.reviewed_sha is not None
-        and status.reviewed_sha == status.head_sha
-    )
+    """Whether the model checked and found a clinician's approval of the head. Only its own
+    flag says so, never a guess from the state (Codex's review of 877fd21: an approved open PR
+    whose run records are unread showed approval as still needed)."""
+    return Flag.CLINICAL in status.flags and Flag.CLINICIAN_APPROVED in status.flags
 
 
 def needs_you(status: TaskStatus) -> bool:

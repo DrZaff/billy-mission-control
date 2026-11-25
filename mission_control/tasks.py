@@ -149,6 +149,9 @@ class Flag(StrEnum):
     CHECKS_FAILING = "checks_failing"
     CLINICAL = "clinical"
     CLINICAL_APPROVAL_MISSING = "clinical_approval_missing"
+    # A clinician's approval of the head was checked and found (set only where it is checked:
+    # Codex's review of 877fd21, the view had to guess from the state).
+    CLINICIAN_APPROVED = "clinician_approved"
     UNAUTHORIZED_MERGE = "unauthorized_merge"  # merged by someone other than the owner
     MERGED_UNREVIEWED = "merged_unreviewed"  # the merged commit never passed review
     MERGED_WITHOUT_CLINICIAN = "merged_without_clinician"
@@ -778,7 +781,9 @@ def derive(raw: Any) -> TaskStatus:
             problems.append("the merged commit never passed review")
         if maybe_clinical and pr.reviews is None:
             flags.add(Flag.REVIEWS_UNVERIFIED)  # approval not known: no claim either way
-        elif Flag.CLINICAL in flags and not _clinician_approved(task, pr.head, merged_at):
+        elif Flag.CLINICAL in flags and _clinician_approved(task, pr.head, merged_at):
+            flags.add(Flag.CLINICIAN_APPROVED)
+        elif Flag.CLINICAL in flags:
             flags.add(Flag.MERGED_WITHOUT_CLINICIAN)
             problems.append("clinical files merged without a clinician's approval of that commit")
         if since is None and task.issue_known:
@@ -817,7 +822,9 @@ def derive(raw: Any) -> TaskStatus:
         9fb21c8)."""
         if pr and pr.open:
             _checks(task, pr.head, flags)
-            if maybe_clinical and not _clinician_approved(task, pr.head):
+            if maybe_clinical and _clinician_approved(task, pr.head):
+                flags.add(Flag.CLINICIAN_APPROVED)
+            elif maybe_clinical:
                 # Unread reviews claim nothing either way (Codex's review of dc1eb14).
                 if pr.reviews is None:
                     flags.add(Flag.REVIEWS_UNVERIFIED)
@@ -940,7 +947,9 @@ def derive(raw: Any) -> TaskStatus:
             head,
             head,
         )
-    if maybe_clinical and not _clinician_approved(task, head):
+    if maybe_clinical and _clinician_approved(task, head):
+        flags.add(Flag.CLINICIAN_APPROVED)
+    elif maybe_clinical:
         if pr.reviews is None:
             flags.add(Flag.REVIEWS_UNVERIFIED)
         else:
