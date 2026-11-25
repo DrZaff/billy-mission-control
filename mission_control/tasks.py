@@ -1056,9 +1056,14 @@ def derive(raw: Any) -> TaskStatus:
         elif task.issue_known and _closed_before(task, merged_at):
             # Authorised after the issue's closing, then merged with it still closed: an open
             # PR there is off the path until the issue is reopened, so its merge is unsafe
-            # (Codex's review of 980b8b9).
-            flags.add(Flag.MERGED_ISSUE_CLOSED)
-            problems.append("its issue was closed when it was merged")
+            # (Codex's review of 980b8b9). Reopened in the merge's own second, it may have been
+            # open by then: not known, never claimed (Codex's review of b3da4ea).
+            if any(e.kind == "reopened" and e.at == merged_at for e in task.timeline):
+                unplaced = True
+                flags.add(Flag.CLOSURE_UNPLACED)
+            else:
+                flags.add(Flag.MERGED_ISSUE_CLOSED)
+                problems.append("its issue was closed when it was merged")
         # Checks are never judged after a merge: results carry no time, so a later run could
         # rewrite the verdict either way (Fable's review of 0cf099c; owner's decision,
         # 2026-11-25). The Checks row says they aren't judged and claims nothing GitHub enforced
@@ -1226,14 +1231,16 @@ def derive(raw: Any) -> TaskStatus:
     # the limit, the task waits for the owner whatever happens next: further builds or a later
     # passing review don't clear it. Only the owner authorising again (after the review that
     # used the last round) starts a new budget.
+    # A commit uses a round when a review of it since that decision failed; one whose reviews
+    # then disagree had a failing one, so a conflict never stretches the budget (Codex's review
+    # of 84df535). A failure from before the decision uses none of the new budget, even beside
+    # a later pass (Codex's review of b3da4ea).
     failed_rounds = {
         r.sha
         for r in current
         if r.step == "review"
         and r.status == "finished"
-        # A commit whose reviews disagree may have failed: it uses a round too, so a conflict
-        # never stretches the budget (Codex's review of 84df535).
-        and verdicts.get(r.sha) in ({"fail"}, {"conflict"})
+        and not (r.verdict == "no_blocking_findings" and not r.blocking)
         and r.at >= last_owner_action
     }
     if len(failed_rounds) > task.max_fix_rounds:

@@ -558,10 +558,6 @@ class ReadOnlyAndErrors(unittest.TestCase):
         self.assertEqual(call(app, "/healthz")[0], "200 OK")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class FableReviewOf0cf099cScreens(unittest.TestCase):
     """The view never says the opposite of the model (independent review of 0cf099c)."""
 
@@ -831,3 +827,7 @@ class CodexReviewOf980b8b9Screens(unittest.TestCase):
         self.assertEqual(state, State.UNSAFE)
         self.assertIn("yes, but its issue was closed when it was merged", body)
         self.assertIn("Merged while its issue was closed", body)
+
+
+if __name__ == "__main__":
+    unittest.main()
