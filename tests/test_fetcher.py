@@ -680,12 +680,40 @@ class Refresh(Base):
             pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10)),
             pr_node(2, state="CLOSED", closed_at=recent, issue=issue_node(11)),
         ]
-        for item in self.run_refresh()["items"][:2]:
+        merged, closed = self.run_refresh()["items"][:2]
+        for item in (merged, closed):
             with self.subTest(id=item["id"]):
-                self.assertNotIn("checks", item["task"]["pull_request"])
-                state = tasks.derive(self.task_of(item))
-                self.assertNotIn(tasks.Flag.CHECKS_PASSED, state.flags)
-                self.assertEqual(state.state, tasks.State.UNKNOWN)
+                self.assertIsNone(item["task"]["pull_request"]["checks"])  # "not known"
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.task_of(item)).flags)
+        # Codex's review of b24ac2d (blocking): leaving the checks out made the whole PR
+        # unreadable. With "not known", the model still judges everything else: here, a merge
+        # of a commit that never passed review (there are no run records yet).
+        state = tasks.derive(self.task_of(merged))
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.MERGED_UNREVIEWED, state.flags)
+        self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, state.flags)
+        self.assertNotIn(tasks.Flag.MERGED_WITH_CHECKS_NOT_PASSED, state.flags)
+        self.assertEqual(tasks.derive(self.task_of(closed)).state, tasks.State.CLOSED)
+
+    def test_unknown_checks_on_an_open_pr_never_count_as_passed(self):
+        # The model's side of "not known" (pull_request.checks null): an open, reviewed PR whose
+        # checks aren't known waits, flagged, rather than looking ready to merge.
+        item = self.run_refresh()["items"][0]
+        task = self.reviewed(item)
+        self.assertEqual(tasks.derive(task).state, tasks.State.AWAITING_OWNER)  # known: ready
+        task["pull_request"] = dict(task["pull_request"], checks=None)
+        state = tasks.derive(task)
+        self.assertEqual(state.state, tasks.State.PUBLISHED)
+        self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, state.flags)
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, state.flags)
+
+    def test_someone_elses_merge_is_still_flagged(self):
+        recent = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
+        node["mergedBy"] = {"login": "someone-else"}
+        self.fake.prs[REPO_A]["open"], self.fake.prs[REPO_A]["closed"] = [], [node]
+        state = tasks.derive(self.task_of(self.run_refresh()["items"][0]))
+        self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, state.flags)
 
     def test_review_and_deployment_runs_count(self):
         # Codex's review of a1e05e5: GitHub documents these as sources of required checks.
@@ -833,7 +861,9 @@ class Refresh(Base):
 
 
 class RefresherFiles(Base):
-    def make(self, clock):
+    def make(self, clock, boot=None):
+        """A refresher on a fake wall clock and, unless given, a fake time since boot that
+        follows it in the same boot."""
         key = KEY.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,
@@ -847,6 +877,7 @@ class RefresherFiles(Base):
                 APP_ID, gh.load_key(server.read_key(cfg.key)), transport=self.fake, clock=clock
             ),
             clock=clock,
+            boot=boot or (lambda: ("boot-1", clock() - NOW.timestamp() + 1000.0)),
         )
 
     def test_ok_writes_the_snapshot_and_status_readable_by_the_group_only(self):
@@ -880,15 +911,35 @@ class RefresherFiles(Base):
         now[0] += 31
         self.assertEqual(self.make(lambda: now[0]).run(), server.OK)
 
-    def test_a_clock_that_went_back_does_not_block_refreshes(self):
-        # Codex's review of a1e05e5: a recorded future time held every refresh until the clock
-        # caught up.
-        now = [NOW.timestamp()]
-        self.assertEqual(self.make(lambda: now[0]).run(), server.OK)
-        now[0] -= 3 * 3600  # the clock goes back three hours
-        self.assertEqual(self.make(lambda: now[0]).run(), server.OK)
-        now[0] += 10
-        self.assertEqual(self.make(lambda: now[0]).run(), server.TOO_SOON)  # the floor holds
+    def test_a_wall_clock_change_never_moves_the_floor_within_a_boot(self):
+        # Codex's reviews of a1e05e5 and b24ac2d: a recorded future time held refreshes until
+        # the clock caught up, and then a clock moved back let a refresh skip the floor. Within
+        # one boot the floor follows time since boot, which a wall-clock change can't move.
+        wall, since_boot = [NOW.timestamp()], [1000.0]
+
+        def make():
+            return self.make(lambda: wall[0], boot=lambda: ("boot-1", since_boot[0]))
+
+        self.assertEqual(make().run(), server.OK)
+        wall[0] -= 3 * 3600  # the wall clock goes back three hours...
+        since_boot[0] += 5  # ...five seconds after the last refresh
+        self.assertEqual(make().run(), server.TOO_SOON)
+        wall[0] += 5 * 3600  # and forward five hours: still five seconds since boot
+        self.assertEqual(make().run(), server.TOO_SOON)
+        since_boot[0] += 60  # a real minute later, whatever the wall clock says
+        self.assertEqual(make().run(), server.OK)
+
+    def test_after_a_restart_of_the_machine_the_wall_clock_decides(self):
+        wall = [NOW.timestamp()]
+        self.assertEqual(
+            self.make(lambda: wall[0], boot=lambda: ("boot-1", 1000.0)).run(), server.OK
+        )
+        wall[0] += 10  # a new boot ten seconds later: the floor holds on the wall clock
+        self.assertEqual(
+            self.make(lambda: wall[0], boot=lambda: ("boot-2", 20.0)).run(), server.TOO_SOON
+        )
+        wall[0] -= 3 * 3600  # the clock went back hours: no waiting for it to catch up
+        self.assertEqual(self.make(lambda: wall[0], boot=lambda: ("boot-2", 30.0)).run(), server.OK)
 
     def test_no_token_or_key_reaches_any_file(self):
         self.make(lambda: NOW.timestamp()).run()
@@ -1104,6 +1155,19 @@ class StartupChecks(Base):
         )
         self.assertFalse(check.ok)
         self.assertIn("ACL", check.detail)
+
+    def test_an_acl_probe_that_cannot_look_fails_closed(self):
+        # Codex's review of b24ac2d: every read failure counted as "no ACL".
+        import errno
+
+        from mission_fetcher import checks as fchecks
+
+        for err, has in ((errno.ENOTSUP, False), (errno.EACCES, True), (errno.EIO, True)):
+            with (
+                self.subTest(errno=errno.errorcode[err]),
+                mock.patch.object(fchecks.os, "listxattr", side_effect=OSError(err, "x")),
+            ):
+                self.assertEqual(fchecks._has_acl("/anything"), has)
 
     def test_an_acl_on_the_folder_or_a_file_fails(self):
         # Codex's review of bf76866 (blocking): a named ACL could let another account read the

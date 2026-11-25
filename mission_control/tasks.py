@@ -53,7 +53,11 @@ clinical_paths may be an explicit empty list.
                                          "DISMISSED", "commit_id": "<40 hex>", "at": ISO 8601}],
                    "checks": [{"name": str, "head_sha": "<40 hex>",
                                "status": "queued" | "in_progress" | "completed",
-                               "conclusion": "success" | "failure" | ... | null}]}
+                               "conclusion": "success" | "failure" | ... | null}] | null}
+                   checks null means "not known" (A5a: the fetcher can't match GitHub's
+                   verdict once a PR is merged or closed). It is never read as passed: an
+                   open PR's checks then count as not passed, and a merged PR is judged on
+                   everything else, with CHECKS_UNVERIFIED instead of a checks verdict.
 
 Example, as a phase A3 screen would use it:
 
@@ -129,6 +133,8 @@ class Flag(StrEnum):
     MERGED_UNREVIEWED = "merged_unreviewed"  # the merged commit never passed review
     MERGED_WITHOUT_CLINICIAN = "merged_without_clinician"
     MERGED_WITH_CHECKS_NOT_PASSED = "merged_with_checks_not_passed"
+    # The checks' results aren't known here (pull_request.checks is null): no verdict either way.
+    CHECKS_UNVERIFIED = "checks_unverified"
 
 
 ATTENTION_STATES = frozenset(
@@ -283,7 +289,7 @@ class _PR:
     head: str
     files: tuple[str, ...]
     reviews: tuple[_Review, ...]
-    checks: tuple[_Check, ...]
+    checks: tuple[_Check, ...] | None  # None: not known
 
 
 @dataclass(frozen=True)
@@ -397,8 +403,9 @@ def _parse_pr(raw: Any) -> _PR:
             )
         )
     checks = []
+    raw_checks = _need(p, "checks", "pull_request.checks")
     for i, raw_check in enumerate(
-        _list(_need(p, "checks", "pull_request.checks"), "pull_request.checks")
+        [] if raw_checks is None else _list(raw_checks, "pull_request.checks")
     ):
         c = _map(raw_check, f"pull_request.checks[{i}]")
         status = _choice(
@@ -428,7 +435,7 @@ def _parse_pr(raw: Any) -> _PR:
         head=_sha(p.get("head_sha"), "pull_request.head_sha"),
         files=_strings(_need(p, "files", "pull_request.files"), "pull_request.files"),
         reviews=tuple(reviews),
-        checks=tuple(checks),
+        checks=None if raw_checks is None else tuple(checks),
     )
 
 
@@ -533,6 +540,10 @@ def _authorization(task: _Task, flags: set[Flag]) -> tuple[datetime | None, date
 def _checks(task: _Task, head: str, flags: set[Flag]) -> bool:
     """True only if every required check completed successfully on exactly this commit."""
     pr = task.pr
+    if pr.checks is None:
+        # Not known: never passed (A5a). The caller decides what that means.
+        flags.add(Flag.CHECKS_UNVERIFIED)
+        return False
     ok = True
     for name in task.required_checks:
         here = [c for c in pr.checks if c.name == name and c.sha == head]
@@ -667,7 +678,8 @@ def derive(raw: Any) -> TaskStatus:
         checks_ok = _checks(task, pr.head, flags)
         if problems:
             return status(State.UNSAFE, "Merged, but " + "; ".join(problems) + ".", pr.head)
-        if not checks_ok:
+        # Unknown checks give CHECKS_UNVERIFIED (from _checks), not a claim either way.
+        if not checks_ok and pr.checks is not None:
             flags.add(Flag.MERGED_WITH_CHECKS_NOT_PASSED)
         return status(
             State.MERGED,

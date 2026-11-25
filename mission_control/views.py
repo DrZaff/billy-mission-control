@@ -57,6 +57,7 @@ FLAG_WORDS = {
     Flag.MERGED_UNREVIEWED: "The merged commit never passed review",
     Flag.MERGED_WITHOUT_CLINICIAN: "Clinical files merged without a clinician's approval",
     Flag.MERGED_WITH_CHECKS_NOT_PASSED: "Merged before the required checks passed",
+    Flag.CHECKS_UNVERIFIED: "Required checks not verified here (GitHub's merge box shows them)",
 }
 
 SECTIONS = (

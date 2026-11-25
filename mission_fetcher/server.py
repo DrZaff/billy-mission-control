@@ -30,6 +30,20 @@ BUSY = b"busy\n"
 LOCK = ".refresh.lock"
 REFUSED = b"refused\n"
 MIN_INTERVAL = 60.0
+BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+
+
+def boot_clock() -> tuple[str | None, float]:
+    """(this boot's id, seconds since boot). Time since boot never jumps when the wall clock
+    is changed, so within one boot it measures the floor exactly (Codex's review of b24ac2d: a
+    clock moved back let a refresh skip the floor)."""
+    try:
+        boot = BOOT_ID.read_text(encoding="ascii").strip()[:64] or None
+    except OSError:
+        boot = None
+    return boot, time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
 MAX_KEY = 16 * 1024
 
 
@@ -59,10 +73,12 @@ class Refresher:
         cfg: FetcherConfig,
         github: Callable[[FetcherConfig], GitHub] = github_for,
         clock: Callable[[], float] = time.time,
+        boot: Callable[[], tuple[str | None, float]] = boot_clock,
     ):
         self.cfg = cfg
         self.github = github
         self.clock = clock
+        self.boot = boot
 
     def run(self) -> bytes:
         """One refresh, if none is running and none started in the last minute. A lock file
@@ -90,18 +106,33 @@ class Refresher:
         finally:
             os.close(lock)  # releases the lock
 
+    @staticmethod
+    def _too_soon(previous: dict, now: float, boot_id: str | None, since_boot: float) -> bool:
+        """Within the same boot, by time since boot, which a wall-clock change can't move.
+        Otherwise (a restart of the machine, or an older status file) by the wall clock: a
+        recorded time in the future then means the clock went back, and only a jump of more
+        than the floor lets a refresh through, rather than waiting hours for it to catch up
+        (Codex's reviews of a1e05e5 and b24ac2d)."""
+
+        def number(value) -> bool:
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+        last_boot = previous.get("attempt_since_boot")
+        if boot_id is not None and previous.get("boot_id") == boot_id and number(last_boot):
+            return since_boot - last_boot < MIN_INTERVAL
+        last = previous.get("attempt_epoch")
+        return number(last) and abs(now - last) < MIN_INTERVAL
+
     def _locked(self) -> bytes:
         now = self.clock()
+        boot_id, since_boot = self.boot()
         previous = read_json(self.cfg.snapshot_dir, STATUS) or {}
-        last = previous.get("attempt_epoch")
-        if isinstance(last, (int, float)) and not isinstance(last, bool):
-            # A recorded time in the future means the clock went back: don't wait for it to
-            # catch up, which could block refreshes for hours (Codex's review of a1e05e5); this
-            # attempt records the new time.
-            if 0 <= now - last < MIN_INTERVAL:
-                return TOO_SOON
+        if self._too_soon(previous, now, boot_id, since_boot):
+            return TOO_SOON
         stamp = datetime.fromtimestamp(now, UTC)
         status = {
+            "boot_id": boot_id,
+            "attempt_since_boot": since_boot,
             "attempt_epoch": now,
             "attempt_at": stamp.isoformat(),
             "snapshot_at": previous.get("snapshot_at"),

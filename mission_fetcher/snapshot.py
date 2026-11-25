@@ -418,6 +418,11 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
     # of a1e05e5). The model then shows a merged or closed one as UNKNOWN.
     if state == "OPEN":
         parts.append(("checks", lambda: _checks(pr, head, settings.checks_app)))
+    else:
+        # null: "not known", so the model still judges the merger, the authorisation, the
+        # review and clinical approval (Codex's review of b24ac2d: leaving the key out made
+        # the whole PR unreadable and hid those warnings).
+        pull["checks"] = None
     for key, read in parts:
         try:
             pull[key] = read()

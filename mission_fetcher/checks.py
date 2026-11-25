@@ -12,6 +12,7 @@ refresh (github.py) and by `selfcheck --github`.
 
 from __future__ import annotations
 
+import errno
 import grp
 import os
 import pwd
@@ -55,12 +56,13 @@ ACL_ATTRIBUTES = ("system.posix_acl_access", "system.posix_acl_default")
 
 
 def _has_acl(path: str) -> bool:
-    """Whether a POSIX ACL is set on `path` (Linux keeps them as extended attributes). A file
-    system without extended attributes can't hold one."""
+    """Whether a POSIX ACL is (or may be) set on `path` (Linux keeps them as extended
+    attributes). Only a file system without extended attributes proves there is none; any other
+    failure to look counts as one, so the check fails closed (Codex's review of b24ac2d)."""
     try:
         names = os.listxattr(path, follow_symlinks=False)
-    except OSError:
-        return False
+    except OSError as error:
+        return error.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP)
     return any(name in ACL_ATTRIBUTES for name in names)
 
 

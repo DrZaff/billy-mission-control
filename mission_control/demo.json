@@ -2223,6 +2223,90 @@
      ]
     }
    }
+  },
+  {
+   "id": "example-tools-60",
+   "title": "Footer link colour (merged; checks not verified here)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 60,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/footer-link-colour",
+     "head": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-tools",
+      "branch": "claude/footer-link-colour",
+      "sha": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9",
+      "at": "2026-11-14T16:40:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-tools",
+      "branch": "claude/footer-link-colour",
+      "sha": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9",
+      "at": "2026-11-14T16:50:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-tools",
+      "branch": "agent/pub-c6d7e8f",
+      "sha": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9",
+      "at": "2026-11-14T16:55:00+00:00",
+      "pr": 61
+     }
+    ],
+    "pull_request": {
+     "number": 61,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9",
+     "files": [
+      "site/footer.css"
+     ],
+     "reviews": [],
+     "checks": null
+    }
+   }
   }
  ]
 }
