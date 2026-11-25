@@ -173,6 +173,12 @@ def https_transport(method: str, path: str, headers: dict[str, str], body: bytes
         data = resp.read(MAX_RESPONSE + 1)
         if expired.is_set():
             raise TimeoutError()
+        # A connection that ended early gives fewer bytes than GitHub announced, with no error:
+        # never taken as the whole answer (Codex's review of df5912d).
+        length = resp.getheader("Content-Length")
+        if len(data) <= MAX_RESPONSE and length is not None:
+            if not length.isdigit() or int(length) != len(data):
+                raise FetchError("network")
         return resp.status, {k.lower(): v for k, v in resp.getheaders()}, data
     except TimeoutError:
         raise FetchError("timeout") from None
@@ -327,8 +333,14 @@ class GitHub:
         answer = self.call("GET", "/installation/repositories?per_page=100", token)
         if not isinstance(answer, dict) or not isinstance(answer.get("repositories"), list):
             raise FetchError("bad-response")
-        names = {r.get("full_name") for r in answer["repositories"] if isinstance(r, dict)}
-        if answer.get("total_count") != len(repos) or names != set(repos):
+        # Every row read, as text, and each once: the list is the proof of the App's reach, so
+        # an odd or repeated row is never skipped or merged (Codex's review of df5912d).
+        rows = answer["repositories"]
+        names = [r.get("full_name") if isinstance(r, dict) else None for r in rows]
+        if not all(isinstance(n, str) for n in names):
+            raise FetchError("bad-response")
+        exact = len(names) == len(set(names)) == len(repos) and set(names) == set(repos)
+        if answer.get("total_count") != len(repos) or not exact:
             raise FetchError("wrong-repositories")
 
     def graphql(self, token: str, query: str, variables: dict[str, Any]) -> dict:
