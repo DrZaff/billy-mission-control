@@ -85,11 +85,14 @@ def https_transport(method: str, path: str, headers: dict[str, str], body: bytes
     # headers, can drip a byte at a time for hours (Fable's pre-review of a21bd27). So a
     # watchdog shuts the connection's socket at the limit, whatever is waiting on it.
     expired = threading.Event()
+    # The socket, kept from the moment it connects: the connection lets go of it for a response
+    # that ends with "Connection: close", while the response still reads from it (Codex's
+    # review of d75f891).
+    held: list = []
 
     def stop() -> None:
         expired.set()
-        sock = conn.sock
-        if sock is not None:
+        for sock in list(held):
             try:
                 # The plain socket's shutdown: it wakes a blocked read without touching the TLS
                 # state another thread is using.
@@ -101,6 +104,10 @@ def https_transport(method: str, path: str, headers: dict[str, str], body: bytes
     watchdog.daemon = True
     watchdog.start()
     try:
+        conn.connect()  # bounded per operation by TIMEOUT
+        held.append(conn.sock)
+        if expired.is_set():  # the limit passed while connecting
+            raise TimeoutError()
         conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
         data = resp.read(MAX_RESPONSE + 1)

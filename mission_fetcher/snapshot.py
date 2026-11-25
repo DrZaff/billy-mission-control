@@ -1045,17 +1045,61 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
     return snapshot
 
 
+DECISIVE = ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")
+
+
+def _essential_reviews(reviews: list[dict], head: str, pull: dict) -> list[dict]:
+    """The reviews the clinician gate reads (tasks._clinician_approved): decisive reviews of
+    the head commit, and for each clinician only those at their latest time, and, for a merged
+    pull request, at their latest time up to the merge. Same verdict, far fewer entries."""
+    merged_at = pull.get("merged_at")
+    limit = datetime.fromisoformat(merged_at) if merged_at else None
+    by_user: dict[str, list[dict]] = {}
+    for review in reviews:
+        if review["commit_id"] == head and review["state"] in DECISIVE:
+            by_user.setdefault(review["user"], []).append(review)
+    kept = []
+    for user_reviews in by_user.values():
+        times = [datetime.fromisoformat(r["at"]) for r in user_reviews]
+        wanted = {max(times)}
+        if limit is not None:
+            before = [t for t in times if t <= limit]
+            if before:
+                wanted.add(max(before))
+        kept += [r for r, t in zip(user_reviews, times, strict=True) if t in wanted]
+    return kept
+
+
+def _essential_checks(checks: list[dict], head: str) -> list[dict]:
+    """One entry per required check name, carrying its worst result on the head commit
+    (tasks._checks: any failure fails it, else anything unfinished leaves it pending, else it
+    passed). Same verdict, far fewer entries."""
+    worst: dict[str, dict] = {}
+
+    def badness(check: dict) -> int:
+        if check["status"] == "completed" and check["conclusion"] != "success":
+            return 2
+        return 1 if check["status"] != "completed" else 0
+
+    for check in checks:
+        if check["head_sha"] != head:
+            continue
+        name = check["name"]
+        if name not in worst or badness(check) > badness(worst[name]):
+            worst[name] = check
+    return list(worst.values())
+
+
 def _fit(snapshot: dict) -> None:
     """Keep the snapshot under MAX_SNAPSHOT as written. File lists are the one large part
     anyone can make (Codex's review of 72607b3: several repositories of long, escaped paths
     stopped every refresh), so the largest are cut down until it fits: to one known clinical
     path, so a known clinical change stays known (69ed8e3), or else to "not known" (null);
-    either way the model treats the rest as possibly clinical. Then reviews (only clinicians'
-    are kept) become "not known", which never counts as an approval. What remains is bounded
+    either way the model treats the rest as possibly clinical. What remains is bounded
     and comes from trusted accounts: titles are capped, and labels and statuses need write or
-    triage access. Then checks become "not known" (never passed), and last, whole items are
-    left out, their repository marked truncated. Only if nothing is left does the refresh fail
-    ("too-large")."""
+    triage access. Then reviews and checks are cut to exactly what the verdict reads, and last,
+    whole items are left out, their repository marked truncated. Only if nothing is left does
+    the refresh fail ("too-large")."""
 
     def size() -> int:
         return len(encode(dict(snapshot, token_revoked=False)))
@@ -1097,18 +1141,18 @@ def _fit(snapshot: dict) -> None:
             _cut(item["task"]["pull_request"], tuple(item["task"]["clinical_paths"]), False)
     if size() <= MAX_SNAPSHOT:
         return
-    # Then the clinicians' reviews, then the checks, largest first: null, "not known", never
-    # approved or passed.
-    for key in ("reviews", "checks"):
-        pulls = [i["task"]["pull_request"] for i in snapshot["items"] if i["task"]]
-        pulls = [p for p in pulls if p.get(key)]
-        pulls.sort(key=lambda p, key=key: len(encode({"x": p[key]})), reverse=True)
-        if cut(
-            pulls,
-            lambda p, key=key: len(encode({"x": p[key]})),
-            lambda p, key=key: p.__setitem__(key, None),
-        ):
-            return
+    # Then reviews and checks are cut down to exactly what the verdict reads, never to "not
+    # known" (Codex's review of d75f891: nulling a complete review list turned a confirmed
+    # clinical merge without a clinician into "reviews not verified"; nulling failing checks
+    # would do the same to CHECKS_FAILING). The model reaches the same verdict from the short
+    # lists as from the full ones.
+    for pull in [i["task"]["pull_request"] for i in snapshot["items"] if i["task"]]:
+        if pull.get("reviews"):
+            pull["reviews"] = _essential_reviews(pull["reviews"], pull["head_sha"], pull)
+        if pull.get("checks"):
+            pull["checks"] = _essential_checks(pull["checks"], pull["head_sha"])
+    if size() <= MAX_SNAPSHOT:
+        return
     # Last, whole items, each repository so cut listed in "truncated", as when GitHub's list is
     # cut off. A stale snapshot for every repository would be worse (Codex's review of
     # dc1eb14). The order is by how much an item matters: unreadable first, then calm ones

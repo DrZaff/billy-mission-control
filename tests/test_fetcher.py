@@ -919,9 +919,13 @@ class Refresh(Base):
                     tm.sleep(0.05)
 
         headers_then_body = b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n"
+        closing = b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 100000\r\n\r\n"
         for name, prefix in (
             ("headers", b"HTTP/1.1 200 OK\r\nX-Slow: "),
             ("body", headers_then_body),
+            # The connection lets go of its socket for "Connection: close" (Codex's review of
+            # d75f891); the watchdog must still reach it.
+            ("body after Connection: close", closing),
         ):
             with self.subTest(drip=name):
                 listener = so.socket(so.AF_INET, so.SOCK_STREAM)
@@ -1539,26 +1543,116 @@ class Refresh(Base):
         reviews = self.run_refresh()["items"][0]["task"]["pull_request"]["reviews"]
         self.assertEqual([r["user"] for r in reviews], [OWNER])  # OWNER is the clinician here
 
-    def test_fitting_the_snapshot_drops_reviews_last_and_never_approves(self):
-        reviews = [review_node(at=f"2026-11-22T00:{i:02d}:00Z") for i in range(50)]
-        self.fake.prs[REPO_A]["open"] = [
-            pr_node(n, issue=issue_node(10), files=("evidence/a.json",), reviews=reviews)
-            for n in range(1, 5)
+    def test_fitting_cuts_reviews_and_checks_to_what_the_verdict_reads(self):
+        # Codex's review of d75f891 (blocking): nulling a complete review list turned a known
+        # clinical merge without a clinician into "reviews not verified" (MERGED). Reviews and
+        # checks are now cut to what the verdict reads, and every verdict stays the same.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        many = [review_node(state="COMMENTED", at=f"2026-11-22T00:{i:02d}:00Z") for i in range(50)]
+        approved = many + [review_node(at="2026-11-22T01:00:00Z")]
+        later_change = approved + [
+            review_node(state="CHANGES_REQUESTED", at="2026-11-22T02:00:00Z")
         ]
+        unsafe = pr_node(
+            9,
+            state="MERGED",
+            merged=True,
+            closed_at=recent,
+            issue=issue_node(10),
+            files=("evidence/a.json",),
+            reviews=many,  # no clinician's approval: UNSAFE
+        )
+        failing = pr_node(1, issue=issue_node(10), files=("evidence/a.json",), reviews=approved)
+        suite = failing["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+        suite["checkRuns"]["nodes"] += [
+            {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"} for _ in range(20)
+        ] + [{"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        self.fake.prs[REPO_A]["open"] = [
+            failing,
+            pr_node(2, issue=issue_node(10), files=("evidence/a.json",), reviews=later_change),
+        ]
+        self.fake.prs[REPO_A]["closed"] = [unsafe]
+        before = {i["number"]: tasks.derive(self.task_of(i)) for i in self.run_refresh()["items"]}
         full = len(snapshot.encode(self.run_refresh()))
         saved = snapshot.MAX_SNAPSHOT
-        snapshot.MAX_SNAPSHOT = full - 8000  # only dropping reviews can make room
+        snapshot.MAX_SNAPSHOT = full - 6000  # file lists alone can't make room
         try:
             snap = self.run_refresh()
         finally:
             snapshot.MAX_SNAPSHOT = saved
-        self.assertLessEqual(len(snapshot.encode(snap)), full - 8000)
-        dropped = [i for i in snap["items"][:4] if i["task"]["pull_request"]["reviews"] is None]
-        self.assertTrue(dropped)
-        for item in dropped:
-            flags = tasks.derive(self.task_of(item)).flags
-            self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, flags)
-            self.assertNotIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, flags)  # not known: no claim
+        self.assertLessEqual(len(snapshot.encode(snap)), full - 6000)
+        for item in snap["items"]:
+            pull = item["task"]["pull_request"]
+            self.assertIsNotNone(pull["reviews"])  # never "not known" for size
+            after = tasks.derive(self.task_of(item))
+            self.assertEqual(after.state, before[item["number"]].state, item["number"])
+        states = {i["number"]: tasks.derive(self.task_of(i)) for i in snap["items"]}
+        self.assertEqual(states[9].state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, states[9].flags)
+        self.assertIn(tasks.Flag.CHECKS_FAILING, states[1].flags)
+
+    def test_short_reviews_and_checks_never_change_a_verdict(self):
+        # The claim the cut rests on, tried on random lists: the model's state and flags are
+        # the same from the short lists as from the full ones (Codex's review of d75f891).
+        import random
+
+        rng = random.Random(7)  # noqa: S311 - test data, not security
+        recent = (NOW - timedelta(days=1)).isoformat()
+        templates = []
+        for merged in (False, True):
+            node = (
+                pr_node(
+                    1,
+                    state="MERGED",
+                    merged=True,
+                    closed_at=recent,
+                    issue=issue_node(10),
+                    files=("evidence/a.json",),
+                )
+                if merged
+                else pr_node(1, issue=issue_node(10), files=("evidence/a.json",))
+            )
+            self.fake.prs[REPO_A]["open"] = [] if merged else [node]
+            self.fake.prs[REPO_A]["closed"] = [node] if merged else []
+            templates.append(self.run_refresh()["items"][0])
+        other = "b" * 40
+        for trial in range(400):
+            item = json.loads(json.dumps(rng.choice(templates)))
+            pull = item["task"]["pull_request"]
+            head = pull["head_sha"]
+            pull["reviews"] = [
+                {
+                    "user": rng.choice([OWNER, "clinician-two"]),
+                    "user_type": "User",
+                    "state": rng.choice(
+                        ["APPROVED", "CHANGES_REQUESTED", "DISMISSED", "COMMENTED"]
+                    ),
+                    "commit_id": rng.choice([head, head, other]),
+                    "at": f"2026-11-2{rng.randint(0, 5)}T0{rng.randint(0, 3)}:00:00+00:00",
+                }
+                for _ in range(rng.randint(0, 8))
+            ]
+            if pull["merged"]:
+                pull["merged_at"] = f"2026-11-2{rng.randint(0, 5)}T02:00:00+00:00"
+            else:
+                pull["checks"] = [
+                    {
+                        "name": rng.choice(["lint", "test"]),
+                        "head_sha": head,
+                        "status": rng.choice(["completed", "completed", "in_progress", "queued"]),
+                        "conclusion": rng.choice(["success", "success", "failure", None]),
+                    }
+                    for _ in range(rng.randint(0, 6))
+                ]
+            item["task"]["clinicians"] = [OWNER, "clinician-two"]
+            full = tasks.derive(self.task_of(item))
+            short = json.loads(json.dumps(item))
+            sp = short["task"]["pull_request"]
+            sp["reviews"] = snapshot._essential_reviews(sp["reviews"], head, sp)
+            if sp.get("checks") is not None:
+                sp["checks"] = snapshot._essential_checks(sp["checks"], head)
+            cut = tasks.derive(self.task_of(short))
+            self.assertEqual((cut.state, cut.flags), (full.state, full.flags), trial)
 
     def test_a_dismissed_review_on_a_merged_pr_is_not_known(self):
         # Codex's review of 9fb21c8 (blocking): GitHub gives a review's current state with its
