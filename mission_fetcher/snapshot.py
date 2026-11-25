@@ -36,7 +36,7 @@ from typing import Any
 from mission_control.tasks import READY_LABEL, InvalidInput, State, derive, parse
 
 from .config import FetcherConfig
-from .github import FetchError, GitHub
+from .github import REVOKE_LIMIT, FetchError, GitHub
 
 SNAPSHOT = "snapshot.json"
 STATUS = "status.json"
@@ -613,9 +613,10 @@ def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) 
 
 
 CHECK_FRESH = timedelta(days=7)
-# A success counts only if it stays fresh for the whole refresh, which can run until the
-# deadline after `now` (Codex's review of 05062fc: one that expired during it still passed).
-FRESH_UNTIL = CHECK_FRESH - timedelta(seconds=REFRESH_DEADLINE)
+# A success counts only if it stays fresh until the snapshot is written: the refresh can run
+# until its deadline after `now`, then the token's revocation, then the write (Codex's reviews
+# of 05062fc and a34154f: one that expired before then still passed). A minute covers the write.
+FRESH_UNTIL = CHECK_FRESH - timedelta(seconds=REFRESH_DEADLINE + REVOKE_LIMIT + 60)
 
 
 def _checks(
@@ -638,6 +639,8 @@ def _checks(
     if merge is not None:
         try:
             merge = _obj(merge)
+            if "status" not in merge:
+                complete = False  # left out: not known, never "no statuses" (Codex, a34154f)
             merge_status = merge.get("status")
             if merge_status is not None and _list(_obj(merge_status).get("contexts")):
                 complete = False

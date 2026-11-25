@@ -1318,10 +1318,6 @@ class Coverage(unittest.TestCase):
         self.assertIn(State.UNSAFE, ATTENTION_STATES)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class FableReviewOf0cf099c(unittest.TestCase):
     """An independent hostile review of the task model, before the next formal review."""
 
@@ -2288,3 +2284,7 @@ class CodexReviewOfB3da4ea(unittest.TestCase):
             )
         )
         self.assertIn(Flag.FIX_ROUNDS_EXHAUSTED, s.flags)
+
+
+if __name__ == "__main__":
+    unittest.main()

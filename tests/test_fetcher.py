@@ -3331,10 +3331,6 @@ class StartupChecks(Base):
         self.assertIn("intruder", check.detail)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class AuditOfE58b933(Base):
     """An audit from a different angle: the trust store, the handshake, the start-up gate and
     guards no test exercised."""
@@ -4205,7 +4201,10 @@ class FreshForTheWholeRefresh(CodexReviewOf099ef9b):
     days old before it ended still passed."""
 
     def test_a_result_expiring_during_the_refresh_never_passes(self):
-        expiring = (NOW - snapshot.CHECK_FRESH + timedelta(seconds=60)).isoformat()
+        # Expiring before the snapshot is written: within the refresh's limit, the token's
+        # revocation and the write (Codex's reviews of 05062fc and a34154f).
+        margin = snapshot.REFRESH_DEADLINE + gh.REVOKE_LIMIT
+        expiring = (NOW - snapshot.CHECK_FRESH + timedelta(seconds=margin + 30)).isoformat()
         node = pr_node(1, issue=issue_node(10))
         for r in node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["checkRuns"][
             "nodes"
@@ -4218,7 +4217,7 @@ class FreshForTheWholeRefresh(CodexReviewOf099ef9b):
         item = self.with_status(expiring)
         self.assertFalse(item["task"]["pull_request"]["checks_complete"])
         # Fresh for the whole refresh: passes.
-        safe = NOW - snapshot.CHECK_FRESH + timedelta(seconds=snapshot.REFRESH_DEADLINE + 60)
+        safe = NOW - snapshot.CHECK_FRESH + timedelta(seconds=margin + 120)
         item = self.with_status(safe.isoformat())
         self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
@@ -4324,6 +4323,16 @@ class CodexReviewOf2736aee(CodexReviewOf099ef9b):
                 item, flags = self.flags_for(node)
                 self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
                 self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
+
+
+class CodexReviewOfA34154f(CodexReviewOf099ef9b):
+    def test_a_test_merge_commits_status_left_out_is_not_known(self):
+        merge = {"checkSuites": {"totalCount": 0}}  # no status key at all
+        node = pr_node(1, issue=issue_node(10), merge_commit=merge)
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
 
 class NoFifoAnywhere(Base):
@@ -4485,3 +4494,7 @@ class AuditOf8c62413(unittest.TestCase):
         with mock.patch.object(server.time, "clock_gettime", clock_gettime):
             self.assertEqual(server.boot_clock()[1], 42.0)
         self.assertEqual(asked, [time.CLOCK_BOOTTIME])
+
+
+if __name__ == "__main__":
+    unittest.main()
