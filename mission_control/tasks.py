@@ -676,6 +676,11 @@ def _authorization(
         if e.kind == "labeled" and ready and e.actor != task.owner:
             flags.add(Flag.LABEL_WITHOUT_OWNER)
         elif (e.kind == "labeled" and ready) or (e.kind == "authorized" and e.actor == task.owner):
+            if until is not None and e.at == until:
+                # In the merge's own second (GitHub's times have one-second resolution), it may
+                # have come just after the merge: it never authorises it (audit of ad78f34). A
+                # removal in that second still counts: doubt resolves toward caution.
+                continue
             since = e.at if since is None else since
             last = e.at
         elif e.kind == "unlabeled" and ready:
@@ -887,6 +892,10 @@ def derive(raw: Any) -> TaskStatus:
     for r in current:
         if r.step == "review" and r.status == "finished":
             passed = r.verdict == "no_blocking_findings" and not r.blocking
+            if passed and merged_at is not None and r.at == merged_at:
+                # A pass in the merge's own second may have come just after it: never counted
+                # for the merge. A failure there still counts (audit of ad78f34).
+                continue
             verdicts.setdefault(r.sha, set()).add("pass" if passed else "fail")
     # Two finished reviews of one commit that disagree: that commit counts as neither passed
     # nor failed, and is flagged. Everything else is still judged, so a conflict never hides a

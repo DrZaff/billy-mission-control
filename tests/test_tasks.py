@@ -1645,3 +1645,27 @@ class AuditOfEa9b32a(unittest.TestCase):
     def test_a_comment_in_the_merges_own_second_changes_nothing(self):
         s = self.merged([approval(minute=6), approval(state="COMMENTED", minute=30)])
         self.assertIn(Flag.CLINICIAN_APPROVED, s.flags)
+
+
+class AuditOfAd78f34(unittest.TestCase):
+    def merged(self, **over):
+        value = task(
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(state="closed", merged=True, merged_by=OWNER, merged_at=t(20)),
+        )
+        value.update(over)
+        return derive(value)
+
+    def test_a_pass_in_the_merges_own_second_never_reviews_the_merge(self):
+        s = self.merged(runs=[run("build"), passed(minute=20), published()])
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.MERGED_UNREVIEWED, s.flags)
+        self.assertEqual(self.merged().state, State.MERGED)  # a pass before it still counts
+
+    def test_a_label_in_the_merges_own_second_never_authorises_it(self):
+        s = self.merged(
+            issue={"number": 7, "state": "closed", "timeline": [labeled(minute=20)]},
+            runs=[run("build", minute=20), passed(minute=20), published(minute=20)],
+        )
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.UNAUTHORIZED_WORK, s.flags)
