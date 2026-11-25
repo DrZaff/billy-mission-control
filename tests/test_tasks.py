@@ -1318,10 +1318,6 @@ class Coverage(unittest.TestCase):
         self.assertIn(State.UNSAFE, ATTENTION_STATES)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class FableReviewOf0cf099c(unittest.TestCase):
     """An independent hostile review of the task model, before the next formal review."""
 
@@ -2252,12 +2248,43 @@ class CodexReviewOf980b8b9(unittest.TestCase):
         self.assertEqual(s.state, State.MERGED)
         self.assertNotIn(Flag.MERGED_ISSUE_CLOSED, s.flags)
 
-    def test_a_reopening_in_the_merges_own_second_reopens_nothing(self):
+    def test_a_reopening_in_the_merges_own_second_is_not_known(self):
+        # It may have come before the merge: never claimed closed, never calm (Codex's review
+        # of b3da4ea).
         timeline = [
             self.ev("closed", 0),
             {"event": "authorized", "actor": OWNER, "at": t(1)},
             self.ev("reopened", 20),
         ]
         s = self.derive_with(timeline, "open", True)
-        self.assertEqual(s.state, State.UNSAFE)
-        self.assertIn(Flag.MERGED_ISSUE_CLOSED, s.flags)
+        self.assertEqual(s.state, State.UNKNOWN)
+        self.assertIn(Flag.CLOSURE_UNPLACED, s.flags)
+        self.assertNotIn(Flag.MERGED_ISSUE_CLOSED, s.flags)
+        self.assertTrue(s.needs_attention)
+
+
+class CodexReviewOfB3da4ea(unittest.TestCase):
+    def test_a_failure_before_the_latest_decision_uses_no_new_round(self):
+        # Failed before the owner authorised again, passed after: the new budget is untouched.
+        timeline = [labeled(), {"event": "authorized", "actor": OWNER, "at": t(5)}]
+        s = derive(
+            task(
+                max_fix_rounds=0,
+                issue={"number": 7, "state": "open", "timeline": timeline},
+                runs=[run("build"), failed(minute=3), passed(minute=6)],
+            )
+        )
+        self.assertNotIn(Flag.FIX_ROUNDS_EXHAUSTED, s.flags)
+        # A failure after it still uses one.
+        s = derive(
+            task(
+                max_fix_rounds=0,
+                issue={"number": 7, "state": "open", "timeline": timeline},
+                runs=[run("build"), passed(minute=6), failed(minute=7)],
+            )
+        )
+        self.assertIn(Flag.FIX_ROUNDS_EXHAUSTED, s.flags)
+
+
+if __name__ == "__main__":
+    unittest.main()

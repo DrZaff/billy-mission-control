@@ -1,10 +1,11 @@
 [project]
 name = "billy-mission-control"
 version = "0.1.0"
-description = "Billy Mission Control: a private, read-only, phone-first cockpit (phase A4b, synthetic demo data)"
+description = "Billy Mission Control: a private, read-only, phone-first cockpit (phase A4b, synthetic demo data; A5a adds a read-only GitHub fetcher)"
 requires-python = ">=3.12"
-# One runtime dependency, for passkey sign-in only (A4b): python-fido2, imported only by
-# mission_control/auth/passkeys.py. requirements.txt pins it and everything it needs by hash.
+# One declared runtime dependency (A4b): python-fido2, for passkey sign-in, imported only by
+# mission_control/auth/passkeys.py. The fetcher (A5a) also uses `cryptography`, which fido2
+# brings; requirements.txt pins both and everything they need by hash.
 dependencies = ["fido2==2.2.1"]
 
 [tool.ruff]
