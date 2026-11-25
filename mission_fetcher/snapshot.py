@@ -418,7 +418,12 @@ def _time(value: Any) -> str:
         raise _bad() from None
     if parsed.tzinfo is None:
         raise _bad()
-    return parsed.astimezone(UTC).isoformat()
+    try:
+        return parsed.astimezone(UTC).isoformat()
+    except OverflowError:
+        # A time at the edge of the calendar (year 1 or 9999 with an offset): a bad value like
+        # any other, never an error that discards the rest (audit of ea9b32a).
+        raise _bad() from None
 
 
 def _login(value: Any) -> str | None:
@@ -1257,6 +1262,11 @@ def _essential_reviews(reviews: list[dict], head: str, pull: dict) -> list[dict]
                 before = [t for t in times if t <= limit]
                 if before:
                     wanted.add(max(before))
+                # And the latest strictly before the merge: a review in the merge's own second
+                # may be set aside, and then that one decides (audit of ea9b32a).
+                strictly = [t for t in times if t < limit]
+                if strictly:
+                    wanted.add(max(strictly))
             kept += [r for r, t in zip(user_reviews, times, strict=True) if t in wanted]
         return kept
 

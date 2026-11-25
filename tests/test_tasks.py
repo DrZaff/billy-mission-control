@@ -1616,3 +1616,32 @@ class AuditOf0585599(unittest.TestCase):
         self.assertEqual(s.state, State.UNSAFE)
         self.assertIn(Flag.MERGED_WITHOUT_CLINICIAN, s.flags)
         self.assertNotIn(Flag.DISMISSAL_UNPLACED, s.flags)
+
+
+class AuditOfEa9b32a(unittest.TestCase):
+    def merged(self, reviews):
+        return derive(
+            task(
+                runs=[run("build"), passed(), published()],
+                pull_request=pr(
+                    state="closed",
+                    merged=True,
+                    merged_by=OWNER,
+                    merged_at=t(30),
+                    files=("evidence/a.json",),
+                    reviews=reviews,
+                ),
+            )
+        )
+
+    def test_a_review_in_the_merges_own_second_is_never_counted_as_before_it(self):
+        s = self.merged([approval(minute=30)])  # may have come just after the merge
+        self.assertNotIn(Flag.CLINICIAN_APPROVED, s.flags)
+        self.assertIn(Flag.DISMISSAL_UNPLACED, s.flags)
+        s = self.merged([approval(minute=6), approval(state="CHANGES_REQUESTED", minute=30)])
+        self.assertNotIn(Flag.CLINICIAN_APPROVED, s.flags)
+        self.assertIn(Flag.DISMISSAL_UNPLACED, s.flags)
+
+    def test_a_comment_in_the_merges_own_second_changes_nothing(self):
+        s = self.merged([approval(minute=6), approval(state="COMMENTED", minute=30)])
+        self.assertIn(Flag.CLINICIAN_APPROVED, s.flags)

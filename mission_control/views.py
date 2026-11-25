@@ -57,7 +57,8 @@ FLAG_WORDS = {
     Flag.CLINICIAN_APPROVED: "A clinician approved this commit",
     Flag.FROM_FORK: "Opened from a fork: not Billy's work, whatever its issue link says",
     Flag.DISMISSAL_UNPLACED: (
-        "A clinician's review was dismissed, and GitHub doesn't say when: approval not known"
+        "A clinician's review can't be placed against the merge (dismissed, and GitHub doesn't"
+        " say when, or in the merge's own second): approval not known"
     ),
     Flag.AUTHORIZATION_WITHDRAWN: "You authorised this task, then removed agent:ready",
     Flag.AUTHORIZATION_UNVERIFIED: "Your authorisation of this merge can't be verified here",
@@ -373,7 +374,7 @@ def _path(entry: Entry) -> str:
     elif Flag.CLINICAL in flags:
         if Flag.DISMISSAL_UNPLACED in flags:
             rows.append(
-                ("?", "Clinician", "not known: a review was dismissed, and GitHub doesn't say when")
+                ("?", "Clinician", "not known: a review can't be placed before or after the merge")
             )
         elif Flag.REVIEWS_UNVERIFIED in flags:
             # Unread reviews: neither approved nor not (Codex's review of 9fb21c8).

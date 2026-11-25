@@ -731,23 +731,29 @@ def _merge_approval(task: _Task, until: datetime) -> str:
     approval gate is decided both ways: with every such review as a changes request (the
     least approving), and as an approval (the most). Both approve: approved. Neither does:
     certainly missing. Otherwise not known (audits of 42a3721, 28009de and 0585599: rules for
-    single cases each left a combination out)."""
+    single cases each left a combination out). A review in the merge's own second can't be
+    placed before or after it either (GitHub's times have one-second resolution), so it may
+    not count at all: an approval then counts at most, a changes request at least, and a
+    dismissed one is bounded as above; a comment never counts (audit of ea9b32a). GitHub only
+    ever changes a review by dismissing an approval or a changes request."""
 
-    def judged(state: str) -> bool:
-        reviews = tuple(
-            replace(rv, state=state)
-            if rv.state == "DISMISSED"
-            and not rv.is_bot
-            and rv.user in task.clinicians
-            and rv.at <= until
-            else rv
-            for rv in task.pr.reviews or ()
-        )
+    def judged(most: bool) -> bool:
+        reviews = []
+        for rv in task.pr.reviews or ():
+            ours = not rv.is_bot and rv.user in task.clinicians and rv.at <= until
+            if ours and rv.state == "DISMISSED":
+                rv = replace(rv, state="APPROVED" if most else "CHANGES_REQUESTED")
+            elif ours and rv.at == until:
+                if rv.state == "APPROVED" and not most:
+                    continue  # may have come just after the merge
+                if rv.state == "CHANGES_REQUESTED" and most:
+                    continue
+            reviews.append(rv)
         return _clinician_approved(
-            replace(task, pr=replace(task.pr, reviews=reviews)), task.pr.head, until
+            replace(task, pr=replace(task.pr, reviews=tuple(reviews))), task.pr.head, until
         )
 
-    least, most = judged("CHANGES_REQUESTED"), judged("APPROVED")
+    least, most = judged(False), judged(True)
     if least:
         return "approved"
     return "not known" if most else "missing"

@@ -2286,6 +2286,14 @@ class Refresh(Base):
         item = self.run_refresh()["items"][0]
         self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
+    def test_a_time_at_the_edge_of_the_calendar_never_discards_a_known_failure(self):
+        # Audit of ea9b32a: astimezone raised OverflowError, which nulled every check.
+        for edge in ("0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"):
+            with self.subTest(edge):
+                node, commit = self.failing_lint()
+                commit["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][1]["completedAt"] = edge
+                self.assert_failing(node)
+
     def test_a_clinical_path_of_any_length_is_clinical(self):
         # Finding 6.
         item, state = self.merged_clinical(
