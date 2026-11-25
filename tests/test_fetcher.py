@@ -3413,9 +3413,7 @@ class CodexReviewOfA34154f(CodexReviewOf099ef9b):
 
 
 class ChecksFreshUntil(CodexReviewOf099ef9b):
-    """Freshness changes with time, and a snapshot is read long after it is written: each item
-    says when its counted passes stop being fresh, and a reader treats its checks as not known
-    after that (Codex's reviews of 05062fc to 28d71fe; owner's decision, 2026-11-25)."""
+    """Each item says when its counted passes stop being fresh (owner's decision)."""
 
     def item_for(self, node):
         self.fake.prs[REPO_A]["open"][0] = node
@@ -3767,8 +3765,7 @@ class CodexReviewOf96cb8a9(Base):
 
 
 class CodexReviewOfCaf31c9(CodexReviewOf099ef9b):
-    """A repeated row may stand where GitHub omitted one, so a counted list with a repeat is
-    never whole: reviews, issue events, check suites and check runs."""
+    """A counted list with a repeated row is never whole."""
 
     def test_a_repeated_review_never_hides_an_omitted_one(self):
         approved = review_node(OWNER, "APPROVED")
@@ -4437,9 +4434,7 @@ class PreReviewOfB8b1ca7(PreReviewOf07c3480):
 
 
 class NoFifoAnywhere(Base):
-    """Codex's review of b1fef32 (should fix): the config was opened and read before it was
-    checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now
-    opened without blocking and refused unless it is a regular file."""
+    """Codex's review of b1fef32: a FIFO in a file's place can never hang a read."""
 
     def refused_promptly(self, read):
         outcome = []
@@ -4602,10 +4597,7 @@ class AuditOf8c62413(unittest.TestCase):
 
 
 class CodexReviewOfB7d0915(Base):
-    """A SIGTERM mid-refresh (Fable's pre-review of e4a8096, then Codex's review of b7d0915):
-    it only marks the stop. Every request after it fails as "interrupted" except the token's
-    revocation, so the refresh ends as an ordinary failure, token revoked and status written,
-    never cut off part way; the process ends once nothing is under way."""
+    """SIGTERM mid-refresh: the refresh ends as an ordinary failure, then the process."""
 
     make = RefresherFiles.make
 
@@ -4614,7 +4606,6 @@ class CodexReviewOfB7d0915(Base):
         self.addCleanup(gh.STOPPING.clear)
 
     def stop_at(self, when):
-        """A transport that marks the stop as the request `when` is sent, and answers it."""
         fake = self.fake
 
         def transport(method, path, headers, body):
