@@ -337,6 +337,10 @@ def _path(entry: Entry) -> str:
     elif Flag.UNAUTHORIZED_WORK in flags:
         # Records outside any authorisation are not this task's: no claim (audit of b5ac6dd).
         review = ("?", "not judged: no authorisation covers Billy's records")
+    elif Flag.CONFLICTING_RECORDS in flags and (st.merged or state is State.UNKNOWN):
+        # The commit's own reviews disagree, as the reason says: never "not yet" (Codex's
+        # review of 4f8c1e9).
+        review = ("!", "the reviews of this commit disagree")
     elif Flag.STALE_REVIEW in flags:
         review = ("!", "only for an older commit")
     elif state is State.REVIEWING:
