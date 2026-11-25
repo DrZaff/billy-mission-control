@@ -11,7 +11,7 @@ from html import escape
 
 from . import PHASE
 from .demo import Demo, Entry, utc
-from .tasks import ATTENTION_FLAGS, WAITING_FLAGS, Flag, State, TaskStatus
+from .tasks import ATTENTION_FLAGS, Flag, State, TaskStatus
 
 STATE_WORDS = {
     State.PROPOSED: "Proposed: not authorised",
@@ -107,7 +107,9 @@ def section(status: TaskStatus) -> str:
     # The state the stop switch paused, not "paused": a failure or a decision still needs you
     # (Fable's review of 0cf099c).
     state = status.underlying
-    if state in (State.UNSAFE, State.UNKNOWN, State.FAILED) or (status.flags & ATTENTION_FLAGS):
+    if state in (State.UNSAFE, State.UNKNOWN, State.FAILED) or (
+        status.attention_flags & ATTENTION_FLAGS
+    ):
         return "alerts"
     if status.needs_attention or Flag.STALE_REVIEW in status.flags:
         return "waiting"
@@ -213,7 +215,7 @@ def _card(entry: Entry, with_github: bool) -> str:
     st = entry.status
     where = _where(entry)
     reason = st.reasons[0] if st.reasons else ""
-    alerts = [FLAG_WORDS[f] for f in sorted(st.flags & (ATTENTION_FLAGS | WAITING_FLAGS))]
+    alerts = [FLAG_WORDS[f] for f in sorted(st.attention_flags)]
     extra = "".join(f"<li>{_e(a)}</li>" for a in alerts)
     gh = github_link(entry) if with_github else None
     return (
@@ -415,7 +417,8 @@ def task_detail(demo: Demo, entry: Entry) -> str:
         clinical = "no"
     reasons = "".join(f"<li>{_e(r)}</li>" for r in st.reasons)
     flags = "".join(
-        f"<li>{'<strong>Attention:</strong> ' if f in ATTENTION_FLAGS else ''}{_e(FLAG_WORDS[f])}"
+        f"<li>{'<strong>Attention:</strong> ' if f in st.attention_flags else ''}"
+        f"{_e(FLAG_WORDS[f])}"
         f" <code>{_e(f.value)}</code></li>"
         for f in sorted(st.flags)
     )

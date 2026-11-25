@@ -2065,6 +2065,37 @@ class Refresh(Base):
         self.assertEqual(state.state, tasks.State.UNSAFE)
         self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
 
+    def test_retries_leave_out_every_piece_that_errs(self):
+        # Codex's review of 0e2139f (blocking): retries alternated between two pieces.
+        real = self.fake.__call__
+        calls = []
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number: 1)" in body:
+                calls.append(1)
+                bad = [f for f in ("title", "headRefName") if f"\\n  {f}".encode() in body]
+                if bad:
+                    answer = json.loads(data)
+                    answer["data"]["repository"]["p0"] = None
+                    answer["errors"] = [
+                        {"type": "X", "path": ["repository", "p0", bad[len(calls) % len(bad)]]}
+                    ]
+                    data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
+        self.assertEqual(item["task"]["pull_request"]["files"], ["site/a.html"])  # still read
+        self.assertLessEqual(len(calls), 4)
+
+    def test_an_odd_check_time_never_discards_a_known_failure(self):
+        # Codex's review of 0e2139f (blocking).
+        node, commit = self.failing_lint()
+        runs = commit["checkSuites"]["nodes"][0]["checkRuns"]["nodes"]
+        runs[1]["completedAt"] = "not a time"  # "test" succeeded, at an odd time
+        self.assert_failing(node)
+
     def test_a_clinical_path_of_any_length_is_clinical(self):
         # Finding 6.
         item, state = self.merged_clinical(

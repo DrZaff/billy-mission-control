@@ -600,3 +600,14 @@ class FableReviewOf0cf099cScreens(unittest.TestCase):
             body = views.task_detail(DEMO, e)
             if e.status.flags & {Flag.CHECKS_STALE, Flag.CHECKS_MISSING}:
                 self.assertEqual(path_row(body, "Checks"), "...", e.id)
+
+
+class CodexReviewOf0e2139fScreens(unittest.TestCase):
+    def test_a_closed_pr_with_unknown_files_never_says_clinical_no(self):
+        raw = entry("example-tools-60")
+        pull = raw["task"]["pull_request"]
+        pull.update(merged=False, merged_by=None, files=None)
+        pull.pop("merged_at", None)
+        state, body = detail(raw)
+        self.assertEqual(state, State.CLOSED)
+        self.assertIn("clinical: not known", body)

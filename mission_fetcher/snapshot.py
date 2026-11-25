@@ -658,7 +658,14 @@ def _checks(
                 done = run.get("completedAt")
                 if done is None or now is None:
                     continue
-                if datetime.fromisoformat(_time(done)) < now - CHECK_FRESH:
+                try:
+                    finished = datetime.fromisoformat(_time(done))
+                except FetchError:
+                    # An odd time: this one result is unknown, the rest still counts (Codex's
+                    # review of 0e2139f: it discarded failures already read).
+                    complete = False
+                    continue
+                if finished < now - CHECK_FRESH:
                     continue
             out.append(
                 {
@@ -974,29 +981,39 @@ def _details(
     # it lite, and a retry without the pieces in error, then its core.
     budget = [5 * len(numbers) + 2]
 
-    def fetch_counted(batch: list[int], omit: frozenset, lite) -> list:
+    def fetch_raw(batch: list[int], omit: frozenset, lite) -> list:
         if budget[0] <= 0:
             raise FetchError("too-heavy")
         budget[0] -= 1
-        return resolve(fetch(batch, omit, lite))
+        return fetch(batch, omit, lite)
+
+    def fetch_counted(batch: list[int], omit: frozenset, lite) -> list:
+        return resolve(fetch_raw(batch, omit, lite))
 
     def resolve(entries: list) -> list:
-        """Each Retry asked for again without just its pieces in error, then with its core
-        only. Still nothing usable: unreadable."""
+        """Each Retry asked for again without its pieces in error, adding to them each time
+        another piece errs (Codex's review of 0e2139f: retries alternated between two pieces
+        until the budget ran out), then with its core only. Still nothing usable: unreadable."""
         out = []
         for number, node, lite in entries:
             if isinstance(node, Retry):
-                pieces, node, lite = node.pieces, UNREADABLE, "retry"
-                for omit in (pieces, ALL_PIECES):
+                omit, node, lite = node.pieces, UNREADABLE, "retry"
+                while True:
                     try:
-                        ((_, got, _),) = fetch_counted([number], omit, "retry")
+                        ((_, got, _),) = fetch_raw([number], omit, "retry")
                     except FetchError as error:
                         if not _its_own(error, 1):
                             raise
+                        got = UNREADABLE
+                    if isinstance(got, Retry) and not got.pieces <= omit:
+                        omit = omit | got.pieces  # one more piece in error: leave it out too
                         continue
                     if isinstance(got, dict):
                         node = got
-                        break
+                    elif omit != ALL_PIECES:
+                        omit = ALL_PIECES  # last, the core only
+                        continue
+                    break
             out.append((number, node, lite))
         return out
 

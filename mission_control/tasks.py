@@ -214,6 +214,16 @@ ATTENTION_FLAGS = frozenset(
 )
 
 
+CALM_WHEN_CLOSED = frozenset(
+    {
+        Flag.ISSUE_NOT_LINKED,
+        Flag.FROM_FORK,
+        Flag.FILES_UNVERIFIED,
+        Flag.REVIEWS_UNVERIFIED,
+        Flag.CHECKS_UNVERIFIED,
+    }
+)
+
 # Flags that put a task under "Waiting for you" (not an alert), whatever its state: a known
 # missing clinician approval waits on a clinician, even when Billy's records aren't read and
 # the state is BUILT (Codex's review of dc1eb14).
@@ -239,10 +249,18 @@ class TaskStatus:
         return self.would_be or self.state
 
     @property
+    def attention_flags(self) -> frozenset[Flag]:
+        """The flags that need the owner. For a closed, unmerged PR, nothing that is only "not
+        known" or about who opened it: there is nothing left to decide (Fable's reviews of
+        0cf099c and 4945de9)."""
+        flags = self.flags & (ATTENTION_FLAGS | WAITING_FLAGS)
+        if self.underlying is State.CLOSED:
+            flags -= CALM_WHEN_CLOSED
+        return flags
+
+    @property
     def needs_attention(self) -> bool:
-        return self.underlying in ATTENTION_STATES or bool(
-            self.flags & (ATTENTION_FLAGS | WAITING_FLAGS)
-        )
+        return self.underlying in ATTENTION_STATES or bool(self.attention_flags)
 
 
 class InvalidInput(ValueError):
@@ -702,6 +720,25 @@ def _checks(task: _Task, head: str, flags: set[Flag]) -> bool:
 DECISIVE = ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")
 
 
+def _dismissal_unplaced(task: _Task, until: datetime) -> bool:
+    """For a merge: whether a clinician's latest decisive review up to it now shows as
+    dismissed. GitHub gives the current state with the submission time, so it may have been a
+    changes request dismissed only after the merge, which blocked the merge when it happened
+    (Codex's review of 0e2139f). A dismissed review is never an approval, so this can only make
+    an approval uncertain, never a missing one."""
+    latest: dict[str, list[_Review]] = {}
+    for rv in task.pr.reviews or ():
+        if rv.is_bot or rv.user not in task.clinicians or rv.state not in DECISIVE:
+            continue
+        if rv.at <= until:
+            latest.setdefault(rv.user, []).append(rv)
+    for reviews in latest.values():
+        at = max(rv.at for rv in reviews)
+        if any(rv.state == "DISMISSED" for rv in reviews if rv.at == at):
+            return True
+    return False
+
+
 def _clinician_approved(task: _Task, head: str, until: datetime | None = None) -> bool:
     """A clinician's own GitHub approval of exactly this commit, not later withdrawn, with no
     clinician asking for changes to it. Bots never count, and neither does any review report
@@ -885,7 +922,10 @@ def derive(raw: Any) -> TaskStatus:
         if maybe_clinical and pr.reviews is None:
             flags.add(Flag.REVIEWS_UNVERIFIED)  # approval not known: no claim either way
         elif Flag.CLINICAL in flags and _clinician_approved(task, pr.head, merged_at):
-            flags.add(Flag.CLINICIAN_APPROVED)
+            if _dismissal_unplaced(task, merged_at):
+                flags.add(Flag.REVIEWS_UNVERIFIED)  # approved, unless a dismissal came late
+            else:
+                flags.add(Flag.CLINICIAN_APPROVED)
         elif Flag.CLINICAL in flags:
             flags.add(Flag.MERGED_WITHOUT_CLINICIAN)
             problems.append("clinical files merged without a clinician's approval of that commit")
@@ -921,14 +961,9 @@ def derive(raw: Any) -> TaskStatus:
     elif (pr and not pr.open) or not task.issue_open:
         # Nothing to decide: a closed stranger's or unlinked PR is history, not an alert
         # (Fable's review of 0cf099c).
-        for calm in (
-            Flag.ISSUE_NOT_LINKED,
-            Flag.FROM_FORK,
-            Flag.FILES_UNVERIFIED,  # Fable's pre-review of 4945de9: a closed PR with a rename
-            Flag.REVIEWS_UNVERIFIED,
-            Flag.CHECKS_UNVERIFIED,
-        ):
-            flags.discard(calm)
+        # Its flags are kept, so the page still says what isn't known (Codex's review of
+        # 0e2139f: dropping FILES_UNVERIFIED made it say "clinical: no"), but for a closed PR
+        # they never raise an alert (CALM_WHEN_CLOSED).
         return status(State.CLOSED, "Closed without merging.", head)
 
     def github_gates() -> None:

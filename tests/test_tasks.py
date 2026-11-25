@@ -1488,3 +1488,40 @@ class FableReviewOf4945de9(unittest.TestCase):
         s = derive(task(runs=None, pull_request=closed))
         self.assertEqual(s.state, State.CLOSED)
         self.assertFalse(s.needs_attention)
+
+
+class CodexReviewOf0e2139f(unittest.TestCase):
+    def test_a_dismissal_that_cant_be_placed_makes_an_approval_uncertain(self):
+        # Blocking: a clinician's changes request dismissed after the merge blocked it then.
+        reviews = [
+            approval("clinician-two", sha=B, state="DISMISSED", minute=4),
+            approval(minute=6),
+        ]
+        value = task(
+            clinicians=[CLINICIAN, "clinician-two"],
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(
+                state="closed",
+                merged=True,
+                merged_by=OWNER,
+                merged_at=t(30),
+                files=("evidence/a.json",),
+                reviews=reviews,
+            ),
+        )
+        s = derive(value)
+        self.assertNotIn(Flag.CLINICIAN_APPROVED, s.flags)
+        self.assertIn(Flag.REVIEWS_UNVERIFIED, s.flags)
+        self.assertTrue(s.needs_attention)
+        # Without the approval it is certain: a dismissed review is never an approval.
+        value["pull_request"]["reviews"] = reviews[:1]
+        s = derive(value)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.MERGED_WITHOUT_CLINICIAN, s.flags)
+
+    def test_a_closed_pr_keeps_its_flags_without_alerts(self):
+        closed = dict(pr(state="closed"), files=None)
+        s = derive(task(runs=None, pull_request=closed))
+        self.assertEqual(s.state, State.CLOSED)
+        self.assertIn(Flag.FILES_UNVERIFIED, s.flags)  # still said
+        self.assertFalse(s.needs_attention)  # never an alert
