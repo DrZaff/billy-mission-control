@@ -166,6 +166,9 @@ DYNAMIC_ATTRIBUTES = (
     "environb",
 )
 
+# Everything either package may use from the socket module: Unix sockets, and shutting one down.
+SOCKET_NAMES = ("socket", "AF_UNIX", "SOCK_STREAM", "SOL_SOCKET", "SO_PEERCRED", "SHUT_RDWR")
+
 CONNECTION_NAMES = ("HTTPSConnection", "HTTPConnection")
 OUTBOUND_NAMES = ("create_connection", "get_server_certificate", "open_connection", "set_tunnel")
 # A connection's destination, which nothing may set after the connection is made.
@@ -303,6 +306,26 @@ class App(unittest.TestCase):
                     self.assertEqual(
                         [n for n in node.names if n.isupper()], [], (path.name, node.lineno)
                     )
+
+    def test_only_these_socket_names_are_used(self):
+        # Pre-review of e995f6a: socket.SocketType(2, 1), socket.fromfd(0, 2, 1) and
+        # socket.create_server(("", 8080)) each made an internet socket past the rules above.
+        paths = sorted((ROOT / "mission_control").rglob("*.py"))
+        paths += sorted((ROOT / "mission_fetcher").rglob("*.py"))
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            values = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+            for node in ast.walk(tree):
+                where = (path.name, getattr(node, "lineno", None))
+                if isinstance(node, ast.Attribute) and ast.unparse(node.value) == "socket":
+                    self.assertIn(node.attr, SOCKET_NAMES, where)
+                if isinstance(node, ast.Attribute) and ast.unparse(node.value) == "socket.socket":
+                    self.assertIn(node.attr, ("shutdown",), where)
+                # The module only ever as socket.<name>: never handed on or renamed.
+                if isinstance(node, ast.Name) and node.id == "socket":
+                    self.assertIn(id(node), values, where)
+                if isinstance(node, ast.alias) and node.name == "socket":
+                    self.assertIn(node.asname, (None, "socket"), where)
 
     def test_the_app_never_imports_the_fetcher(self):
         # Phase A5a (issue #16): the fetcher is the only part with network access, in its own

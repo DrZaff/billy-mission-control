@@ -4223,6 +4223,75 @@ class FreshForTheWholeRefresh(CodexReviewOf099ef9b):
         self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
 
+class PreReviewOfE995f6a(CodexReviewOf099ef9b):
+    def deep_error(self, field):
+        """A passing PR whose answer has an error deep in its checks, nulled there."""
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10))
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"commits(" in body and b"pullRequest(number: 1)" in body:
+                answer = json.loads(data)
+                commit = answer["data"]["repository"]["p0"]["commits"]["nodes"][0]["commit"]
+                at = ["repository", "p0", "commits", "nodes", 0, "commit"]
+                if field == "status":
+                    commit["status"] = None
+                    at.append("status")
+                else:
+                    commit["checkSuites"]["nodes"][0]["app"] = None
+                    at += ["checkSuites", "nodes", 0, "app"]
+                answer["errors"] = [{"type": "X", "path": at}]
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        return self.run_refresh(github)["items"][0]
+
+    def test_a_deep_error_in_the_checks_never_reads_as_passed(self):
+        for field in ("status", "app"):
+            with self.subTest(field=field):
+                item = self.deep_error(field)
+                self.assertFalse(item["task"]["pull_request"]["checks_complete"])
+                flags = tasks.derive(self.reviewed(item)).flags
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
+
+    def another_suite(self, app, conclusion):
+        node = pr_node(1, issue=issue_node(10))
+        commit = node["commits"]["nodes"][0]["commit"]
+        commit["checkSuites"]["nodes"].append(
+            {
+                "app": app,
+                "checkRuns": {
+                    "totalCount": 1,
+                    "nodes": [{"name": "lint", "status": "COMPLETED", "conclusion": conclusion}],
+                },
+            }
+        )
+        commit["checkSuites"]["totalCount"] = 2
+        self.fake.prs[REPO_A]["open"][0] = node
+        return tasks.derive(self.reviewed(self.run_refresh()["items"][0])).flags
+
+    def test_another_apps_failure_keeps_the_checks_from_passing(self):
+        for app in ({"slug": "other-ci"}, None):
+            with self.subTest(app=app):
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, self.another_suite(app, "FAILURE"))
+                # Its success is harmless: never counted, never in the way.
+                self.assertIn(tasks.Flag.CHECKS_PASSED, self.another_suite(app, "SUCCESS"))
+
+    def test_a_required_status_in_an_unknown_state_is_not_known(self):
+        node = pr_node(1, issue=issue_node(10), statuses=[("lint", "WHATEVER")])
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertFalse(item["task"]["pull_request"]["checks_complete"])
+
+    def test_more_issue_events_than_returned_leave_the_issue_not_known(self):
+        issue = issue_node(10)
+        issue["timelineItems"]["totalCount"] = 101
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue)
+        self.assertIsNone(self.run_refresh()["items"][0]["task"]["issue"])
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now

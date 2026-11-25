@@ -2,9 +2,9 @@
 
 Each item carries the task model's input (`mission_control.tasks`), built only from fields this
 module checks, plus the title and links the screens show. Everything from GitHub is untrusted:
-- only the expected shapes are accepted: a whole answer of the wrong shape fails the refresh
-  ("bad-response"), and one pull request's wrongly shaped data makes only that item unreadable
-  (task null, shown as UNKNOWN);
+- only the expected shapes are accepted: a wrongly shaped list or installation answer fails the
+  refresh ("bad-response"); a wrongly shaped detail answer, or one pull request's wrongly shaped
+  data, makes only those items unreadable (task null, shown as UNKNOWN), never calm;
 - text is cleaned (no control characters) and capped; links are built here from the repository
   and number, never taken from GitHub's answer;
 - where a part of GitHub's answer is incomplete (more files, reviews, checks or label events than
@@ -562,9 +562,7 @@ def _compact(paths: list[str] | None, clinical_paths: tuple[str, ...]) -> list[s
 VANISHED = "0" * 40  # a review's commit that is gone (force-pushed away): never the head
 
 
-def _reviews(
-    pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None, head: str
-) -> list[dict]:
+def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) -> list[dict]:
     """The clinicians' reviews, the only ones the model reads, one connection per clinician
     (`rv<i>`). A part missing or cut off makes the reviews "not known". Each review is first
     placed in time, and one submitted after a merge is skipped before anything else about it is
@@ -668,16 +666,19 @@ def _checks(
             complete = False  # left out: not known (audit of 28009de)
             continue
         suite_app = suite.get("app")
-        if suite_app is None:
-            continue  # no app: never the configured one
         slug = suite_app.get("slug") if isinstance(suite_app, dict) else None
-        if not isinstance(slug, str):
+        if suite_app is not None and not isinstance(slug, str):
             complete = False  # wrongly shaped: not known, never skipped silently (42a3721)
             continue
-        if slug != app:
+        if suite_app is None or slug != app:
+            # Not the configured app: its successes never count, but a failing or unfinished
+            # run with a required name keeps the checks from passing (pre-review of e995f6a).
+            if not _provably_harmless_runs(suite, required):
+                complete = False
             continue
-        # Only runs started by a pull request, a push or the merge queue can stand for a PR's
-        # required checks (Codex's review of f37d0c7). Only GitHub Actions suites have a
+        # Only runs started by a pull request, a push, the merge queue, or a review or
+        # deployment event (CHECK_EVENTS) can stand for a PR's required checks (Codex's review
+        # of f37d0c7). Only GitHub Actions suites have a
         # workflow run; another app's checks are taken as GitHub gives them (de9a6fb).
         if app == "github-actions":
             if "workflowRun" not in suite:
@@ -994,7 +995,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
         pull.pop("files_complete", None)
     merged_at = datetime.fromisoformat(pull["merged_at"]) if merged else None
     try:
-        pull["reviews"] = _reviews(pr, cfg.clinicians, merged_at, head)
+        pull["reviews"] = _reviews(pr, cfg.clinicians, merged_at)
     except (_Incomplete, *_SHAPE):
         # null: "not known", so the model still judges what is known (Codex's review of
         # 198a66e: leaving the key out made the whole PR unreadable and hid its warnings).
