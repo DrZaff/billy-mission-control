@@ -1775,3 +1775,53 @@ class CodexReviewOfCae7658(unittest.TestCase):
         value["files"] = ["evidence/a.json", "app.py"]
         s = derive(task(runs=[run("build"), passed(), published()], pull_request=value))
         self.assertIn("Clinical files", " ".join(s.reasons))
+
+
+class FableAuditOfB5ac6dd(unittest.TestCase):
+    def merged(self, timeline, **over):
+        value = task(
+            issue={"number": 7, "state": "closed", "timeline": timeline},
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(state="closed", merged=True, merged_by=OWNER, merged_at=t(20)),
+        )
+        value.update(over)
+        return derive(value)
+
+    def test_a_withdrawn_merge_claims_nothing_about_its_review(self):
+        closed = {"event": "closed", "actor": OWNER, "at": t(10)}
+        for event in (closed, labeled(minute=10, kind="unlabeled")):
+            with self.subTest(event=event["event"]):
+                s = self.merged([labeled(), event])
+                self.assertEqual(s.state, State.UNSAFE)
+                self.assertIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
+                self.assertNotIn(Flag.MERGED_UNREVIEWED, s.flags)
+                self.assertNotIn("never", " ".join(s.reasons))
+
+    def test_a_never_authorised_merge_says_so(self):
+        s = self.merged([])
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.UNAUTHORIZED_WORK, s.flags)
+        self.assertNotIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
+        self.assertIn("never authorised", " ".join(s.reasons))
+        # Closing an issue that was never authorised withdraws nothing either.
+        s = self.merged([{"event": "closed", "actor": OWNER, "at": t(10)}])
+        self.assertNotIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
+        self.assertIn("never authorised", " ".join(s.reasons))
+
+    def test_a_partial_check_list_never_passes(self):
+        value = pr()
+        value["checks_complete"] = False
+        s = derive(task(runs=[run("build"), passed(), published()], pull_request=value))
+        self.assertNotIn(Flag.CHECKS_PASSED, s.flags)
+        self.assertIn(Flag.CHECKS_UNVERIFIED, s.flags)
+        self.assertEqual(s.state, State.PUBLISHED)
+        # A failure in it still fails.
+        value["checks"] = [check("lint"), check("test", conclusion="failure")]
+        s = derive(task(runs=[run("build"), passed(), published()], pull_request=value))
+        self.assertIn(Flag.CHECKS_FAILING, s.flags)
+
+    def test_unread_run_records_never_claim_a_missing_review(self):
+        s = derive(task(runs=None, pull_request=pr()))
+        self.assertIn(Flag.RUNS_UNVERIFIED, s.flags)
+        self.assertNotIn(Flag.REVIEW_MISSING, s.flags)
+        self.assertNotIn(Flag.PR_BEFORE_REVIEW, s.flags)
