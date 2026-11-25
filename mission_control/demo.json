@@ -2004,6 +2004,12 @@
        "actor": "example-owner",
        "at": "2026-11-14T09:00:00+00:00",
        "label": "agent:ready"
+      },
+      {
+       "event": "closed",
+       "actor": "example-owner",
+       "at": "2026-11-14T17:25:00+00:00",
+       "closer_pr": 922
       }
      ]
     },
@@ -2064,6 +2070,105 @@
       {
        "name": "test",
        "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ],
+     "merged_at": "2026-11-14T17:25:00+00:00",
+     "from_fork": false
+    }
+   }
+  },
+  {
+   "id": "example-site-939",
+   "title": "About page forwards home (issue closed, closing not on record)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 939,
+     "state": "closed",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/about-redirect",
+     "head": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/about-redirect",
+      "sha": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9",
+      "at": "2026-11-14T16:10:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/about-redirect",
+      "sha": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9",
+      "at": "2026-11-14T16:20:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-e9e9e9e",
+      "sha": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9",
+      "at": "2026-11-14T16:25:00+00:00",
+      "pr": 940
+     }
+    ],
+    "pull_request": {
+     "number": 940,
+     "state": "closed",
+     "draft": true,
+     "merged": true,
+     "merged_by": "example-owner",
+     "head_sha": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9",
        "status": "completed",
        "conclusion": "success"
       }

@@ -718,7 +718,7 @@ class FableAuditOfB5ac6ddScreens(unittest.TestCase):
         state, body = detail(raw)
         self.assertEqual(state, State.UNSAFE)
         self.assertNotIn("never", body)  # neither "never authorised" nor "never passed review"
-        self.assertIn("withdrawn: agent:ready removed, or the issue closed before the merge", body)
+        self.assertIn("withdrawn by the merge: agent:ready removed or the issue closed", body)
         self.assertIn("not judged: no authorisation covers Billy&#x27;s records", body)
 
     def test_an_approval_shows_even_when_the_files_may_be_clinical(self):
@@ -750,3 +750,54 @@ class CodexReviewOf4f8c1e9Screens(unittest.TestCase):
         self.assertIn("reviews disagree", body)
         self.assertIn("the reviews of this commit disagree", body)
         self.assertNotIn("not yet", body)
+
+
+class FableAuditOfFe4d72dScreens(unittest.TestCase):
+    def rows(self, raw):
+        demo = load(json.dumps(with_tasks(raw)))
+        return views._path(demo.entries[0]), demo.entries[0]
+
+    def test_rows_say_what_each_state_establishes(self):
+        body, _ = self.rows(entry("example-tools-59"))  # never authorised
+        self.assertIn("<span>no</span>", body)
+        body, _ = self.rows(entry("example-site-935"))
+        self.assertIn("not known: a review can&#x27;t be placed", body)
+        body, _ = self.rows(entry("example-site-939"))
+        self.assertIn("not known: the issue&#x27;s closing can&#x27;t be placed", body)
+        body, _ = self.rows(entry("example-tools-62"))
+        self.assertIn("not shown: no linked issue to show it", body)
+
+    def test_disagreeing_reviews_of_an_open_head_say_so(self):
+        raw = entry("example-site-931")
+        pull = raw["task"]["pull_request"]
+        pull.update(state="open", merged=False, merged_by=None)
+        pull.pop("merged_at")
+        runs = raw["task"]["runs"]
+        review = next(r for r in runs if r["step"] == "review")
+        runs.insert(
+            runs.index(review) + 1,
+            dict(
+                review,
+                verdict="changes_needed",
+                findings=[{"severity": "blocking"}],
+                at="2026-11-14T16:01:00+00:00",
+            ),
+        )
+        body, e = self.rows(raw)
+        self.assertEqual(e.status.state, State.UNKNOWN)
+        self.assertIn("the reviews of this commit disagree", body)
+
+    def test_a_paused_task_shows_where_it_stands(self):
+        raw = entry("example-site-931")
+        paused = copy.deepcopy(raw)
+        paused["task"]["paused"] = True
+        pull = paused["task"]["pull_request"]
+        pull.update(state="open", merged=False, merged_by=None)
+        pull.pop("merged_at")
+        unpaused = copy.deepcopy(paused)
+        unpaused["task"]["paused"] = False
+        body_p, e_p = self.rows(paused)
+        body_u, e_u = self.rows(unpaused)
+        self.assertEqual(e_p.status.state, State.PAUSED)
+        self.assertEqual(body_p, body_u)
+        self.assertEqual(views.section(e_p.status), views.section(e_u.status))

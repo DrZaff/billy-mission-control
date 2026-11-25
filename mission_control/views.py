@@ -31,7 +31,8 @@ STATE_WORDS = {
     State.CLOSED: "Closed without merging",
     State.UNSAFE: "UNSAFE: do not approve",
     State.UNKNOWN: "Unknown: the data can't be trusted",
-    State.NOT_LINKED: "Not linked to an authorised issue",
+    # Also a fork PR, linked or not (Fable's audit of fe4d72d): the header claims no link.
+    State.NOT_LINKED: "Not on Billy's path: decide on GitHub",
 }
 
 FLAG_WORDS = {
@@ -60,9 +61,13 @@ FLAG_WORDS = {
         "A clinician's review can't be placed against the merge (dismissed, and GitHub doesn't"
         " say when, or in the merge's own second): approval not known"
     ),
+    Flag.CLOSURE_UNPLACED: (
+        "The issue's closing can't be placed against the merge: your authorisation of it isn't"
+        " known"
+    ),
     Flag.AUTHORIZATION_WITHDRAWN: (
-        "You authorised this task, then that was withdrawn (agent:ready removed, or the issue"
-        " closed before the merge)"
+        "You authorised this task, then that was withdrawn (agent:ready removed, or for a merge"
+        " the issue closed by then)"
     ),
     Flag.AUTHORIZATION_UNVERIFIED: "Your authorisation of this merge can't be verified here",
     Flag.UNAUTHORIZED_MERGE: "Merged by someone other than you",
@@ -300,8 +305,12 @@ def _path(entry: Entry) -> str:
 
     # Each row claims only what the model established. A "done" mark needs a state the model
     # reaches only after that gate passed; anything else says "not shown" rather than guess.
-    if Flag.AUTHORIZATION_WITHDRAWN in flags:
-        authorised = ("!", "withdrawn: agent:ready removed, or the issue closed before the merge")
+    if Flag.AUTHORIZATION_WITHDRAWN in flags and st.merged:
+        authorised = ("!", "withdrawn by the merge: agent:ready removed or the issue closed")
+    elif Flag.AUTHORIZATION_WITHDRAWN in flags:
+        authorised = ("!", "withdrawn: agent:ready removed")  # an open PR: the label only
+    elif Flag.CLOSURE_UNPLACED in flags:
+        authorised = ("?", "not known: the issue's closing can't be placed against the merge")
     elif Flag.UNAUTHORIZED_WORK in flags:
         authorised = ("!", "no")
     elif state is State.PROPOSED:
