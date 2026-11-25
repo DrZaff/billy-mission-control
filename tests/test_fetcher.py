@@ -687,16 +687,54 @@ class Refresh(Base):
             self.run_refresh()
         self.assertEqual(caught.exception.code, "internal+token-not-revoked")
 
-    def test_a_malformed_check_status_is_a_bad_response(self):
+    def test_a_malformed_check_status_makes_that_pr_unreadable(self):
         # Codex's review of 23bfb61: an unhashable status raised TypeError and stopped the
-        # fetcher.
+        # fetcher. Since de9a6fb it makes that one pull request unreadable (UNKNOWN), and the
+        # rest are still read.
         node = pr_node(1, issue=issue_node(10))
         suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
         suite["checkRuns"]["nodes"][0]["status"] = ["COMPLETED"]
         self.fake.prs[REPO_A]["open"][0] = node
-        with self.assertRaises(gh.FetchError) as caught:
-            self.run_refresh()
-        self.assertEqual(caught.exception.code, "bad-response")
+        items = self.run_refresh()["items"]
+        bad = next(i for i in items if i["number"] == 1)
+        self.assertIsNone(bad["task"])
+        self.assertEqual(tasks.derive(bad["task"]).state, tasks.State.UNKNOWN)
+        self.assertEqual([i["number"] for i in items], [1, 2, 3])
+
+    def test_a_field_error_on_one_pr_never_stalls_the_others(self):
+        # Codex's review of de9a6fb (blocking): a GraphQL error on one pull request's field
+        # discarded the whole answer and failed the refresh for every repository.
+        self.fake.prs[REPO_A]["open"] = [pr_node(n, issue=issue_node(10)) for n in range(1, 8)]
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            if path == "/graphql" and b"pullRequest(number: 4)" in body:
+                errors = [{"type": "SOMETHING", "path": ["repository", "p0", "files"]}]
+                return 200, {}, json.dumps({"data": None, "errors": errors}).encode()
+            return real(method, path, headers, body)
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        items = [i for i in snapshot.refresh(self.cfg, github, NOW)["items"] if i["repo"] == REPO_A]
+        self.assertEqual([i["number"] for i in items], list(range(1, 8)))
+        for item in items:
+            if item["number"] == 4:
+                self.assertIsNone(item["task"])  # unreadable: UNKNOWN
+            else:
+                self.assertEqual(item["task"]["pull_request"]["files"], ["site/a.html"])
+
+    def test_another_apps_checks_need_no_workflow_run(self):
+        # Codex's review of de9a6fb: suites of an app other than GitHub Actions have no
+        # workflow run, so their required checks showed as missing.
+        data = config_data(self.base)
+        data["repos"][REPO_A]["checks_app"] = "other-ci"
+        self.cfg = fconfig.parse_fetcher(json.dumps(data))
+        node = pr_node(1, issue=issue_node(10), checks_app="other-ci")
+        node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["workflowRun"] = None
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        names = sorted(c["name"] for c in item["task"]["pull_request"]["checks"])
+        self.assertEqual(names, ["lint", "test"])
+        self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
     def test_too_large_also_says_when_the_token_outlived_it(self):
         # Codex's review of 23bfb61: the size error dropped the failed-revoke warning.
@@ -1481,7 +1519,13 @@ class RefresherFiles(Base):
         # Codex's review of 9aeff19: a malformed status file was read as "no earlier attempt".
         wall = [NOW.timestamp()]
         self.assertEqual(self.make(lambda: wall[0]).run(), server.OK)
-        for bad in (b"{not json", b"[]", b"\xff\xfe"):
+        # Deeply nested JSON raised RecursionError past the handler (Codex's review of de9a6fb).
+        for bad in (
+            b"{not json",
+            b"[]",
+            b"\xff\xfe",
+            b'{"a":' + b"[" * 200000 + b"]" * 200000 + b"}",
+        ):
             with self.subTest(bad=bad):
                 (self.cfg.snapshot_dir / snapshot.STATUS).write_bytes(bad)
                 wall[0] += 1

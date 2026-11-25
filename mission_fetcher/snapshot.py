@@ -96,6 +96,11 @@ BATCH = 10
 # answer reaches the size cap). If a lone pull request read without its heavy parts still
 # fails, or the request budget runs out, the refresh fails with GitHub's own error.
 HEAVY = {"too-large", "too-heavy", "timeout", "http-502", "http-503", "http-504"}
+# Failures of one pull request's own data: GitHub's error on a field, or an answer of the wrong
+# shape. The batch is split down to that pull request, which is then shown as unreadable
+# (UNKNOWN, an alert) instead of failing the refresh for every repository (Codex's review of
+# de9a6fb).
+ITS_OWN = {"graphql-error", "bad-response"}
 
 _BASE_FIELDS = """
   number title state isDraft merged closedAt mergedAt
@@ -359,9 +364,12 @@ def _checks(pr: dict, head: str, app: str, required: tuple[str, ...]) -> list[di
         # required checks; GitHub leaves out a manually dispatched or scheduled run, and so
         # does this (Codex's review of f37d0c7). The aim is never to look greener than GitHub:
         # its ruleset, shown in the merge box, stays the authority on what can merge.
-        run_event = _obj(suite.get("workflowRun") or {}).get("event")
-        if run_event not in CHECK_EVENTS:
-            continue
+        # Only GitHub Actions suites have a workflow run; another configured app's checks are
+        # taken as GitHub gives them (Codex's review of de9a6fb: they showed as missing).
+        if app == "github-actions":
+            run_event = _obj(suite.get("workflowRun") or {}).get("event")
+            if run_event not in CHECK_EVENTS:
+                continue
         for run in _connection(suite.get("checkRuns"), MAX_RUNS):
             r = _obj(run)
             raw_status = r.get("status")
@@ -592,13 +600,13 @@ def _listing(repo: str, data: Any, now: datetime) -> tuple[list[int], bool]:
 
 
 def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[int]) -> list:
-    """[(node, lite)] for these pull requests, in order. A pull request gone since the list
-    (deleted, or moved) is skipped."""
+    """[(number, node, lite)] for these pull requests, in order; node None: unreadable. A pull
+    request gone since the list (deleted, or moved) is skipped."""
 
     def fetch(batch: list[int], lite: bool) -> list:
         data = github.graphql(token, detail_query(batch, lite), {"owner": owner, "name": name})
         repository = _obj(_obj(data).get("repository"))
-        return [(repository.get(f"p{i}"), lite) for i in range(len(batch))]
+        return [(n, repository.get(f"p{i}"), lite) for i, n in enumerate(batch)]
 
     # At most about three requests per pull request: splitting to one and reading it lite.
     budget = [3 * len(numbers) + 2]
@@ -613,17 +621,42 @@ def _details(github: GitHub, token: str, owner: str, name: str, numbers: list[in
         try:
             return fetch_counted(batch, False)
         except FetchError as error:
-            if error.code not in HEAVY:
+            if error.code not in HEAVY | ITS_OWN:
                 raise
         if len(batch) > 1:
             half = len(batch) // 2
             return read(batch[:half]) + read(batch[half:])
-        return fetch_counted(batch, True)
+        try:
+            return fetch_counted(batch, True)
+        except FetchError as error:
+            if error.code not in ITS_OWN:
+                raise
+            return [(batch[0], UNREADABLE, True)]
 
     out = []
     for i in range(0, len(numbers), BATCH):
         out += read(numbers[i : i + BATCH])
-    return [(node, lite) for node, lite in out if node is not None]
+    return [(n, node, lite) for n, node, lite in out if node is not None]
+
+
+UNREADABLE = object()  # a pull request whose own data GitHub couldn't give whole
+
+
+def _unreadable(repo: str, number: int) -> dict:
+    """A pull request that couldn't be read: shown, with task null, which the model shows as
+    UNKNOWN (an alert). Never left out: that would look calmer than GitHub."""
+    short = repo.split("/", 1)[1]
+    return {
+        "id": f"{short}-{number}",
+        "repo": repo,
+        "number": number,
+        "title": "(this pull request couldn't be read)",
+        "url": f"https://github.com/{repo}/pull/{number}",
+        "closed_at": None,
+        "linked_issues": 0,
+        "issue": None,
+        "task": None,
+    }
 
 
 def repo_items(repo: str, cfg: FetcherConfig, github: GitHub, token: str, now: datetime):
@@ -633,8 +666,15 @@ def repo_items(repo: str, cfg: FetcherConfig, github: GitHub, token: str, now: d
     numbers, more = _listing(repo, listing, now)
     since = now - timedelta(days=RECENT_DAYS)
     items = []
-    for node, lite in _details(github, token, owner, name, numbers):
-        item = _item(repo, cfg, node, lite)
+    for number, node, lite in _details(github, token, owner, name, numbers):
+        try:
+            if node is UNREADABLE:
+                raise _bad()
+            item = _item(repo, cfg, node, lite)
+            if item["number"] != number:
+                raise _bad()
+        except FetchError:  # bad-response: this pull request's own data
+            item = _unreadable(repo, number)
         # A pull request closed between the list and its details still belongs here; one
         # closed before the window (possible only if the list was wrong) does not.
         if item["closed_at"] is None or datetime.fromisoformat(item["closed_at"]) >= since:
@@ -697,7 +737,9 @@ def _fit(snapshot: dict) -> None:
 
     if size() <= MAX_SNAPSHOT:
         return
-    tasks = [i["task"] for i in snapshot["items"] if i["task"]["pull_request"].get("files")]
+    tasks = [
+        i["task"] for i in snapshot["items"] if i["task"] and i["task"]["pull_request"].get("files")
+    ]
     tasks.sort(key=lambda t: len(encode({"f": t["pull_request"]["files"]})), reverse=True)
     for task in tasks:
         pull = task["pull_request"]
@@ -709,7 +751,7 @@ def _fit(snapshot: dict) -> None:
         if size() <= MAX_SNAPSHOT:
             return
     # Then the clinicians' reviews, largest first: null, "not known", never approved.
-    pulls = [i["task"]["pull_request"] for i in snapshot["items"]]
+    pulls = [i["task"]["pull_request"] for i in snapshot["items"] if i["task"]]
     pulls = [p for p in pulls if p.get("reviews")]
     pulls.sort(key=lambda p: len(encode({"r": p["reviews"]})), reverse=True)
     for pull in pulls:
@@ -717,7 +759,7 @@ def _fit(snapshot: dict) -> None:
         if size() <= MAX_SNAPSHOT:
             return
     # Then the checks: null, "not known", never passed (CHECKS_UNVERIFIED).
-    pulls = [i["task"]["pull_request"] for i in snapshot["items"]]
+    pulls = [i["task"]["pull_request"] for i in snapshot["items"] if i["task"]]
     pulls = [p for p in pulls if p.get("checks")]
     pulls.sort(key=lambda p: len(encode({"c": p["checks"]})), reverse=True)
     for pull in pulls:
@@ -826,8 +868,9 @@ def read_json(
         value = json.loads(data.decode("utf-8"))
         if not isinstance(value, dict):
             raise ValueError("not an object")
-    except ValueError:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
+    except (ValueError, RecursionError):  # Unicode/JSON errors are ValueErrors; RecursionError:
+        # deeply nested JSON (Codex's review of de9a6fb)
         if strict:
-            raise
+            raise ValueError("malformed") from None
         return None
     return value
