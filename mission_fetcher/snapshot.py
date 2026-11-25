@@ -543,6 +543,12 @@ def _reviews(
             state = n.get("state")
             if state == "PENDING":
                 continue  # a draft review nobody else can see
+            submitted = n.get("submittedAt")
+            if submitted is None:
+                raise _Incomplete()  # a review that can't be placed in time: no guess
+            at = datetime.fromisoformat(_time(submitted))
+            if merged_at is not None and at > merged_at:
+                continue  # after the merge: skipped before anything else (audit of 0585599)
             author = n.get("author")
             if author is None:
                 continue  # a deleted account: not this clinician
@@ -553,12 +559,6 @@ def _reviews(
             seen = author.get("login")
             if not isinstance(seen, str) or seen.lower() != login.lower():
                 raise _Incomplete()
-            submitted = n.get("submittedAt")
-            if submitted is None:
-                raise _Incomplete()  # a review that can't be placed in time: no guess
-            at = datetime.fromisoformat(_time(submitted))
-            if merged_at is not None and at > merged_at:
-                continue
             if not isinstance(state, str) or state not in REVIEW_STATES:
                 raise _bad()
             commit = n.get("commit")
@@ -638,15 +638,19 @@ def _checks(
         # required checks (Codex's review of f37d0c7). Only GitHub Actions suites have a
         # workflow run; another app's checks are taken as GitHub gives them (de9a6fb).
         if app == "github-actions":
+            if "workflowRun" not in suite:
+                complete = False  # left out: not known, like a missing app (audit of 0585599)
+                continue
             workflow_run = suite.get("workflowRun")
             event = workflow_run.get("event") if isinstance(workflow_run, dict) else None
             if workflow_run is not None and not isinstance(event, str):
                 complete = False  # wrongly shaped: not known (audit of 42a3721)
                 continue
-            if workflow_run is None and _holds_required(suite, required):
-                # Its event can't be told, and it holds a required check: not known, never
-                # skipped (audit of 28009de).
-                complete = False
+            if workflow_run is None:
+                # Its event can't be told: skipped only if its runs are provably whole and hold
+                # no required check (audits of 28009de and 0585599).
+                if not _provably_no_required(suite, required):
+                    complete = False
                 continue
             if event not in CHECK_EVENTS:
                 continue
@@ -704,11 +708,17 @@ def _checks(
     return out + cautions, complete and statuses_complete
 
 
-def _holds_required(suite: dict, required: tuple[str, ...]) -> bool:
+def _provably_no_required(suite: dict, required: tuple[str, ...]) -> bool:
+    """Whether a suite's run list is readable whole and names no required check."""
     runs = suite.get("checkRuns")
-    nodes = runs.get("nodes") if isinstance(runs, dict) else None
-    return isinstance(nodes, list) and any(
-        isinstance(r, dict) and r.get("name") in required for r in nodes
+    if not isinstance(runs, dict):
+        return False
+    nodes, total = runs.get("nodes"), runs.get("totalCount")
+    if not isinstance(nodes, list) or type(total) is not int or total > len(nodes):
+        return False
+    return all(
+        isinstance(r, dict) and isinstance(r.get("name"), str) and r["name"] not in required
+        for r in nodes
     )
 
 
@@ -975,9 +985,9 @@ def _listing(
     return list(dict.fromkeys(numbers)), more_open or cursor is not None
 
 
-# Failures that may pass on asking again: a lone pull request is asked for in full once more
-# before it is read lite, and a repository read lite only because of these fails the refresh
-# rather than replace known results (Fable's pre-review of 4945de9).
+# Failures that may pass on asking again: a pull request is asked for in full once more before
+# it is read lite (Fable's pre-review of 4945de9). Lite reads are then shown, with their
+# "not known" parts raising alerts (audit of 28009de).
 TRANSIENT = HEAVY - {"too-large", "too-heavy"}
 
 

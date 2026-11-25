@@ -94,7 +94,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from fnmatch import fnmatchcase
@@ -724,59 +724,33 @@ def _checks(task: _Task, head: str, flags: set[Flag]) -> bool:
 DECISIVE = ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")
 
 
-def _dismissal_unplaced(task: _Task, until: datetime) -> bool:
-    """For a merge: whether a clinician's latest decisive review up to it now shows as
-    dismissed. GitHub gives the current state with the submission time, so it may have been a
-    changes request dismissed only after the merge, which blocked the merge when it happened
-    (Codex's review of 0e2139f). A dismissed review is never an approval, so this can only make
-    an approval uncertain, never a missing one."""
-    latest: dict[str, list[_Review]] = {}
-    for rv in task.pr.reviews or ():
-        if rv.is_bot or rv.user not in task.clinicians or rv.state not in DECISIVE:
-            continue
-        if rv.at <= until:
-            latest.setdefault(rv.user, []).append(rv)
-    # Each clinician's latest decisive review of the head too: the approval gate reads both,
-    # so a dismissal in either may hide a changes request in force at the merge (audit of
-    # 28009de: a later approval of another commit masked a dismissed one of the head).
-    head_latest: dict[str, list[_Review]] = {}
-    for reviews in latest.values():
-        for rv in reviews:
-            if rv.commit == task.pr.head:
-                head_latest.setdefault(rv.user, []).append(rv)
-    for group in (latest, head_latest):
-        for reviews in group.values():
-            at = max(rv.at for rv in reviews)
-            if any(rv.state == "DISMISSED" for rv in reviews if rv.at == at):
-                return True
-    return False
+def _merge_approval(task: _Task, until: datetime) -> str:
+    """A merge's clinician approval: "approved", "missing" or "not known". GitHub gives a
+    review's current state with its submission time, so a review that now shows as dismissed
+    may, at the merge, have been an approval, a changes request, or already dismissed. The
+    approval gate is decided both ways: with every such review as a changes request (the
+    least approving), and as an approval (the most). Both approve: approved. Neither does:
+    certainly missing. Otherwise not known (audits of 42a3721, 28009de and 0585599: rules for
+    single cases each left a combination out)."""
 
+    def judged(state: str) -> bool:
+        reviews = tuple(
+            replace(rv, state=state)
+            if rv.state == "DISMISSED"
+            and not rv.is_bot
+            and rv.user in task.clinicians
+            and rv.at <= until
+            else rv
+            for rv in task.pr.reviews or ()
+        )
+        return _clinician_approved(
+            replace(task, pr=replace(task.pr, reviews=reviews)), task.pr.head, until
+        )
 
-def _head_dismissal_unplaced(task: _Task, head: str, until: datetime) -> bool:
-    """For a merge with no approval now: whether one may have existed at the merge. True when
-    a clinician's latest decisive review of the head, up to the merge, now shows as dismissed
-    (it may have been an approval dismissed later), unless a clinician's changes request was in
-    force at the merge, which blocks whatever the dismissed review was."""
-    latest_any: dict[str, list[_Review]] = {}
-    latest_head: dict[str, list[_Review]] = {}
-    for rv in task.pr.reviews or ():
-        if rv.is_bot or rv.user not in task.clinicians or rv.state not in DECISIVE:
-            continue
-        if rv.at > until:
-            continue
-        latest_any.setdefault(rv.user, []).append(rv)
-        if rv.commit == head:
-            latest_head.setdefault(rv.user, []).append(rv)
-
-    def at_latest(reviews: list[_Review]) -> list[_Review]:
-        at = max(rv.at for rv in reviews)
-        return [rv for rv in reviews if rv.at == at]
-
-    if any(
-        rv.state == "CHANGES_REQUESTED" for revs in latest_any.values() for rv in at_latest(revs)
-    ):
-        return False
-    return any(rv.state == "DISMISSED" for revs in latest_head.values() for rv in at_latest(revs))
+    least, most = judged("CHANGES_REQUESTED"), judged("APPROVED")
+    if least:
+        return "approved"
+    return "not known" if most else "missing"
 
 
 def _clinician_approved(task: _Task, head: str, until: datetime | None = None) -> bool:
@@ -961,14 +935,9 @@ def derive(raw: Any) -> TaskStatus:
             problems.append("the merged commit never passed review")
         if maybe_clinical and pr.reviews is None:
             flags.add(Flag.REVIEWS_UNVERIFIED)  # approval not known: no claim either way
-        elif Flag.CLINICAL in flags and _clinician_approved(task, pr.head, merged_at):
-            if _dismissal_unplaced(task, merged_at):
-                flags.add(Flag.DISMISSAL_UNPLACED)  # approved, unless a dismissal came late
-            else:
-                flags.add(Flag.CLINICIAN_APPROVED)
-        elif Flag.CLINICAL in flags and _head_dismissal_unplaced(task, pr.head, merged_at):
-            # No approval now, but a dismissed review of the head may have been one at the
-            # merge, and no changes request in force rules it out (audit of 42a3721).
+        elif Flag.CLINICAL in flags and _merge_approval(task, merged_at) == "approved":
+            flags.add(Flag.CLINICIAN_APPROVED)
+        elif Flag.CLINICAL in flags and _merge_approval(task, merged_at) == "not known":
             flags.add(Flag.DISMISSAL_UNPLACED)
         elif Flag.CLINICAL in flags:
             flags.add(Flag.MERGED_WITHOUT_CLINICIAN)

@@ -2225,6 +2225,67 @@ class Refresh(Base):
         )
         self.assertEqual(state.state, tasks.State.UNSAFE)
 
+    # ------------------------------------------------ audit of 0585599
+
+    def test_a_review_after_the_merge_is_skipped_before_its_author_is_checked(self):
+        before = (NOW - timedelta(days=2)).isoformat()
+        later = (NOW - timedelta(hours=1)).isoformat()
+        for author in (
+            {"__typename": "User", "login": "someone-else"},
+            {"__typename": "Bot", "login": OWNER},
+            {"__typename": "User"},
+        ):
+            with self.subTest(author=author):
+                late = review_node(state="COMMENTED", at=later)
+                late["author"] = author
+                request = review_node(state="CHANGES_REQUESTED", at=before)
+                item, state = self.merged_clinical([request, late])
+                self.assertIsNotNone(item["task"]["pull_request"]["reviews"])
+                self.assertEqual(state.state, tasks.State.UNSAFE)
+
+    def test_a_suite_without_a_workflow_run_is_skipped_only_when_provably_harmless(self):
+        cases = {
+            "cut off": {"totalCount": 5, "nodes": []},
+            "odd name": {
+                "totalCount": 1,
+                "nodes": [{"name": None, "status": "COMPLETED", "conclusion": "FAILURE"}],
+            },
+            "no runs": None,
+            "odd run": {"totalCount": 1, "nodes": [7]},
+        }
+        for name, runs in list(cases.items()) + [("no key", "drop")]:
+            with self.subTest(name):
+                node = pr_node(1, issue=issue_node(10))
+                commit = node["commits"]["nodes"][0]["commit"]
+                extra = {"app": {"slug": "github-actions"}, "workflowRun": None, "checkRuns": runs}
+                if runs == "drop":
+                    extra = {
+                        "app": {"slug": "github-actions"},
+                        "checkRuns": {"totalCount": 0, "nodes": []},
+                    }
+                commit["checkSuites"]["nodes"].append(extra)
+                commit["checkSuites"]["totalCount"] = 2
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                self.assertIs(item["task"]["pull_request"].get("checks_complete"), False)
+        # Provably whole and holding no required check: skipped, the rest still passes.
+        node = pr_node(1, issue=issue_node(10))
+        commit = node["commits"]["nodes"][0]["commit"]
+        commit["checkSuites"]["nodes"].append(
+            {
+                "app": {"slug": "github-actions"},
+                "workflowRun": None,
+                "checkRuns": {
+                    "totalCount": 1,
+                    "nodes": [{"name": "deploy", "status": "COMPLETED", "conclusion": "FAILURE"}],
+                },
+            }
+        )
+        commit["checkSuites"]["totalCount"] = 2
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
     def test_a_clinical_path_of_any_length_is_clinical(self):
         # Finding 6.
         item, state = self.merged_clinical(

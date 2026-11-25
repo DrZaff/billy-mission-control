@@ -1592,3 +1592,27 @@ class AuditOf28009de(unittest.TestCase):
         s = derive(value)
         self.assertNotIn(Flag.CLINICIAN_APPROVED, s.flags)
         self.assertIn(Flag.DISMISSAL_UNPLACED, s.flags)
+
+
+class AuditOf0585599(unittest.TestCase):
+    def test_a_certain_missing_approval_is_unsafe_whatever_was_dismissed(self):
+        value = task(
+            clinicians=[CLINICIAN, "clinician-two"],
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(
+                state="closed",
+                merged=True,
+                merged_by=OWNER,
+                merged_at=t(30),
+                files=("evidence/a.json",),
+                reviews=[
+                    approval(state="CHANGES_REQUESTED", minute=6),
+                    approval(sha=B, minute=8),
+                    approval("clinician-two", state="DISMISSED", minute=8),
+                ],
+            ),
+        )
+        s = derive(value)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.MERGED_WITHOUT_CLINICIAN, s.flags)
+        self.assertNotIn(Flag.DISMISSAL_UNPLACED, s.flags)
