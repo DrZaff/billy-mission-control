@@ -64,8 +64,10 @@ clinical_paths may be an explicit empty list.
                                "conclusion": "success" | "failure" | ... | null}] | null}
                    checks null means "not known" (A5a: the fetcher can't match GitHub's
                    verdict once a PR is merged or closed). It is never read as passed: an
-                   open PR's checks then count as not passed, and a merged PR is judged on
-                   everything else, with CHECKS_UNVERIFIED instead of a checks verdict.
+                   open PR's checks then count as not passed (CHECKS_UNVERIFIED). A merged
+                   PR's checks are never judged, known or not (owner's decision, 2026-11-25).
+                   "checks_complete": false (optional) marks a list known to be partial: a
+                   failure in it still fails, but it never passes (CHECKS_UNVERIFIED).
                    files and reviews may be null in the same way (A5a: GitHub's answer was
                    incomplete, such as a renamed file). Unknown files may be clinical, so an
                    open PR waits for a clinician (FILES_UNVERIFIED); unknown reviews give no
@@ -81,8 +83,8 @@ clinical_paths may be an explicit empty list.
     The task's "issue" may be null: no readable, authorised issue is linked (none, several,
     one in another repository, or one whose events couldn't be read; issue #15, decision
     A5-2). An open PR then shows as NOT_LINKED, an alert, rather than UNSAFE; a merged one is
-    still judged on everything else, with ISSUE_NOT_LINKED instead of a claim that the work
-    was never authorised.
+    still judged on everything else, with AUTHORIZATION_UNVERIFIED (a calm note) instead of a
+    claim that the work was never authorised.
 
 Example, as a phase A3 screen would use it:
 
@@ -124,7 +126,9 @@ class State(StrEnum):
     AWAITING_OWNER = (
         "awaiting_owner"  # ready for the owner's decision (merge, or fix rounds used up)
     )
-    MERGED = "merged"  # merged by the owner, after a passing review of that exact commit
+    # Merged by the owner, after a passing review of that exact commit (or with Billy's records
+    # unread, RUNS_UNVERIFIED, when the review isn't shown either way).
+    MERGED = "merged"
     BLOCKED = "blocked"  # the agent asked a question
     FAILED = "failed"  # the work failed, with a reason
     PAUSED = "paused"  # the stop switch is on
@@ -138,7 +142,7 @@ class Flag(StrEnum):
     INVALID_INPUT = "invalid_input"
     CONFLICTING_RECORDS = "conflicting_records"
     LABEL_WITHOUT_OWNER = "label_without_owner"  # agent:ready applied by someone else
-    UNAUTHORIZED_WORK = "unauthorized_work"  # runs or a PR with no owner authorisation
+    UNAUTHORIZED_WORK = "unauthorized_work"  # runs or a PR with no owner authorisation in effect
     WRONG_REPO_RECORD = "wrong_repo_record"  # a run record for another repository (ignored)
     WRONG_BRANCH_RECORD = "wrong_branch_record"  # a run record for another branch (ignored)
     STALE_REVIEW = "stale_review"  # a review exists, but for an older commit
@@ -163,7 +167,8 @@ class Flag(StrEnum):
     # Opened from a fork: Billy never publishes from one, whatever the PR's issue link says
     # (Fable's pre-review of 8152df0: a stranger's "Fixes #N" PR looked like Billy's work).
     FROM_FORK = "from_fork"
-    # The owner authorised the task, then removed agent:ready (with UNAUTHORIZED_WORK).
+    # The owner authorised the task, then it was withdrawn: agent:ready removed, or (for a
+    # merge) the issue closed before it (with UNAUTHORIZED_WORK).
     AUTHORIZATION_WITHDRAWN = "authorization_withdrawn"
     # A merge's clinician approval can't be judged: a clinician's review was dismissed, and
     # GitHub doesn't say when (before or after the merge). The reviews were read.
@@ -661,8 +666,9 @@ def _parse_runs(value: Any) -> tuple[_Run, ...] | None:
 def _authorization(
     task: _Task, flags: set[Flag], until: datetime | None = None
 ) -> tuple[datetime | None, datetime | None, bool]:
-    """(since, last): when the owner's current authorisation began, and the owner's latest
-    authorising action, or (None, None) if the work is not authorised now.
+    """(since, last, withdrawn): when the owner's current authorisation began, the owner's
+    latest authorising action, or (None, None) if the work is not authorised now; and whether
+    an authorisation existed and was withdrawn.
 
     Only the owner's own "labeled agent:ready" or "authorized" event counts. Authorising again
     while already authorised keeps the start (so earlier work in the same authorisation still
@@ -962,7 +968,9 @@ def derive(raw: Any) -> TaskStatus:
             # Its reviews disagree: not "never passed", but no pass either (Codex's review of
             # 84df535). CONFLICTING_RECORDS is already flagged.
             problems.append("the merged commit's reviews disagree")
-        elif runs_known and not reviewed:  # records not read: no claim either way
+        elif runs_known and not reviewed and not (since is None and task.issue_known):
+            # Records not read, or outside any authorisation (none, or withdrawn before the
+            # merge), so not this task's: no claim either way (Fable's audit of b5ac6dd).
             flags.add(Flag.MERGED_UNREVIEWED)
             problems.append("the merged commit never passed review")
         if maybe_clinical and pr.reviews is None:
@@ -1055,8 +1063,8 @@ def derive(raw: Any) -> TaskStatus:
     if issue_closed:
         return status(
             State.NOT_LINKED,
-            "Its linked issue is closed, which ends your authorisation: reopen the issue to go "
-            "on, or close the pull request.",
+            "Its linked issue is closed, so no authorisation is in effect: reopen the issue to "
+            "go on, or close the pull request.",
             head,
         )
     if pr and pr.open and pr.from_fork:

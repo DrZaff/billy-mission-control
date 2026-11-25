@@ -700,3 +700,34 @@ class CodexReviewOfCae7658Screens(unittest.TestCase):
         state, body = detail(raw)
         self.assertIn("not known: the files couldn&#x27;t all be read", body)
         self.assertNotIn("needed, later", body)
+
+
+class FableAuditOfB5ac6ddScreens(unittest.TestCase):
+    def merged_entry(self):
+        raw = entry("example-site-931")
+        for r in raw["task"]["runs"]:
+            r.pop("files", None)
+        return raw
+
+    def test_a_withdrawn_merge_reads_consistently(self):
+        raw = self.merged_entry()
+        raw["task"]["issue"]["state"] = "closed"
+        raw["task"]["issue"]["timeline"].append(
+            {"event": "closed", "actor": "example-owner", "at": "2026-11-14T16:30:00+00:00"}
+        )
+        state, body = detail(raw)
+        self.assertEqual(state, State.UNSAFE)
+        self.assertNotIn("never", body)  # neither "never authorised" nor "never passed review"
+        self.assertIn("withdrawn: agent:ready removed, or the issue closed before the merge", body)
+        self.assertIn("not judged: no authorisation covers Billy&#x27;s records", body)
+
+    def test_an_approval_shows_even_when_the_files_may_be_clinical(self):
+        raw = self.merged_entry()
+        pull = raw["task"]["pull_request"]
+        pull.update(state="open", merged=False, merged_by=None, files=["site/a.html"])
+        pull.pop("merged_at")
+        pull["files_complete"] = False
+        state, body = detail(raw)
+        self.assertIn("A clinician approved this commit", body)
+        self.assertIn("approved this commit</span>", body)
+        self.assertNotIn("approval of the final commit needed", body)

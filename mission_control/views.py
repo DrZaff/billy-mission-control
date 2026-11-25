@@ -38,7 +38,7 @@ FLAG_WORDS = {
     Flag.INVALID_INPUT: "The task's data is invalid",
     Flag.CONFLICTING_RECORDS: "Two reviews of the same commit disagree",
     Flag.LABEL_WITHOUT_OWNER: "agent:ready was added by someone other than you",
-    Flag.UNAUTHORIZED_WORK: "Work exists that you never authorised",
+    Flag.UNAUTHORIZED_WORK: "Work exists without your authorisation in effect",
     Flag.WRONG_REPO_RECORD: "A record for another repository was ignored",
     Flag.WRONG_BRANCH_RECORD: "A record for another branch was ignored",
     Flag.RECORD_BEFORE_AUTHORIZATION: "A record from before your authorisation was ignored",
@@ -60,7 +60,10 @@ FLAG_WORDS = {
         "A clinician's review can't be placed against the merge (dismissed, and GitHub doesn't"
         " say when, or in the merge's own second): approval not known"
     ),
-    Flag.AUTHORIZATION_WITHDRAWN: "You authorised this task, then removed agent:ready",
+    Flag.AUTHORIZATION_WITHDRAWN: (
+        "You authorised this task, then that was withdrawn (agent:ready removed, or the issue"
+        " closed before the merge)"
+    ),
     Flag.AUTHORIZATION_UNVERIFIED: "Your authorisation of this merge can't be verified here",
     Flag.UNAUTHORIZED_MERGE: "Merged by someone other than you",
     Flag.MERGED_UNREVIEWED: "The merged commit never passed review",
@@ -126,7 +129,7 @@ def clinician_approved(status: TaskStatus) -> bool:
     """Whether the model checked and found a clinician's approval of the head. Only its own
     flag says so, never a guess from the state (Codex's review of 877fd21: an approved open PR
     whose run records are unread showed approval as still needed)."""
-    return Flag.CLINICAL in status.flags and Flag.CLINICIAN_APPROVED in status.flags
+    return Flag.CLINICIAN_APPROVED in status.flags  # also for files that may be clinical
 
 
 def needs_you(status: TaskStatus) -> bool:
@@ -298,7 +301,7 @@ def _path(entry: Entry) -> str:
     # Each row claims only what the model established. A "done" mark needs a state the model
     # reaches only after that gate passed; anything else says "not shown" rather than guess.
     if Flag.AUTHORIZATION_WITHDRAWN in flags:
-        authorised = ("!", "withdrawn: agent:ready was removed")
+        authorised = ("!", "withdrawn: agent:ready removed, or the issue closed before the merge")
     elif Flag.UNAUTHORIZED_WORK in flags:
         authorised = ("!", "no")
     elif state is State.PROPOSED:
@@ -306,7 +309,7 @@ def _path(entry: Entry) -> str:
     elif Flag.AUTHORIZATION_UNVERIFIED in flags:
         authorised = ("?", "not verifiable: GitHub shows only the current issue link")
     elif Flag.ISSUE_NOT_LINKED in flags:
-        # A merged PR with no readable linked issue (Codex's review of 72607b3).
+        # An open PR with no readable linked issue (Codex's review of 72607b3).
         authorised = ("?", "not shown: no linked issue to show it")
     elif state in AUTHORISED_STATES:
         authorised = ("done", "yes, by the owner")
@@ -331,6 +334,9 @@ def _path(entry: Entry) -> str:
         review = ("!", "blocking problems found")
     elif Flag.MERGED_UNREVIEWED in flags:
         review = ("!", "the merged commit never passed review")
+    elif Flag.UNAUTHORIZED_WORK in flags:
+        # Records outside any authorisation are not this task's: no claim (audit of b5ac6dd).
+        review = ("?", "not judged: no authorisation covers Billy's records")
     elif Flag.STALE_REVIEW in flags:
         review = ("!", "only for an older commit")
     elif state is State.REVIEWING:
