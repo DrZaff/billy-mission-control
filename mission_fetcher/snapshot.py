@@ -305,13 +305,13 @@ PIECES = {
         totalCount
         nodes {
           __typename
-          ... on LabeledEvent { createdAt actor { __typename login } label { name } }
-          ... on UnlabeledEvent { createdAt actor { __typename login } label { name } }
+          ... on LabeledEvent { id createdAt actor { __typename login } label { name } }
+          ... on UnlabeledEvent { id createdAt actor { __typename login } label { name } }
           ... on ClosedEvent {
-            createdAt actor { __typename login }
+            id createdAt actor { __typename login }
             closer { __typename ... on PullRequest { number repository { nameWithOwner } } }
           }
-          ... on ReopenedEvent { createdAt actor { __typename login } }
+          ... on ReopenedEvent { id createdAt actor { __typename login } }
         }
       }
     }
@@ -331,10 +331,10 @@ PIECES = {
       oid status { contexts { context state createdAt } } checkSuites(first: $suites) {
       totalCount
       nodes {
-        app { slug }
+        id app { slug }
         workflowRun { event }
         checkRuns(first: $runs, filterBy: {checkType: LATEST}) {
-          totalCount nodes { name status conclusion completedAt }
+          totalCount nodes { id name status conclusion completedAt }
         }
       }
     } } }
@@ -356,7 +356,7 @@ def _review_fields(clinicians: tuple[str, ...]) -> str:
         parts.append(
             f"\n  rv{i}: reviews(author: {json.dumps(login)}, last: {MAX_REVIEWS}) {{"
             "\n    totalCount"
-            "\n    nodes { state submittedAt author { __typename login } commit { oid } }"
+            "\n    nodes { id state submittedAt author { __typename login } commit { oid } }"
             "\n  }"
         )
     return "".join(parts)
@@ -420,11 +420,18 @@ def _fresh(stale_at: datetime, now: datetime) -> bool:
 
 
 def _distinct(nodes: list) -> bool:
-    """Whether no row repeats another exactly. A repeated row may stand where GitHub omitted one
-    (a changes request, a label's removal, a failing check), so a counted list with a repeat
-    is never whole (Codex's review of caf31c9)."""
-    seen = {json.dumps(n, sort_keys=True) for n in nodes}
-    return len(seen) == len(nodes)
+    """Whether no row repeats another. A repeated row may stand where GitHub omitted one (a
+    changes request, a label's removal, a failing check), so a counted list with a repeat is
+    never whole (Codex's review of caf31c9). Rows are told apart by GitHub's own node id, so
+    two real rows that look alike are never taken for a repeat (Codex's review of 0dc0f8b); a
+    row without one is compared whole."""
+
+    def key(n: Any) -> str:
+        if isinstance(n, dict) and isinstance(n.get("id"), str):
+            return "id:" + n["id"]
+        return "row:" + json.dumps(n, sort_keys=True)
+
+    return len({key(n) for n in nodes}) == len(nodes)
 
 
 def _whole(conn: dict, nodes: list, cap: int) -> bool:
@@ -853,6 +860,8 @@ def _provably_harmless_runs(suite: dict, required: tuple[str, ...]) -> bool:
     nodes, total = runs.get("nodes"), runs.get("totalCount")
     if not isinstance(nodes, list) or type(total) is not int or total != len(nodes):
         return False
+    if not _distinct(nodes):  # a repeat may stand for an omitted run (Codex's review of 0dc0f8b)
+        return False
     for r in nodes:
         if not isinstance(r, dict) or not isinstance(r.get("name"), str):
             return False
@@ -871,6 +880,8 @@ def _provably_no_required(suite: dict, required: tuple[str, ...]) -> bool:
         return False
     nodes, total = runs.get("nodes"), runs.get("totalCount")
     if not isinstance(nodes, list) or type(total) is not int or total != len(nodes):
+        return False
+    if not _distinct(nodes):  # a repeat may stand for an omitted run (Codex's review of 0dc0f8b)
         return False
     return all(
         isinstance(r, dict)

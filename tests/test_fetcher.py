@@ -3793,6 +3793,54 @@ class CodexReviewOfCaf31c9(CodexReviewOf099ef9b):
                 self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
 
 
+class CodexReviewOf0dc0f8b(CodexReviewOf099ef9b):
+    def suite_with(self, workflow_run, runs):
+        node = pr_node(1, issue=issue_node(10))
+        commit = node["commits"]["nodes"][0]["commit"]
+        commit["checkSuites"]["nodes"].append(
+            {
+                "app": {"slug": "github-actions"},
+                "workflowRun": workflow_run,
+                "checkRuns": {"totalCount": len(runs), "nodes": runs},
+            }
+        )
+        commit["checkSuites"]["totalCount"] = 2
+        self.fake.prs[REPO_A]["open"][0] = node
+        return self.run_refresh()["items"][0]
+
+    def test_a_repeat_never_makes_a_suite_provably_harmless(self):
+        # Blocking: the two filters trusted a matching count with a repeated row.
+        lint = {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"}
+        other = {"name": "other", "status": "COMPLETED", "conclusion": "SUCCESS"}
+        for workflow_run, runs in (
+            ({"event": "workflow_dispatch"}, [lint, lint]),
+            (None, [other, other]),
+        ):
+            with self.subTest(workflow_run=workflow_run):
+                item = self.suite_with(workflow_run, runs)
+                self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+
+    def test_rows_are_told_apart_by_githubs_id(self):
+        # Should fix: two real reviews that look alike were taken for a repeat.
+        first = dict(review_node(OWNER, "APPROVED"), id="R1")
+        second = dict(review_node(OWNER, "APPROVED"), id="R2")
+        node = pr_node(1, issue=issue_node(10), files=("evidence/a.json",), reviews=(first, second))
+        self.fake.prs[REPO_A]["open"][0] = node
+        self.assertIsNotNone(self.run_refresh()["items"][0]["task"]["pull_request"]["reviews"])
+        # The same id twice is a repeat, however the rows differ.
+        changed = dict(second, id="R1", state="CHANGES_REQUESTED")
+        node = pr_node(
+            1, issue=issue_node(10), files=("evidence/a.json",), reviews=(first, changed)
+        )
+        self.fake.prs[REPO_A]["open"][0] = node
+        self.assertIsNone(self.run_refresh()["items"][0]["task"]["pull_request"]["reviews"])
+
+    def test_the_queries_ask_for_each_rows_id(self):
+        query = snapshot.detail_query([1], frozenset(), (OWNER,))
+        for piece in ("nodes { id state", "id app { slug }", "nodes { id name", "{ id createdAt"):
+            self.assertIn(piece, query)
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now
