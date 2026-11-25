@@ -625,3 +625,13 @@ class AuditOf42a3721Screens(unittest.TestCase):
         self.assertNotIn("not yet", body)
         self.assertNotIn("needed, later", body)
         self.assertIn("not judged: closed", body)
+
+
+class AuditOf80e8fb3Screens(unittest.TestCase):
+    def test_no_command_is_offered_when_billys_records_are_not_read(self):
+        raw = entry("example-site-901")
+        raw["task"]["runs"] = None
+        demo = load(json.dumps(with_tasks(raw)))
+        e = demo.entries[0]
+        self.assertIn(Flag.RUNS_UNVERIFIED, e.status.flags)
+        self.assertIsNone(demo.command(e))

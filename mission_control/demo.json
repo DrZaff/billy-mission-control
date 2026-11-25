@@ -2489,7 +2489,7 @@
     "max_fix_rounds": 1,
     "paused": false,
     "issue": {
-     "number": 919,
+     "number": 931,
      "state": "open",
      "timeline": [
       {
@@ -2501,15 +2501,15 @@
      ]
     },
     "branch": {
-     "name": "claude/evidence-table",
-     "head": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12"
+     "name": "claude/evidence-corrected",
+     "head": "abababababababababababababababababababab"
     },
     "runs": [
      {
       "step": "build",
       "repo": "example-org/example-site",
-      "branch": "claude/evidence-table",
-      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "branch": "claude/evidence-corrected",
+      "sha": "abababababababababababababababababababab",
       "at": "2026-11-14T15:50:00+00:00",
       "status": "finished",
       "files": [
@@ -2519,8 +2519,8 @@
      {
       "step": "review",
       "repo": "example-org/example-site",
-      "branch": "claude/evidence-table",
-      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "branch": "claude/evidence-corrected",
+      "sha": "abababababababababababababababababababab",
       "at": "2026-11-14T16:00:00+00:00",
       "status": "finished",
       "verdict": "no_blocking_findings",
@@ -2533,10 +2533,10 @@
      {
       "step": "publish",
       "repo": "example-org/example-site",
-      "branch": "agent/pub-c0ffee1",
-      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "branch": "agent/pub-abababa",
+      "sha": "abababababababababababababababababababab",
       "at": "2026-11-14T16:05:00+00:00",
-      "pr": 920
+      "pr": 931
      }
     ],
     "pull_request": {
@@ -2545,7 +2545,7 @@
      "draft": true,
      "merged": true,
      "merged_by": "example-owner",
-     "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+     "head_sha": "abababababababababababababababababababab",
      "files": [
       "evidence/ai-vs-human.json"
      ],
@@ -2554,20 +2554,20 @@
        "user": "example-clinician",
        "user_type": "User",
        "state": "APPROVED",
-       "commit_id": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "commit_id": "abababababababababababababababababababab",
        "at": "2026-11-14T16:35:00+00:00"
       }
      ],
      "checks": [
       {
        "name": "lint",
-       "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "head_sha": "abababababababababababababababababababab",
        "status": "completed",
        "conclusion": "success"
       },
       {
        "name": "test",
-       "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "head_sha": "abababababababababababababababababababab",
        "status": "completed",
        "conclusion": "success"
       }
@@ -2653,7 +2653,7 @@
     "max_fix_rounds": 1,
     "paused": false,
     "issue": {
-     "number": 921,
+     "number": 933,
      "state": "open",
      "timeline": [
       {
@@ -2671,23 +2671,23 @@
      ]
     },
     "branch": {
-     "name": "claude/about-forward",
-     "head": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55"
+     "name": "claude/glossary-page",
+     "head": "efefefefefefefefefefefefefefefefefefefef"
     },
     "runs": [
      {
       "step": "build",
       "repo": "example-org/example-site",
-      "branch": "claude/about-forward",
-      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "branch": "claude/glossary-page",
+      "sha": "efefefefefefefefefefefefefefefefefefefef",
       "at": "2026-11-14T16:10:00+00:00",
       "status": "finished"
      },
      {
       "step": "review",
       "repo": "example-org/example-site",
-      "branch": "claude/about-forward",
-      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "branch": "claude/glossary-page",
+      "sha": "efefefefefefefefefefefefefefefefefefefef",
       "at": "2026-11-14T16:20:00+00:00",
       "status": "finished",
       "verdict": "no_blocking_findings",
@@ -2700,10 +2700,10 @@
      {
       "step": "publish",
       "repo": "example-org/example-site",
-      "branch": "agent/pub-d00d1e5",
-      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "branch": "agent/pub-efefefe",
+      "sha": "efefefefefefefefefefefefefefefefefefefef",
       "at": "2026-11-14T16:25:00+00:00",
-      "pr": 922
+      "pr": 933
      }
     ],
     "pull_request": {
@@ -2712,7 +2712,7 @@
      "draft": true,
      "merged": false,
      "merged_by": null,
-     "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+     "head_sha": "efefefefefefefefefefefefefefefefefefefef",
      "files": [
       "site/footer.html"
      ],
@@ -2720,13 +2720,13 @@
      "checks": [
       {
        "name": "lint",
-       "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+       "head_sha": "efefefefefefefefefefefefefefefefefefefef",
        "status": "completed",
        "conclusion": "success"
       },
       {
        "name": "test",
-       "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+       "head_sha": "efefefefefefefefefefefefefefefefefefefef",
        "status": "completed",
        "conclusion": "success"
       }
@@ -2736,7 +2736,7 @@
    }
   },
   {
-   "id": "example-tools-70",
+   "id": "example-site-937",
    "title": "Settings copy (checks couldn't be read)",
    "risk": "low",
    "task": {
@@ -2757,7 +2757,7 @@
     "max_fix_rounds": 1,
     "paused": false,
     "issue": {
-     "number": 901,
+     "number": 937,
      "state": "open",
      "timeline": [
       {
@@ -2769,23 +2769,23 @@
      ]
     },
     "branch": {
-     "name": "claude/footer-games-link",
-     "head": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+     "name": "claude/settings-copy",
+     "head": "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7"
     },
     "runs": [
      {
       "step": "build",
       "repo": "example-org/example-site",
-      "branch": "claude/footer-games-link",
-      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "branch": "claude/settings-copy",
+      "sha": "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
       "at": "2026-11-14T09:10:00+00:00",
       "status": "finished"
      },
      {
       "step": "review",
       "repo": "example-org/example-site",
-      "branch": "claude/footer-games-link",
-      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "branch": "claude/settings-copy",
+      "sha": "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
       "at": "2026-11-14T09:20:00+00:00",
       "status": "finished",
       "verdict": "no_blocking_findings",
@@ -2798,19 +2798,19 @@
      {
       "step": "publish",
       "repo": "example-org/example-site",
-      "branch": "agent/pub-a1b2c3d",
-      "sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "branch": "agent/pub-e7e7e7e",
+      "sha": "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
       "at": "2026-11-14T09:25:00+00:00",
-      "pr": 906
+      "pr": 937
      }
     ],
     "pull_request": {
-     "number": 906,
+     "number": 937,
      "state": "open",
      "draft": true,
      "merged": false,
      "merged_by": null,
-     "head_sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+     "head_sha": "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
      "files": [
       "site/footer.html"
      ],
@@ -2842,7 +2842,7 @@
     "max_fix_rounds": 1,
     "paused": false,
     "issue": {
-     "number": 919,
+     "number": 935,
      "state": "open",
      "timeline": [
       {
@@ -2854,15 +2854,15 @@
      ]
     },
     "branch": {
-     "name": "claude/evidence-table",
-     "head": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12"
+     "name": "claude/evidence-dismissed",
+     "head": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
     },
     "runs": [
      {
       "step": "build",
       "repo": "example-org/example-site",
-      "branch": "claude/evidence-table",
-      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "branch": "claude/evidence-dismissed",
+      "sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
       "at": "2026-11-14T15:50:00+00:00",
       "status": "finished",
       "files": [
@@ -2872,8 +2872,8 @@
      {
       "step": "review",
       "repo": "example-org/example-site",
-      "branch": "claude/evidence-table",
-      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "branch": "claude/evidence-dismissed",
+      "sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
       "at": "2026-11-14T16:00:00+00:00",
       "status": "finished",
       "verdict": "no_blocking_findings",
@@ -2886,10 +2886,10 @@
      {
       "step": "publish",
       "repo": "example-org/example-site",
-      "branch": "agent/pub-c0ffee1",
-      "sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+      "branch": "agent/pub-cdcdcdc",
+      "sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
       "at": "2026-11-14T16:05:00+00:00",
-      "pr": 920
+      "pr": 935
      }
     ],
     "pull_request": {
@@ -2898,7 +2898,7 @@
      "draft": true,
      "merged": true,
      "merged_by": "example-owner",
-     "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+     "head_sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
      "files": [
       "evidence/ai-vs-human.json"
      ],
@@ -2907,20 +2907,20 @@
        "user": "example-clinician",
        "user_type": "User",
        "state": "DISMISSED",
-       "commit_id": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
-       "at": "2026-11-14T07:05:00+00:00"
+       "commit_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+       "at": "2026-11-14T16:30:00+00:00"
       }
      ],
      "checks": [
       {
        "name": "lint",
-       "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "head_sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
        "status": "completed",
        "conclusion": "success"
       },
       {
        "name": "test",
-       "head_sha": "c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12",
+       "head_sha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
        "status": "completed",
        "conclusion": "success"
       }

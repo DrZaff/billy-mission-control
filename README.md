@@ -60,7 +60,7 @@ python3 -m mission_fetcher selfcheck [--github] --config FILE # start-up checks;
 python3 -m mission_fetcher fetch-now --config FILE            # one refresh, for installing
 ```
 
-The only part with network access: its own package and account, the only one that can read the read-only GitHub App's key. It reads `api.github.com` only, checks on every refresh that the App is still read-only and limited to the configured repositories, and writes a snapshot that only the web app's account can read. The web app asks it to refresh over a local socket, at most once a minute, and never imports it. `fetcher.example.json` shows its config's shape.
+The only part with network access: its own package and account, the only one that can read the read-only GitHub App's key. It reads `api.github.com` only, checks on every refresh that the App is still read-only and limited to the configured repositories, and writes a snapshot that only the web app's account can read. The web app will ask it to refresh over a local socket (phase A5b), at most once a minute, and never imports it. `fetcher.example.json` shows its config's shape.
 
 CI (`.github/workflows/ci.yml`) runs the same two commands, as the **lint** and **test** checks, on every pull request.
 

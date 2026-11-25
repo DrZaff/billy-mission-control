@@ -55,6 +55,42 @@ def _is_from_name(name: str, path: Path) -> bool:
     return False
 
 
+# Every module the fetcher may import, by top-level name; http and ssl only in its github.py.
+FETCHER_ALLOWED_TOP = {
+    "__future__",
+    "argparse",
+    "base64",
+    "collections",
+    "contextvars",
+    "cryptography",
+    "dataclasses",
+    "datetime",
+    "errno",
+    "fcntl",
+    "fnmatch",
+    "grp",
+    "json",
+    "math",
+    "mission_control",
+    "os",
+    "pathlib",
+    "pwd",
+    "re",
+    "socket",
+    "stat",
+    "string",
+    "sys",
+    "threading",
+    "time",
+    "typing",
+    "unicodedata",
+}
+
+
+CONNECTION_NAMES = ("HTTPSConnection", "HTTPConnection")
+OUTBOUND_NAMES = ("create_connection", "get_server_certificate", "open_connection", "set_tunnel")
+
+
 class Workflows(unittest.TestCase):
     def test_there_is_a_workflow(self):
         self.assertTrue(WORKFLOWS)
@@ -115,7 +151,17 @@ class App(unittest.TestCase):
     def test_sockets_are_unix_only(self):
         # No internet address families, name lookups or connection helpers anywhere in the app,
         # or in the fetcher's own code (its one HTTPS client is http.client, in github.py).
-        banned = {"AF_INET", "AF_INET6", "create_connection", "getaddrinfo", "gethostbyname"}
+        banned = {
+            "AF_INET",
+            "AF_INET6",
+            "create_connection",
+            "getaddrinfo",
+            "gethostbyname",
+            # Other ways out, by name (audit of 80e8fb3).
+            "get_server_certificate",
+            "open_connection",
+            "set_tunnel",
+        }
         paths = list((ROOT / "mission_control").rglob("*.py"))
         paths += list((ROOT / "mission_fetcher").rglob("*.py"))
         for path in sorted(paths):
@@ -142,8 +188,16 @@ class App(unittest.TestCase):
         network = {"http.client", "ssl"}
         for path in sorted((ROOT / "mission_fetcher").rglob("*.py")):
             modules = imported_modules(path)
-            allowed = network if path.name == "github.py" else set()
+            # By its exact path: another file named github.py is no exception (audit of
+            # 80e8fb3).
+            github = path == ROOT / "mission_fetcher" / "github.py"
+            allowed = network if github else set()
             self.assertEqual((modules & FORBIDDEN_IMPORTS) - allowed, set(), path.name)
+            # And only modules on the fetcher's allow-list, so asyncio, xmlrpc and the like
+            # can't reach the network either.
+            permitted = FETCHER_ALLOWED_TOP | ({"http", "ssl"} if github else set())
+            tops = {m.split(".")[0] for m in modules}
+            self.assertEqual(tops - permitted, set(), str(path))
 
     def test_no_connection_or_socket_comes_in_another_way(self):
         # Audit of 24973b8: a from-imported HTTPSConnection, a second subclass, or `from socket
@@ -172,27 +226,30 @@ class App(unittest.TestCase):
                     # Nor a subclass of _Connection (audit of b69faa7).
                     self.assertNotIn("_Connection", bases, (path.name, node.name))
             # The connection classes' names appear only as _Connection's base and in its one
-            # TCP connect: never aliased or called anywhere else (audit of b69faa7).
-            allowed = {
-                "http.client.HTTPSConnection",  # _Connection's base
-                "http.client.HTTPConnection.connect",  # its TCP-only connect
-            }
+            # TCP connect: never aliased or used anywhere else (audits of b69faa7 and 80e8fb3:
+            # an alias such as `_Plain = http.client.HTTPSConnection` got past a rule that
+            # matched the text, not the place).
+            permitted: set[int] = set()
             for node in ast.walk(tree):
-                if isinstance(node, ast.Attribute) and node.attr in (
-                    "HTTPSConnection",
-                    "HTTPConnection",
+                if isinstance(node, ast.ClassDef) and node.name == "_Connection":
+                    permitted |= {id(n) for b in node.bases for n in ast.walk(b)}
+                if (
+                    isinstance(node, ast.Call)
+                    and ast.unparse(node.func) == "http.client.HTTPConnection.connect"
+                    and [ast.unparse(a) for a in node.args] == ["self"]
                 ):
-                    parents = [
-                        p
-                        for p in ast.walk(tree)
-                        for child in ast.iter_child_nodes(p)
-                        if child is node
-                    ]
-                    text = ast.unparse(parents[0]) if parents else ""
-                    use = ast.unparse(node)
-                    if use + ".connect" in text:
-                        use += ".connect"
-                    self.assertIn(use, allowed, (path.name, node.lineno))
+                    permitted |= {id(n) for n in ast.walk(node.func)}
+            for node in ast.walk(tree):
+                named = (isinstance(node, ast.Attribute) and node.attr in CONNECTION_NAMES) or (
+                    isinstance(node, ast.Name) and node.id in CONNECTION_NAMES
+                )
+                if named:
+                    self.assertIn(id(node), permitted, (path.name, node.lineno))
+                # Nor reached by name as text (getattr(http.client, "HTTPSConnection")).
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    self.assertNotIn(
+                        node.value, CONNECTION_NAMES + OUTBOUND_NAMES, (path.name, node.lineno)
+                    )
 
     def test_the_fetcher_talks_to_api_github_com_only(self):
         tree = ast.parse((ROOT / "mission_fetcher" / "github.py").read_text(encoding="utf-8"))

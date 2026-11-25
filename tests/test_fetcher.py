@@ -3658,3 +3658,158 @@ class AuditOfB69faa7(Base):
         reply = refresher.run(lambda: github_checks(self.cfg, client(fake)))
         self.assertEqual(reply, b"failed:selfcheck-failed+token-not-revoked\n")
         self.assertEqual(self.status()["reason"], "selfcheck-failed+token-not-revoked")
+
+
+class AuditOf80e8fb3(Base):
+    """Round 9: code that was right but that no test held in place, and one real gap."""
+
+    def run_refresh(self):
+        return snapshot.refresh(self.cfg, client(self.fake), NOW)
+
+    def task_of(self, item):
+        return dict(item["task"], paused=False)
+
+    def reviewed(self, item):
+        return Refresh.reviewed(self, item)
+
+    def test_a_failing_required_run_from_another_event_is_never_dropped(self):
+        node = pr_node(1, issue=issue_node(10))
+        commit = node["commits"]["nodes"][0]["commit"]
+        commit["checkSuites"]["nodes"].append(
+            {
+                "app": {"slug": "github-actions"},
+                "workflowRun": {"event": "workflow_dispatch"},
+                "checkRuns": {
+                    "totalCount": 1,
+                    "nodes": [{"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"}],
+                },
+            }
+        )
+        commit["checkSuites"]["totalCount"] = 2
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+        # Its successes still never count, and a harmless one changes nothing.
+        commit["checkSuites"]["nodes"][1]["checkRuns"]["nodes"][0]["conclusion"] = "SUCCESS"
+        item = self.run_refresh()["items"][0]
+        self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
+    def test_more_open_prs_than_one_page_marks_the_repository_truncated(self):
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number:" not in body and b"open:" in body:
+                answer = json.loads(data)
+                answer["data"]["repository"]["open"]["totalCount"] += 5
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        self.assertIn(REPO_A, snapshot.refresh(self.cfg, github, NOW)["truncated"])
+
+    def test_more_suites_than_returned_never_pass(self):
+        node = pr_node(1, issue=issue_node(10))
+        node["commits"]["nodes"][0]["commit"]["checkSuites"]["totalCount"] = 5
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
+    def test_only_success_skipped_and_neutral_pass(self):
+        for conclusion in ("CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STALE", "FAILURE", None):
+            with self.subTest(conclusion):
+                node = pr_node(1, issue=issue_node(10))
+                run = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+                run["checkRuns"]["nodes"][0]["conclusion"] = conclusion
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
+    def test_an_odd_review_in_a_clinicians_list_makes_the_reviews_not_known(self):
+        no_time = review_node(state="CHANGES_REQUESTED")
+        no_time["submittedAt"] = None
+        bot = review_node(state="APPROVED", bot=True)
+        other = review_node("someone-else", "APPROVED")
+        for odd in (no_time, bot, other):
+            with self.subTest(odd=odd["author"]):
+                node = pr_node(1, issue=issue_node(10), files=("evidence/a.json",))
+                self.fake.prs[REPO_A]["open"][0] = node
+                real = self.fake.__call__
+
+                def call(method, path, headers, body, odd=odd, real=real):
+                    status, h, data = real(method, path, headers, body)
+                    if path == "/graphql" and b"rv0:" in body:
+                        answer = json.loads(data)
+                        for p in answer["data"]["repository"].values():
+                            if p and "rv0" in p:
+                                p["rv0"] = {"totalCount": 1, "nodes": [odd]}
+                        data = json.dumps(answer).encode()
+                    return status, h, data
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
+                self.assertIsNone(item["task"]["pull_request"]["reviews"])
+
+    def test_the_transport_reads_no_more_than_its_cap(self):
+        asked = []
+
+        class Response:
+            status = 200
+
+            def read(self, n=None):
+                asked.append(n)
+                return b"x" * (n if n is not None else gh.MAX_RESPONSE * 2)
+
+            def getheaders(self):
+                return []
+
+        class Connection:
+            def __init__(self, held, expired, *a, **k):
+                self.sock = None
+
+            def connect(self):
+                pass
+
+            def request(self, *a, **k):
+                pass
+
+            def getresponse(self):
+                return Response()
+
+            def close(self):
+                pass
+
+        with mock.patch.object(gh, "_Connection", Connection):
+            gh.https_transport("GET", "/x", {}, None)
+        self.assertEqual(asked, [gh.MAX_RESPONSE + 1])
+
+    def test_a_symlinked_key_or_folder_is_never_followed(self):
+        real_key = self.base / "real.pem"
+        real_key.write_text("synthetic")
+        link = self.base / "link.pem"
+        link.symlink_to(real_key)
+        with self.assertRaises(gh.FetchError):
+            server.read_key(link)
+        target = self.base / "elsewhere"
+        target.mkdir()
+        folder = self.base / "linked-folder"
+        folder.symlink_to(target)
+        with self.assertRaises(OSError):
+            snapshot.write_json(folder, snapshot.STATUS, {"a": 1})
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_two_installations_are_refused(self):
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == f"/repos/{REPO_B}/installation":
+                answer = json.loads(data)
+                answer["id"] = 78
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        with self.assertRaises(gh.FetchError) as caught:
+            github.installation(OWNER, [REPO_A, REPO_B])
+        self.assertEqual(caught.exception.code, "several-installations")

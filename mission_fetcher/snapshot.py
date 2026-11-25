@@ -2,17 +2,20 @@
 
 Each item carries the task model's input (`mission_control.tasks`), built only from fields this
 module checks, plus the title and links the screens show. Everything from GitHub is untrusted:
-- only the expected shapes are accepted; anything else fails the refresh ("bad-response");
+- only the expected shapes are accepted: a whole answer of the wrong shape fails the refresh
+  ("bad-response"), and one pull request's wrongly shaped data makes only that item unreadable
+  (task null, shown as UNKNOWN);
 - text is cleaned (no control characters) and capped; links are built here from the repository
   and number, never taken from GitHub's answer;
-- where GitHub's answer is incomplete (more files, reviews, checks or label events than one
-  request returns), that part is left out, so the model shows UNKNOWN rather than a state built
-  on part of the data. Nothing here decides a state: `tasks.derive` does, in the web app.
+- where a part of GitHub's answer is incomplete (more files, reviews, checks or label events than
+  one request returns, a partial error, a lite read), that part is written as "not known": null,
+  or a list marked partial (files_complete or checks_complete false). The model never reads it
+  as clean; it shows the part as not verified. Nothing here decides a state: `tasks.derive`
+  does, in the web app.
 
-Two keys the model needs are left for the web app (phase A5b): `paused`, which it reads from
-the stop marker itself, and the state for a pull request with no linked issue. `runs` is null,
-"not read": phase A5 starts with GitHub data only (issue #15, 2026-11-24), and an empty list
-would claim no review ever happened.
+One key the model needs is left for the web app (phase A5b): `paused`, which it reads from the
+stop marker itself. `runs` is null, "not read": phase A5 starts with GitHub data only (issue
+#15, 2026-11-24), and an empty list would claim no review ever happened.
 """
 
 from __future__ import annotations
@@ -658,6 +661,12 @@ def _checks(
                     complete = False
                 continue
             if event not in CHECK_EVENTS:
+                # GitHub leaves such a run out of a PR's required checks (Codex's review of
+                # f37d0c7), so its success never counts. But a failing or unfinished run with a
+                # required name may still bear on the merge box: not known, never dropped
+                # silently, and never passed (audit of 80e8fb3).
+                if not _provably_harmless_runs(suite, required):
+                    complete = False
                 continue
         try:
             runs_conn = _obj(suite.get("checkRuns"))
@@ -711,6 +720,26 @@ def _checks(
             )
     cautions, statuses_complete = _status_cautions(commit, head, required)
     return out + cautions, complete and statuses_complete
+
+
+def _provably_harmless_runs(suite: dict, required: tuple[str, ...]) -> bool:
+    """Whether a suite's run list is readable whole and holds no unfinished or failing run
+    with a required name (successes, and runs of other names, are harmless)."""
+    runs = suite.get("checkRuns")
+    if not isinstance(runs, dict):
+        return False
+    nodes, total = runs.get("nodes"), runs.get("totalCount")
+    if not isinstance(nodes, list) or type(total) is not int or total > len(nodes):
+        return False
+    for r in nodes:
+        if not isinstance(r, dict) or not isinstance(r.get("name"), str):
+            return False
+        if r["name"] in required and not (
+            r.get("status") == "COMPLETED"
+            and r.get("conclusion") in ("SUCCESS", "SKIPPED", "NEUTRAL")
+        ):
+            return False
+    return True
 
 
 def _provably_no_required(suite: dict, required: tuple[str, ...]) -> bool:
