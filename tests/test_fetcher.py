@@ -89,6 +89,7 @@ def pr_node(
     renamed=(),
     updated_at=None,
     merge_commit=None,
+    statuses=None,
 ):
     node = {
         "number": number,
@@ -114,6 +115,9 @@ def pr_node(
                 {
                     "commit": {
                         "oid": head,
+                        "status": None
+                        if statuses is None
+                        else {"contexts": [{"context": c, "state": st} for c, st in statuses]},
                         "checkSuites": {
                             "totalCount": 1,
                             "nodes": [
@@ -591,6 +595,43 @@ class Refresh(Base):
                 item = self.run_refresh()["items"][0]
                 self.assertEqual("checks" in item["task"]["pull_request"], has_checks)
 
+    def test_a_commit_status_can_only_add_caution(self):
+        # Codex's review of ab64500 (blocking): when a status and a check run share a required
+        # name, GitHub needs both to pass. A status that isn't a success counts against the name;
+        # a successful one never makes a check pass.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        for checks, statuses, flag in (
+            (("lint", "test"), [("lint", "FAILURE")], tasks.Flag.CHECKS_FAILING),
+            (("lint", "test"), [("lint", "ERROR")], tasks.Flag.CHECKS_FAILING),
+            (("lint", "test"), [("lint", "PENDING")], tasks.Flag.CHECKS_PENDING),
+            (("lint", "test"), [("lint", "SUCCESS")], tasks.Flag.CHECKS_PASSED),
+            (("test",), [("lint", "SUCCESS")], tasks.Flag.CHECKS_MISSING),
+            (("lint", "test"), [("deploy/preview", "FAILURE")], tasks.Flag.CHECKS_PASSED),
+        ):
+            with self.subTest(checks=checks, statuses=statuses):
+                self.fake.prs[REPO_A]["open"] = []
+                self.fake.prs[REPO_A]["closed"] = [
+                    pr_node(
+                        1,
+                        state="MERGED",
+                        merged=True,
+                        closed_at=recent,
+                        issue=issue_node(10),
+                        checks=checks,
+                        statuses=statuses,
+                    )
+                ]
+                item = self.run_refresh()["items"][0]
+                self.assertIn(flag, tasks.derive(self.task_of(item)).flags)
+
+    def test_an_internal_error_also_says_when_the_token_outlived_it(self):
+        # Codex's review of ab64500: only a FetchError carried the failed-revoke warning.
+        self.fake.fail["/graphql"] = ValueError("a surprise")
+        self.fake.fail["/installation/token"] = (500, {}, b"")
+        with self.assertRaises(gh.FetchError) as caught:
+            self.run_refresh()
+        self.assertEqual(caught.exception.code, "internal+token-not-revoked")
+
     def test_a_malformed_check_status_is_a_bad_response(self):
         # Codex's review of 23bfb61: an unhashable status raised TypeError and stopped the
         # fetcher.
@@ -993,6 +1034,28 @@ class StartupChecks(Base):
         member = lambda account: (65534, {os.stat(self.base).st_gid})  # noqa: E731
         self.assertTrue(reachable_by(folder, "web-account", groups_of=member).ok)
         os.chmod(self.base, 0o755)
+
+    def test_an_acl_above_the_snapshot_folder_fails_the_path_check(self):
+        # Codex's review of ab64500: an ACL can shut one account out whatever the mode bits say,
+        # and this process can't evaluate it for another account.
+        import struct
+
+        from mission_fetcher.checks import reachable_by
+
+        u = 0xFFFFFFFF
+        entries = [(0x01, 7, u), (0x02, 0, 65534), (0x04, 5, u), (0x10, 5, u), (0x20, 5, u)]
+        acl = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *e) for e in entries)
+        os.chmod(self.base, 0o755)
+        try:
+            os.setxattr(self.base, "system.posix_acl_access", acl)
+        except OSError:
+            self.skipTest("this file system or account can't set an ACL")
+        self.addCleanup(lambda: os.removexattr(self.base, "system.posix_acl_access"))
+        check = reachable_by(
+            self.cfg.snapshot_dir, "web-account", groups_of=lambda a: (65534, {65534})
+        )
+        self.assertFalse(check.ok)
+        self.assertIn("ACL", check.detail)
 
     def test_an_acl_on_the_folder_or_a_file_fails(self):
         # Codex's review of bf76866 (blocking): a named ACL could let another account read the

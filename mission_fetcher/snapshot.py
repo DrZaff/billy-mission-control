@@ -45,6 +45,7 @@ MAX_SNAPSHOT = 2 * 1024 * 1024
 SHA = re.compile(r"[0-9a-f]{40}")
 CONTROL = re.compile(r"[\x00-\x1f\x7f  ‪-‮⁦-⁩]")
 REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"}
+STATUS_STATES = ("ERROR", "EXPECTED", "FAILURE", "PENDING", "SUCCESS")
 CHECK_EVENTS = ("pull_request", "pull_request_target", "push", "merge_group")
 CHECK_STATUS = {"QUEUED": "queued", "IN_PROGRESS": "in_progress", "COMPLETED": "completed"}
 
@@ -78,7 +79,7 @@ fragment pr on PullRequest {
     nodes { state submittedAt author { __typename login } commit { oid } }
   }
   commits(last: 1) {
-    nodes { commit { oid checkSuites(first: $suites) {
+    nodes { commit { oid status { contexts { context state } } checkSuites(first: $suites) {
       totalCount
       nodes {
         app { slug }
@@ -297,6 +298,36 @@ def _checks(pr: dict, head: str, app: str) -> list[dict]:
                     "conclusion": conclusion.lower() if conclusion else None,
                 }
             )
+    out += _status_cautions(commit, head)
+    return out
+
+
+def _status_cautions(commit: dict, head: str) -> list[dict]:
+    """The head commit's statuses (GitHub's older kind of result), as cautions only. When a
+    status and a check run share a required name, GitHub needs both to pass (Codex's review of
+    ab64500). A status that isn't a success counts against that name; a successful one adds
+    nothing, because a status can't be tied to an app the way a check run can, so it must never
+    make a check look passed. Never greener than GitHub."""
+    raw = commit.get("status")
+    if raw is None:
+        return []
+    out = []
+    for context in _list(_obj(raw).get("contexts")):
+        c = _obj(context)
+        state = c.get("state")
+        if state not in STATUS_STATES:
+            raise _bad()
+        if state == "SUCCESS":
+            continue
+        pending = state in ("PENDING", "EXPECTED")
+        out.append(
+            {
+                "name": _exact(c.get("context")),
+                "head_sha": head,
+                "status": "in_progress" if pending else "completed",
+                "conclusion": None if pending else "failure",
+            }
+        )
     return out
 
 
@@ -468,8 +499,10 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
         # The refresh failed, whatever the reason: revoke the token, and say too if it
         # outlived the refresh (Codex's review of bf76866).
         revoked = github.revoke(token)
-        if isinstance(error, FetchError) and not revoked:
-            raise FetchError(error.code + "+token-not-revoked") from None
+        if not revoked:
+            # Whatever went wrong, say the token outlived it (Codex's review of ab64500).
+            code = error.code if isinstance(error, FetchError) else "internal"
+            raise FetchError(code + "+token-not-revoked") from None
         raise
     snapshot["token_revoked"] = github.revoke(token)
     return snapshot

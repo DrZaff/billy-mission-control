@@ -91,7 +91,9 @@ def reachable_by(
     path: Path, account: str, groups_of: Callable[[str], tuple[int, set[int]] | None] = _groups_of
 ) -> Check:
     """The web app's account can pass through every folder above the snapshot folder (Codex's
-    review of 23bfb61: protected folders can still shut it out)."""
+    review of 23bfb61: protected folders can still shut it out). The mode bits decide it, so a
+    folder with an ACL, which can override them for one account and which this process can't
+    evaluate for another, fails the check (Codex's review of ab64500)."""
     name = f"{account} can reach the snapshot folder"
     ids = groups_of(account)
     if ids is None:
@@ -102,6 +104,8 @@ def reachable_by(
             info = os.stat(parent)
         except OSError:
             return Check(name, False, f"{parent} is unreadable")
+        if _has_acl(str(parent)):
+            return Check(name, False, f"{parent} has an ACL; its access can't be checked")
         mode = info.st_mode
         if info.st_uid == uid:
             ok = mode & 0o100
