@@ -539,7 +539,7 @@ class Merges(unittest.TestCase):
 
     def test_a_merged_prs_checks_are_never_judged(self):
         # Results carry no time, so a later run could rewrite the verdict either way (Fable's
-        # review of 0cf099c); GitHub's merge box enforced them at the time.
+        # review of 0cf099c).
         s = derive(self.merged(checks=[check("lint"), check("test", conclusion="failure")]))
         self.assertEqual(s.state, State.MERGED)
         judged = {Flag.CHECKS_FAILING, Flag.CHECKS_PASSED, Flag.CHECKS_UNVERIFIED}
@@ -1714,3 +1714,64 @@ class AuditOf7712dec(unittest.TestCase):
                 self.assertIn(Flag.FILES_UNVERIFIED, s.flags)
                 self.assertTrue(s.needs_attention)
                 self.assertEqual(views.section(s), "alerts")
+
+
+class CodexReviewOfCae7658(unittest.TestCase):
+    """Codex's review of cae7658 (blocking): an issue closed before the merge ended the
+    authorisation for an open PR, but not for the same PR once merged."""
+
+    def merged(self, *events):
+        return derive(
+            task(
+                issue={"number": 7, "state": "closed", "timeline": [labeled(), *events]},
+                runs=[run("build"), passed(), published()],
+                pull_request=pr(state="closed", merged=True, merged_by=OWNER, merged_at=t(20)),
+            )
+        )
+
+    def closed(self, minute, actor=OWNER):
+        return {"event": "closed", "actor": actor, "at": t(minute)}
+
+    def reopened(self, minute, actor=OWNER):
+        return {"event": "reopened", "actor": actor, "at": t(minute)}
+
+    def test_an_issue_closed_before_the_merge_ends_the_authorisation(self):
+        for actor in (OWNER, "someone-else"):
+            with self.subTest(actor=actor):
+                s = self.merged(self.closed(10, actor))
+                self.assertEqual(s.state, State.UNSAFE)
+                self.assertIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
+                self.assertIn(Flag.UNAUTHORIZED_WORK, s.flags)
+                self.assertIn("withdrawn before the merge", " ".join(s.reasons))
+
+    def test_githubs_own_closing_as_the_pr_merges_ends_nothing(self):
+        self.assertEqual(self.merged(self.closed(20)).state, State.MERGED)
+        self.assertEqual(self.merged(self.closed(21)).state, State.MERGED)
+
+    def test_reopening_before_the_merge_restores_it(self):
+        self.assertEqual(self.merged(self.closed(10), self.reopened(12)).state, State.MERGED)
+
+    def test_a_reopening_in_doubt_restores_nothing(self):
+        # In the merge's own second it may have come after the merge; at the closing's own
+        # instant, the closing wins.
+        s = self.merged(self.closed(10), self.reopened(20))
+        self.assertEqual(s.state, State.UNSAFE)
+        for events in ((self.closed(10), self.reopened(10)), (self.reopened(10), self.closed(10))):
+            self.assertEqual(self.merged(*events).state, State.UNSAFE, events)
+
+    def test_a_removed_label_before_the_merge_says_withdrawn(self):
+        s = self.merged(labeled(minute=10, kind="unlabeled"))
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
+
+    def test_an_incomplete_file_list_is_never_called_clinical(self):
+        # should_fix: the reason said "Clinical files" where the header said "not known".
+        value = pr(files=("app.py",))
+        value["files_complete"] = False
+        s = derive(task(runs=[run("build"), passed(), published()], pull_request=value))
+        self.assertEqual(s.state, State.CLINICAL_REVIEW)
+        self.assertNotIn("Clinical files", " ".join(s.reasons))
+        self.assertIn("may be clinical", " ".join(s.reasons))
+        value["files"] = ["evidence/a.json", "app.py"]
+        s = derive(task(runs=[run("build"), passed(), published()], pull_request=value))
+        self.assertIn("Clinical files", " ".join(s.reasons))

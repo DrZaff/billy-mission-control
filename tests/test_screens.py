@@ -667,3 +667,36 @@ class AuditOf8c62413Screens(unittest.TestCase):
                 branches.add(key)
         for repo in issues:
             self.assertEqual(issues[repo] & pulls.get(repo, set()), set(), repo)
+
+
+class CodexReviewOfCae7658Screens(unittest.TestCase):
+    def test_the_checks_row_claims_nothing_github_enforced(self):
+        raw = entry("example-site-931")
+        state, body = detail(raw)
+        self.assertTrue(load(json.dumps(with_tasks(raw))).entries[0].status.merged)
+        self.assertIn("not judged after a merge", body)
+        self.assertNotIn("enforced", body)
+
+    def entry(self):
+        raw = entry("example-site-931")
+        for r in raw["task"]["runs"]:
+            r.pop("files", None)  # nothing known to be clinical
+        return raw
+
+    def test_a_clinician_row_whenever_the_files_may_be_clinical(self):
+        raw = self.entry()
+        pull = raw["task"]["pull_request"]
+        pull.update(state="open", merged=False, merged_by=None, files=["site/a.html"])
+        pull.pop("merged_at")
+        pull["files_complete"] = False
+        pull["reviews"] = []
+        state, body = detail(raw)
+        self.assertIn("clinical: not known", body)
+        self.assertIn("Clinician", body)
+        self.assertIn("approval of this commit needed", body)
+        # Merged, with no known clinical file and the reviews read: not known, never "later".
+        raw = self.entry()
+        raw["task"]["pull_request"].update(files=["site/a.html"], files_complete=False)
+        state, body = detail(raw)
+        self.assertIn("not known: the files couldn&#x27;t all be read", body)
+        self.assertNotIn("needed, later", body)

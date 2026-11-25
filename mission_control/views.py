@@ -348,7 +348,9 @@ def _path(entry: Entry) -> str:
 
     if st.merged:
         # Never judged after a merge (owner's decision, 2026-11-25): neither passed nor not.
-        rows.append(("?", "Checks", "not judged after a merge (GitHub's merge box enforced them)"))
+        # Nor is what GitHub enforced at the merge known here, or whether a bypass was used
+        # (Codex's review of cae7658): the row claims neither.
+        rows.append(("?", "Checks", "not judged after a merge; not known here"))
     elif state is State.CLOSED:
         rows.append(("-", "Checks", "not judged: closed without merging"))
     else:
@@ -369,9 +371,12 @@ def _path(entry: Entry) -> str:
         else:
             rows.append(("-", "Checks", "not yet"))
 
-    if Flag.CLINICAL in flags and state is State.CLOSED and not st.merged:
+    # Shown whenever the change is or may be clinical: an incomplete file list may hold
+    # clinical files (Codex's review of cae7658).
+    maybe_clinical = Flag.CLINICAL in flags or Flag.FILES_UNVERIFIED in flags
+    if maybe_clinical and state is State.CLOSED and not st.merged:
         rows.append(("-", "Clinician", "not judged: closed without merging"))
-    elif Flag.CLINICAL in flags:
+    elif maybe_clinical:
         if Flag.DISMISSAL_UNPLACED in flags:
             rows.append(
                 ("?", "Clinician", "not known: a review can't be placed before or after the merge")
@@ -383,6 +388,9 @@ def _path(entry: Entry) -> str:
             rows.append(("!", "Clinician", "approval of this commit needed"))
         elif clinician_approved(st):
             rows.append(("done", "Clinician", "approved this commit"))
+        elif st.merged:
+            # Merged with no known clinical file: no approval was judged, so none is claimed.
+            rows.append(("?", "Clinician", "not known: the files couldn't all be read"))
         else:
             rows.append(("-", "Clinician", "approval of the final commit needed, later"))
 
