@@ -275,7 +275,7 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
 # The fields every query asks for: what the merge verdict needs.
 CORE_FIELDS = """
   number state isDraft merged closedAt mergedAt isCrossRepository
-  mergedBy { login }
+  mergedBy { __typename login }
   headRefOid
 """
 _LIMITS = {
@@ -305,13 +305,13 @@ PIECES = {
         totalCount
         nodes {
           __typename
-          ... on LabeledEvent { createdAt actor { login } label { name } }
-          ... on UnlabeledEvent { createdAt actor { login } label { name } }
+          ... on LabeledEvent { createdAt actor { __typename login } label { name } }
+          ... on UnlabeledEvent { createdAt actor { __typename login } label { name } }
           ... on ClosedEvent {
-            createdAt actor { login }
+            createdAt actor { __typename login }
             closer { __typename ... on PullRequest { number repository { nameWithOwner } } }
           }
-          ... on ReopenedEvent { createdAt actor { login } }
+          ... on ReopenedEvent { createdAt actor { __typename login } }
         }
       }
     }
@@ -485,8 +485,12 @@ def _time(value: Any) -> str:
 
 
 def _login(value: Any) -> str | None:
-    """An actor's login, or None for a deleted account ("ghost")."""
+    """A GitHub user's login, or None for a deleted account ("ghost") or any other kind of
+    actor: a bot or an app can share a person's name, so it never authorises or merges as one
+    (Codex's review of 322b659, for reviews; the same for labels and the merger)."""
     if value is None:
+        return None
+    if _obj(value).get("__typename") != "User":
         return None
     login = _obj(value).get("login")
     if not isinstance(login, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9\[\]-]{0,49}", login):
@@ -615,7 +619,9 @@ def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) 
                 continue  # a deleted account: not this clinician
             # GitHub filtered by author, and logins are case-insensitive: anything else in this
             # connection is a surprise, so the reviews are "not known" (audit of 28009de).
-            if not isinstance(author, dict) or author.get("__typename") == "Bot":
+            # Only a GitHub user is a clinician: a bot, or an author whose kind GitHub didn't
+            # say, makes the reviews "not known" (Codex's review of 322b659).
+            if not isinstance(author, dict) or author.get("__typename") != "User":
                 raise _Incomplete()
             seen = author.get("login")
             if not isinstance(seen, str) or seen.lower() != login.lower():
@@ -1163,6 +1169,9 @@ def _listing(
     more_open = _int(open_conn.get("totalCount")) != len(open_nodes)
     since = now - timedelta(days=RECENT_DAYS)
     numbers = [_int(_obj(n).get("number")) for n in open_nodes]
+    # A repeated row would match the count and then collapse: the list may be missing one
+    # (Codex's review of 322b659).
+    more_open = more_open or len(set(numbers)) != len(numbers)
     closed, cursor = _closed_page(repository.get("closed"), since)
     numbers += closed
     pages = 1

@@ -427,7 +427,7 @@ class Refresh(Base):
         # merge was cut as an old closed item.
         recent = (NOW - timedelta(days=12)).isoformat()
         merge = pr_node(5, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
-        merge["mergedBy"] = {"login": "someone-else"}
+        merge["mergedBy"] = {"__typename": "User", "login": "someone-else"}
         long = ("evidence/" + "\x01" * 1000,)
         self.fake.prs[REPO_A]["open"] = [
             pr_node(100 + n, issue=issue_node(10), files=long) for n in range(12)
@@ -573,7 +573,7 @@ class Refresh(Base):
         # Finding 2: fork PRs (attention) outranked a known unsafe merge when items were cut.
         recent = (NOW - timedelta(days=3)).isoformat()
         merge = pr_node(900, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
-        merge["mergedBy"] = {"login": "someone-else"}
+        merge["mergedBy"] = {"__typename": "User", "login": "someone-else"}
         forks = []
         for n in range(1, 41):
             node = pr_node(n, issue=issue_node(10), title="\U0001f600" * 200, files=())
@@ -776,7 +776,7 @@ class Refresh(Base):
         # merge by someone other than the owner.
         recent = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
-        node["mergedBy"] = {"login": "someone-else"}
+        node["mergedBy"] = {"__typename": "User", "login": "someone-else"}
         self.fake.prs[REPO_A]["open"] = []
         self.fake.prs[REPO_A]["closed"] = [node]
         core_fields = (
@@ -845,7 +845,7 @@ class Refresh(Base):
         # away the whole partial answer, so a merge by someone else showed as UNKNOWN.
         recent = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
-        node["mergedBy"] = {"login": "someone-else"}
+        node["mergedBy"] = {"__typename": "User", "login": "someone-else"}
         self.fake.prs[REPO_A]["open"] = [pr_node(2)]
         self.fake.prs[REPO_A]["closed"] = [node]
         for field in ("closingIssuesReferences", "files", "reviews", "title", "headRefName"):
@@ -960,7 +960,7 @@ class Refresh(Base):
         issue = issue_node(10)
         issue["state"] = ["OPEN"]  # wrongly shaped
         node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue)
-        node["mergedBy"] = {"login": "someone-else"}
+        node["mergedBy"] = {"__typename": "User", "login": "someone-else"}
         self.fake.prs[REPO_A]["open"] = []
         self.fake.prs[REPO_A]["closed"] = [node]
         item = self.run_refresh()["items"][0]
@@ -1032,7 +1032,7 @@ class Refresh(Base):
         self.assertIsNone(state.reviewed_sha)  # merged, but no review is claimed
         # Another account's merge is still unsafe without the records.
         node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
-        node["mergedBy"] = {"login": "someone-else"}
+        node["mergedBy"] = {"__typename": "User", "login": "someone-else"}
         self.fake.prs[REPO_A]["closed"] = [node]
         other = tasks.derive(self.task_of(self.run_refresh()["items"][0]))
         self.assertEqual(other.state, tasks.State.UNSAFE)
@@ -1061,7 +1061,7 @@ class Refresh(Base):
     def test_someone_elses_merge_is_still_flagged(self):
         recent = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
-        node["mergedBy"] = {"login": "someone-else"}
+        node["mergedBy"] = {"__typename": "User", "login": "someone-else"}
         self.fake.prs[REPO_A]["open"], self.fake.prs[REPO_A]["closed"] = [], [node]
         state = tasks.derive(self.task_of(self.run_refresh()["items"][0]))
         self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, state.flags)
@@ -1367,7 +1367,7 @@ class Refresh(Base):
     def test_a_known_unsafe_merge_is_shown_even_when_all_was_read_lite(self):
         recent = (NOW - timedelta(days=1)).isoformat()
         merge = pr_node(9, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
-        merge["mergedBy"] = {"login": "someone-else"}
+        merge["mergedBy"] = {"__typename": "User", "login": "someone-else"}
         self.fake.prs[REPO_A]["closed"] = [merge]
         real = self.fake.__call__
 
@@ -1503,7 +1503,7 @@ class Refresh(Base):
             issue=issue_node(11, repo=REPO_B),
             files=("docs/a.md",),
         )
-        node["mergedBy"] = {"login": "someone-else"}  # unsafe on its own
+        node["mergedBy"] = {"__typename": "User", "login": "someone-else"}  # unsafe on its own
         self.fake.prs[REPO_B]["open"], self.fake.prs[REPO_B]["closed"] = [], [node]
         failures = [1]
         real = self.fake.__call__
@@ -1527,7 +1527,7 @@ class Refresh(Base):
 
         # One that keeps failing in full is shown lite after the extra try, like a too-large
         # one: a stranger's PR must never stall every repository (audit of 42a3721).
-        node["mergedBy"] = {"login": OWNER}
+        node["mergedBy"] = {"__typename": "User", "login": OWNER}
         github = gh.GitHub(APP_ID, KEY, transport=always, clock=lambda: NOW.timestamp())
         item = next(
             i for i in snapshot.refresh(self.cfg, github, NOW)["items"] if i["repo"] == REPO_B
@@ -1862,7 +1862,7 @@ class Refresh(Base):
             {
                 "__typename": "LabeledEvent",
                 "createdAt": "2026-11-20T08:00:00Z",
-                "actor": {"login": OWNER},
+                "actor": {"__typename": "User", "login": OWNER},
                 "label": {"name": "x" * 200},
             }
         ] * 90
@@ -2025,7 +2025,7 @@ class Refresh(Base):
             files=("site/moved.md",),
             renamed=("site/moved.md",),
         )
-        node["mergedBy"] = {"login": "someone-else"}
+        node["mergedBy"] = {"__typename": "User", "login": "someone-else"}
         node["review_totals"] = {OWNER: 500}  # the clinician's reviews incomplete too
         self.fake.prs[REPO_A]["open"], self.fake.prs[REPO_A]["closed"] = [], [node]
         item = self.run_refresh()["items"][0]
@@ -2126,7 +2126,7 @@ class Refresh(Base):
         bumped = (NOW - timedelta(hours=1)).isoformat()
         recent = (NOW - timedelta(days=4)).isoformat()
         merge = pr_node(500, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
-        merge["mergedBy"] = {"login": "someone-else"}
+        merge["mergedBy"] = {"__typename": "User", "login": "someone-else"}
         self.fake.prs[REPO_A]["closed"] = [
             pr_node(400 + i, state="CLOSED", closed_at=old, updated_at=bumped) for i in range(30)
         ] + [merge]
@@ -3010,7 +3010,7 @@ class CodexReviewOfB1fef32(Base):
         # fetcher marked it unreadable, losing a known unsafe merge a retry could read.
         merged_at = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(1, state="MERGED", merged=True, closed_at=merged_at, issue=issue_node(10))
-        node["mergedBy"] = {"login": "someone-else"}
+        node["mergedBy"] = {"__typename": "User", "login": "someone-else"}
         self.fake.prs[REPO_A]["open"] = []
         self.fake.prs[REPO_A]["closed"] = [node]
         real = self.fake.__call__
@@ -3088,7 +3088,7 @@ class CodexReviewOf099ef9b(Base):
     def merged_by_stranger(self):
         merged_at = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(1, state="MERGED", merged=True, closed_at=merged_at, issue=issue_node(10))
-        node["mergedBy"] = {"login": "someone-else"}
+        node["mergedBy"] = {"__typename": "User", "login": "someone-else"}
         self.fake.prs[REPO_A]["open"] = []
         self.fake.prs[REPO_A]["closed"] = [node]
 
@@ -3636,6 +3636,52 @@ class CodexReviewOf9cc8f43(Base):
         self.assertEqual((numbers, truncated), ([], True))
 
 
+class CodexReviewOf322b659(Base):
+    def test_only_a_github_user_can_be_a_clinician(self):
+        # Blocking: an author with no kind, or another kind, was emitted as a User.
+        for kind in (None, "Mannequin", "Organization", "EnterpriseUserAccount"):
+            with self.subTest(kind=kind):
+                review = review_node(OWNER, "APPROVED")
+                if kind is None:
+                    del review["author"]["__typename"]
+                else:
+                    review["author"]["__typename"] = kind
+                node = pr_node(
+                    1, issue=issue_node(10), files=("evidence/a.json",), reviews=(review,)
+                )
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = snapshot.refresh(self.cfg, client(self.fake), NOW)["items"][0]
+                self.assertIsNone(item["task"]["pull_request"]["reviews"])
+
+    def test_an_app_named_like_the_owner_never_authorises_or_merges(self):
+        # The same for label events and the merger: an app can share a person's name.
+        issue = issue_node(10)
+        issue["timelineItems"]["nodes"][0]["actor"]["__typename"] = "Bot"
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue)
+        item = snapshot.refresh(self.cfg, client(self.fake), NOW)["items"][0]
+        state = tasks.derive(dict(item["task"], paused=False))
+        self.assertIn(tasks.Flag.UNAUTHORIZED_WORK, state.flags)
+        merged_at = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(1, state="MERGED", merged=True, closed_at=merged_at, issue=issue_node(10))
+        node["mergedBy"] = {"__typename": "Bot", "login": OWNER}
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        item = snapshot.refresh(self.cfg, client(self.fake), NOW)["items"][0]
+        state = tasks.derive(dict(item["task"], paused=False))
+        self.assertEqual(state.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.MERGER_UNKNOWN, state.flags)
+
+    def test_a_repeated_open_row_marks_the_list_cut_off(self):
+        # Should fix: duplicates matched the count, then collapsed silently.
+        data = {
+            "repository": {
+                "open": {"totalCount": 2, "nodes": [{"number": 1}, {"number": 1}]},
+                "closed": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+            }
+        }
+        self.assertEqual(snapshot._listing(REPO_A, data, NOW), ([1], True))
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now
@@ -3700,12 +3746,16 @@ class ClosingsAndReopenings(Base):
         return {
             "__typename": "ClosedEvent",
             "createdAt": at,
-            "actor": {"login": OWNER},
+            "actor": {"__typename": "User", "login": OWNER},
             "closer": closer,
         }
 
     def reopened(self, at):
-        return {"__typename": "ReopenedEvent", "createdAt": at, "actor": {"login": OWNER}}
+        return {
+            "__typename": "ReopenedEvent",
+            "createdAt": at,
+            "actor": {"__typename": "User", "login": OWNER},
+        }
 
     def test_the_query_asks_for_closings_and_reopenings(self):
         query = snapshot.detail_query([1], frozenset(), (OWNER,))

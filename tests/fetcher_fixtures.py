@@ -92,7 +92,7 @@ def pr_node(
         "merged": merged,
         "closedAt": closed_at,
         "updatedAt": updated_at or closed_at or "2026-11-23T00:00:00Z",
-        "mergedBy": {"login": OWNER} if merged else None,
+        "mergedBy": {"__typename": "User", "login": OWNER} if merged else None,
         "mergedAt": (closed_at or "2026-11-23T00:00:00Z") if merged else None,
         "headRefName": f"claude/task-{number}",
         "headRefOid": head,
@@ -170,7 +170,7 @@ def issue_node(number, actor=OWNER, label="agent:ready", repo=REPO_A):
                 {
                     "__typename": "LabeledEvent",
                     "createdAt": "2026-11-20T09:00:00Z",
-                    "actor": {"login": actor},
+                    "actor": {"__typename": "User", "login": actor},
                     "label": {"name": label},
                 }
             ],
