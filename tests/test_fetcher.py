@@ -121,7 +121,12 @@ def pr_node(
                         "oid": head,
                         "status": None
                         if statuses is None
-                        else {"contexts": [{"context": c, "state": st} for c, st in statuses]},
+                        else {
+                            "contexts": [
+                                {"context": c, "state": st, "createdAt": "2026-11-23T00:00:00Z"}
+                                for c, st in statuses
+                            ]
+                        },
                         "checkSuites": {
                             "totalCount": 1,
                             "nodes": [
@@ -3946,6 +3951,100 @@ class CodexReviewOfB1fef32(Base):
                 s = tasks.derive(self.task_of(item))
                 self.assertEqual(s.state, tasks.State.UNSAFE)
                 self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, s.flags)
+
+
+class CodexReviewOf099ef9b(Base):
+    def run_refresh(self, github=None):
+        return snapshot.refresh(self.cfg, github or client(self.fake), NOW)
+
+    def task_of(self, item):
+        return dict(item["task"], paused=False)
+
+    def reviewed(self, item):
+        return Refresh.reviewed(self, item)
+
+    def with_status(self, created):
+        node = pr_node(1, issue=issue_node(10), statuses=[("test", "SUCCESS")])
+        context = node["commits"]["nodes"][0]["commit"]["status"]["contexts"][0]
+        if created is None:
+            del context["createdAt"]
+        else:
+            context["createdAt"] = created
+        self.fake.prs[REPO_A]["open"][0] = node
+        return self.run_refresh()["items"][0]
+
+    def test_an_old_successful_status_never_passes_a_required_check(self):
+        # Blocking: a fresh check run beside an old successful status of the same name passed.
+        for created in ("2020-01-01T00:00:00Z", None, "not a time"):
+            with self.subTest(created=created):
+                item = self.with_status(created)
+                self.assertFalse(item["task"]["pull_request"]["checks_complete"])
+                flags = tasks.derive(self.reviewed(item)).flags
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
+        item = self.with_status((NOW - timedelta(days=1)).isoformat())  # fresh: fine
+        self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
+    def heavy_unless_core(self):
+        """GitHub stops any query that asks for more than the core fields of PR 1."""
+        real = self.fake.__call__
+        heavy = json.dumps(
+            {"data": None, "errors": [{"type": "RESOURCE_LIMITS_EXCEEDED", "message": "x"}]}
+        ).encode()
+        asked = []
+
+        def call(method, path, headers, body):
+            if path == "/graphql" and b"pullRequest(number: 1)" in body:
+                asked.append(body)
+                if b"closingIssuesReferences" in body:
+                    return 200, {}, heavy
+            return real(method, path, headers, body)
+
+        return gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp()), asked
+
+    def merged_by_stranger(self):
+        merged_at = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(1, state="MERGED", merged=True, closed_at=merged_at, issue=issue_node(10))
+        node["mergedBy"] = {"login": "someone-else"}
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+
+    def test_a_lite_read_still_too_heavy_falls_back_to_the_core(self):
+        # Blocking: the heavy error escaped and failed the whole refresh.
+        self.merged_by_stranger()
+        github, asked = self.heavy_unless_core()
+        item = self.run_refresh(github)["items"][0]
+        self.assertIsNotNone(item["task"])
+        s = tasks.derive(self.task_of(item))
+        self.assertEqual(s.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, s.flags)
+        self.assertNotIn(b"closingIssuesReferences", asked[-1])  # the core only, last
+
+    def test_a_retry_still_too_heavy_falls_back_to_the_core(self):
+        self.merged_by_stranger()
+        heavy_github, asked = self.heavy_unless_core()
+        first = []
+
+        def call(method, path, headers, body):
+            # The full read answers with an error on the title, so a retry is asked for; the
+            # retry, without the title, is still too heavy.
+            if path == "/graphql" and b"pullRequest(number: 1)" in body and not first:
+                first.append(1)
+                status, h, data = self.fake(method, path, headers, body)
+                answer = json.loads(data)
+                answer["data"]["repository"]["p0"]["title"] = None
+                answer["errors"] = [{"type": "X", "path": ["repository", "p0", "title"]}]
+                return status, h, json.dumps(answer).encode()
+            return heavy_github.transport(method, path, headers, body)
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        item = self.run_refresh(github)["items"][0]
+        self.assertIsNotNone(item["task"])
+        self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNSAFE)
+
+    def test_running_out_of_requests_has_its_own_reason(self):
+        # Never taken for a heavy query: the budget's own code is not HEAVY.
+        self.assertNotIn("over-budget", snapshot.HEAVY)
+        self.assertRegex("over-budget", server.REASON)
 
 
 class NoFifoAnywhere(Base):

@@ -143,8 +143,9 @@ def _on_time(deadline: float | None) -> None:
 
 # Failures that may mean the query was too heavy, not that GitHub is down: the batch is split
 # (Codex's review of 28546f5: GitHub can stop a costly query by time or resources, before the
-# answer reaches the size cap). If a lone pull request read without its heavy parts still
-# fails, or the request budget runs out, the refresh fails with GitHub's own error.
+# answer reaches the size cap). A lone pull request whose lite read or retry is still too heavy
+# is read with its core only (Codex's review of 099ef9b); if even that fails, or the request
+# budget runs out ("over-budget"), the refresh fails with GitHub's own error.
 HEAVY = {"too-large", "too-heavy", "timeout", "http-502", "http-503", "http-504"}
 # Failures of one pull request's own data: GitHub's error on a field, or an answer of the wrong
 # shape. The batch is split down to that pull request, which is then shown as unreadable
@@ -317,7 +318,8 @@ PIECES = {
     "reviews": None,  # built per clinician
     "commits": Template("""
   commits(last: 1) {
-    nodes { commit { oid status { contexts { context state } } checkSuites(first: $suites) {
+    nodes { commit {
+      oid status { contexts { context state createdAt } } checkSuites(first: $suites) {
       totalCount
       nodes {
         app { slug }
@@ -752,7 +754,7 @@ def _checks(
                     "conclusion": conclusion.lower() if conclusion else None,
                 }
             )
-    cautions, statuses_complete = _status_cautions(commit, head, required)
+    cautions, statuses_complete = _status_cautions(commit, head, required, now)
     return out + cautions, complete and statuses_complete
 
 
@@ -790,11 +792,15 @@ def _provably_no_required(suite: dict, required: tuple[str, ...]) -> bool:
     )
 
 
-def _status_cautions(commit: dict, head: str, required: tuple[str, ...]) -> tuple[list[dict], bool]:
+def _status_cautions(
+    commit: dict, head: str, required: tuple[str, ...], now: datetime | None = None
+) -> tuple[list[dict], bool]:
     """(the head commit's statuses for required names, as cautions only, whether complete).
     When a status and a check run share a required name, GitHub needs both to pass (Codex's
     review of ab64500). A status that isn't a success counts against that name; a successful
-    one adds nothing, because a status can't be tied to an app the way a check run can."""
+    one adds nothing, because a status can't be tied to an app the way a check run can, but
+    only while fresh, as for a check run: an old one, or one with no time, leaves the list not
+    known, never passed (Codex's review of 099ef9b)."""
     raw = commit.get("status")
     if raw is None:
         return [], True
@@ -818,6 +824,13 @@ def _status_cautions(commit: dict, head: str, required: tuple[str, ...]) -> tupl
             complete = False
             continue
         if state == "SUCCESS":
+            created = context.get("createdAt")
+            try:
+                at = datetime.fromisoformat(_time(created)) if created is not None else None
+            except FetchError:
+                at = None
+            if at is None or now is None or at < now - CHECK_FRESH:
+                complete = False
             continue
         pending = state in ("PENDING", "EXPECTED")
         out.append(
@@ -1118,13 +1131,14 @@ def _details(
         # unreadable; one deleted since the list is gone from the next refresh's list.
         return [(n, repository.get(f"p{i}") or UNREADABLE, lite) for i, n in enumerate(batch)]
 
-    # At most about five requests per pull request: splitting to one, asking again, reading
-    # it lite, and a retry without the pieces in error, then its core.
-    budget = [5 * len(numbers) + 2]
+    # At most about six requests per pull request: splitting to one, asking again, reading
+    # it lite, a retry without the pieces in error, then its core (after a heavy lite read or
+    # retry too).
+    budget = [6 * len(numbers) + 2]
 
     def fetch_raw(batch: list[int], omit: frozenset, lite) -> list:
         if budget[0] <= 0:
-            raise FetchError("too-heavy")
+            raise FetchError("over-budget")  # never HEAVY: it always fails the refresh
         budget[0] -= 1
         return fetch(batch, omit, lite)
 
@@ -1143,6 +1157,8 @@ def _details(
                     try:
                         ((_, got, _),) = fetch_raw([number], omit, "retry")
                     except FetchError as error:
+                        # A heavy one goes up to read(), which falls back to the lite read, then
+                        # the core only (Codex's review of 099ef9b).
                         if not _its_own(error, 1):
                             raise
                         got = UNREADABLE
@@ -1177,6 +1193,14 @@ def _details(
         try:
             return fetch_counted(batch, LARGE, code)
         except FetchError as error:
+            if error.code in HEAVY:
+                # Still too heavy lite: the core only (Codex's review of 099ef9b).
+                try:
+                    return fetch_counted(batch, ALL_PIECES, code)
+                except FetchError as again:
+                    if not _its_own(again, 1):
+                        raise
+                    return [(batch[0], UNREADABLE, code)]
             if not _its_own(error, 1):
                 raise
             return [(batch[0], UNREADABLE, code)]
