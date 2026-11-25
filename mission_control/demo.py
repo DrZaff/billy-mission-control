@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from . import tasks
-from .tasks import State, TaskStatus
+from .tasks import Flag, State, TaskStatus
 
 DEMO_FILE = Path(__file__).with_name("demo.json")
 
@@ -73,6 +73,8 @@ class Demo:
         sha = status.head_sha
         if kind is None or sha is None or entry.repo is None or entry.branch is None:
             return None
+        if Flag.RUNS_UNVERIFIED in status.flags:
+            return None  # its review history isn't known: no next step offered (Fable, 0cf099c)
         if not BRANCH.fullmatch(entry.branch) or ".." in entry.branch:
             return None
         values = {
@@ -108,7 +110,7 @@ def _events(parsed: Any) -> tuple[tuple[datetime, str], ...]:
     for e in parsed.timeline:
         what = f"{e.kind} {e.label}" if e.label else e.kind
         items.append((e.at, len(items), f"{what} by {e.actor}"))
-    for r in parsed.runs:
+    for r in parsed.runs or ():  # None: not read (A5a)
         parts = [f"{r.step}"]
         if r.step in ("build", "review"):
             parts.append(r.status)
@@ -123,7 +125,7 @@ def _events(parsed: Any) -> tuple[tuple[datetime, str], ...]:
             parts.append(f"[{where}]")
         items.append((r.at, len(items), " ".join(parts)))
     if parsed.pr is not None:
-        for rv in parsed.pr.reviews:
+        for rv in parsed.pr.reviews or ():  # None: not known (A5a); the flag says so
             who = f"{rv.user} (bot)" if rv.is_bot else rv.user
             text = f"GitHub review {rv.state.lower()} by {who} at {rv.commit[:12]}"
             items.append((rv.at, len(items), text))
@@ -153,7 +155,7 @@ def _entry(raw: Any, i: int, stop_switch_on: bool) -> Entry:
         parsed = None
     if parsed is not None:
         repo, branch = parsed.repo, parsed.branch
-        issue = task["issue"]["number"]
+        issue = None if task["issue"] is None else task["issue"]["number"]  # null: not linked
         events = _events(parsed)
     return Entry(task_id, title, risk, status, repo, issue, branch, events)
 
