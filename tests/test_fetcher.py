@@ -3889,6 +3889,80 @@ class AuditOf80e8fb3(Base):
         self.assertEqual(caught.exception.code, "several-installations")
 
 
+class ClosingsAndReopenings(Base):
+    """Part 1's rule (audit of ca7faa9): closing the issue withdraws the authorisation, and
+    reopening restores nothing, so the fetcher reads closings and reopenings too."""
+
+    def run_refresh(self):
+        return snapshot.refresh(self.cfg, client(self.fake), NOW)
+
+    def task_of(self, item):
+        return dict(item["task"], paused=False)
+
+    def reviewed(self, item):
+        return Refresh.reviewed(self, item)
+
+    def with_events(self, *events, state="OPEN"):
+        issue = issue_node(10)
+        issue["state"] = state
+        issue["timelineItems"]["nodes"] += list(events)
+        issue["timelineItems"]["totalCount"] = len(issue["timelineItems"]["nodes"])
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue)
+        return self.run_refresh()["items"][0]
+
+    def closed(self, at, closer=None):
+        return {
+            "__typename": "ClosedEvent",
+            "createdAt": at,
+            "actor": {"login": OWNER},
+            "closer": closer,
+        }
+
+    def reopened(self, at):
+        return {"__typename": "ReopenedEvent", "createdAt": at, "actor": {"login": OWNER}}
+
+    def test_the_query_asks_for_closings_and_reopenings(self):
+        query = snapshot.detail_query([1], frozenset(), (OWNER,))
+        self.assertIn("CLOSED_EVENT, REOPENED_EVENT", query)
+        self.assertIn("... on ClosedEvent", query)
+
+    def test_closed_and_reopened_is_never_still_authorised(self):
+        item = self.with_events(
+            self.closed("2026-11-20T10:00:00Z"), self.reopened("2026-11-20T11:00:00Z")
+        )
+        timeline = item["task"]["issue"]["timeline"]
+        self.assertEqual([e["event"] for e in timeline], ["labeled", "closed", "reopened"])
+        s = tasks.derive(self.reviewed(item))
+        self.assertEqual(s.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.AUTHORIZATION_WITHDRAWN, s.flags)
+
+    def test_the_closer_is_kept_only_for_a_pr_in_this_repository(self):
+        pr_here = {
+            "__typename": "PullRequest",
+            "number": 1,
+            "repository": {"nameWithOwner": REPO_A},
+        }
+        pr_there = dict(pr_here, repository={"nameWithOwner": REPO_B})
+        commit = {"__typename": "Commit"}
+        for closer, expected in ((pr_here, 1), (pr_there, None), (commit, None), (None, None)):
+            with self.subTest(closer=closer):
+                item = self.with_events(self.closed("2026-11-20T10:00:00Z", closer), state="CLOSED")
+                closing = item["task"]["issue"]["timeline"][-1]
+                self.assertEqual(closing["event"], "closed")
+                self.assertEqual(closing["closer_pr"], expected)
+
+    def test_a_wrongly_shaped_closer_is_never_read(self):
+        # The issue isn't known (null), as with a wrongly shaped label event: never guessed.
+        item = self.with_events(self.closed("2026-11-20T10:00:00Z", "a commit"), state="CLOSED")
+        self.assertIsNone(item["task"]["issue"])
+
+    def test_a_closed_issue_with_its_closing_reads_as_withdrawn_not_unknown(self):
+        item = self.with_events(self.closed("2026-11-20T10:00:00Z"), state="CLOSED")
+        s = tasks.derive(self.reviewed(item))
+        self.assertEqual(s.state, tasks.State.UNSAFE)
+        self.assertNotIn(tasks.Flag.CLOSURE_UNPLACED, s.flags)
+
+
 class AuditOf7712dec(Base):
     """Round 11: guards that were right but that no test held in place."""
 

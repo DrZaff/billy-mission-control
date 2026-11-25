@@ -269,12 +269,19 @@ PIECES = {
     nodes {
       number title state
       repository { nameWithOwner }
-      timelineItems(itemTypes: [LABELED_EVENT, UNLABELED_EVENT], last: $events) {
+      timelineItems(
+        itemTypes: [LABELED_EVENT, UNLABELED_EVENT, CLOSED_EVENT, REOPENED_EVENT], last: $events
+      ) {
         totalCount
         nodes {
           __typename
           ... on LabeledEvent { createdAt actor { login } label { name } }
           ... on UnlabeledEvent { createdAt actor { login } label { name } }
+          ... on ClosedEvent {
+            createdAt actor { login }
+            closer { __typename ... on PullRequest { number repository { nameWithOwner } } }
+          }
+          ... on ReopenedEvent { createdAt actor { login } }
         }
       }
     }
@@ -823,10 +830,12 @@ def _issue(repo: str, pr: dict) -> tuple[int, dict | None, dict | None]:
     timeline = []
     try:
         for event in events:
-            e = _event(event)
-            # Only the agent:ready label's events: the model reads no others, and keeping them
-            # all, once per pull request, could fill the snapshot (Codex's review of dc1eb14).
-            if e["label"] == READY_LABEL:
+            e = _event(event, repo)
+            # Only the agent:ready label's events, and closings and reopenings: the model reads
+            # no others, and keeping them all, once per pull request, could fill the snapshot
+            # (Codex's review of dc1eb14). A closing ends the authorisation as an unlabel does,
+            # so leaving them out would show a closed-and-reopened issue as still authorised.
+            if e["event"] in ("closed", "reopened") or e["label"] == READY_LABEL:
                 timeline.append(e)
     except _Incomplete:
         return total, None, screen
@@ -834,22 +843,42 @@ def _issue(repo: str, pr: dict) -> tuple[int, dict | None, dict | None]:
     return total, issue, screen
 
 
-def _event(event: Any) -> dict:
-    """One label event, its label name exact (_exact)."""
+EVENT_KINDS = {
+    "LabeledEvent": "labeled",
+    "UnlabeledEvent": "unlabeled",
+    "ClosedEvent": "closed",
+    "ReopenedEvent": "reopened",
+}
+
+
+def _event(event: Any, repo: str) -> dict:
+    """One label event, its label name exact (_exact), or a closing or reopening. A closing
+    names the pull request that closed it (closer_pr) only when GitHub says it was one in this
+    repository; anything else (a commit, a project, another repository, none) is null, which
+    the model never takes as the merge's own closing."""
     e = _obj(event)
-    kind = {"LabeledEvent": "labeled", "UnlabeledEvent": "unlabeled"}.get(e.get("__typename"))
+    kind = EVENT_KINDS.get(e.get("__typename"))
     if kind is None:
         raise _bad()
     # A deleted account is kept as "ghost": it can never authorise, but its removal of the
     # label still withdraws an authorisation (Codex's review of f772122: skipping it could
     # leave an earlier authorisation in force).
     actor = _login(e.get("actor")) or "ghost"
-    return {
-        "event": kind,
-        "label": _exact(_obj(e.get("label")).get("name")),
-        "actor": actor,
-        "at": _time(e.get("createdAt")),
-    }
+    out = {"event": kind, "actor": actor, "at": _time(e.get("createdAt"))}
+    if kind in ("labeled", "unlabeled"):
+        out["label"] = _exact(_obj(e.get("label")).get("name"))
+    else:
+        out["label"] = None
+    if kind == "closed":
+        closer = e.get("closer")
+        closer_pr = None
+        if isinstance(closer, dict) and closer.get("__typename") == "PullRequest":
+            same = _obj(closer.get("repository")).get("nameWithOwner") == repo
+            closer_pr = _int(closer.get("number")) if same else None
+        elif closer is not None and not isinstance(closer, dict):
+            raise _bad()
+        out["closer_pr"] = closer_pr
+    return out
 
 
 def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None) -> dict:
