@@ -413,6 +413,12 @@ def _list(value: Any) -> list:
     return value
 
 
+def _fresh(stale_at: datetime, now: datetime) -> bool:
+    """Whether a result going stale at `stale_at` is fresh now: not yet stale, and not dated in
+    the future beyond clock drift."""
+    return now <= stale_at <= now + CHECK_FRESH + FUTURE_SKEW
+
+
 def _whole(conn: dict, nodes: list, cap: int) -> bool:
     """Whether a connection's nodes are all there is: its count readable, no more than the
     nodes given, and within the cap."""
@@ -631,6 +637,9 @@ def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) 
 
 
 CHECK_FRESH = timedelta(days=7)
+# A result dated later than this after the refresh is wrongly dated, not fresh: it would pass
+# for longer than seven days (Codex's review of 9650d02). A few minutes allow for clock drift.
+FUTURE_SKEW = timedelta(minutes=5)
 # Freshness changes with time, and a snapshot is read long after it is written: each item says
 # when its counted passes stop being fresh (checks_fresh_until), and a reader counts none of
 # them after that, failures still failing (A5b). The time a snapshot takes to be written then
@@ -787,7 +796,7 @@ def _checks(
                     # unknown, the rest still counts (Codex's reviews of 0e2139f and 1e0f9b0).
                     complete = False
                     continue
-                if stale_at < now:
+                if not _fresh(stale_at, now):
                     complete = False
                     continue
                 if key != name:
@@ -896,7 +905,7 @@ def _status_cautions(
                 stale_at = datetime.fromisoformat(_time(created)) + CHECK_FRESH
             except (FetchError, OverflowError):
                 stale_at = None
-            if stale_at is None or now is None or stale_at < now:
+            if stale_at is None or now is None or not _fresh(stale_at, now):
                 complete = False
             elif expiry is not None:
                 expiry.append(stale_at)  # the passes stand only while it is fresh

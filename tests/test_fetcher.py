@@ -3154,7 +3154,10 @@ class CodexReviewOf0f79663(CodexReviewOf099ef9b):
         def call(method, path, headers, body):
             status, h, data = real(method, path, headers, body)
             if path == "/graphql" and b"pullRequest(number: 1)" in body:
-                asked = [p for p in pieces if markers.get(p, f"\n  {p}".encode()) in body]
+                # The body is JSON, so a newline in the query is "\\n" there (Codex's review of
+                # 9650d02: a literal newline never matched, so those pieces were never in error).
+                asked = [p for p in pieces if markers.get(p, f"\\n  {p}".encode()) in body]
+                requests.append(asked)
                 if asked:
                     answer = json.loads(data)
                     answer["data"]["repository"]["p0"] = None
@@ -3162,8 +3165,12 @@ class CodexReviewOf0f79663(CodexReviewOf099ef9b):
                     data = json.dumps(answer).encode()
             return status, h, data
 
+        requests = []
         github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
         item = self.run_refresh(github)["items"][0]
+        # Every optional piece was asked for, and in error, until the core read (no piece).
+        self.assertIn("title", requests[0])
+        self.assertEqual(requests[-1], [])
         self.assertIsNotNone(item["task"])
         s = tasks.derive(self.task_of(item))
         self.assertEqual(s.state, tasks.State.UNSAFE)
@@ -3577,9 +3584,29 @@ class CodexReviewOf96a9e17(CodexReviewOf099ef9b):
         with contextlib.redirect_stderr(err):
             self.assertNotEqual(main(["selfcheck", "--config", str(bad)]), 0)
         message = err.getvalue().rstrip("\n")
-        self.assertIn("unknown keys", message)
+        self.assertIn("1 unknown key(s)", message)
+        self.assertNotIn("odd", message)  # never the key itself (Codex's review of 9650d02)
         self.assertNotRegex(message, "[\x00-\x1f\x7f-\x9f]")
         self.assertLess(len(message), 300)  # never the file's text at length
+
+
+class CodexReviewOf9650d02(CodexReviewOf099ef9b):
+    def test_a_result_dated_in_the_future_is_never_fresh(self):
+        # Blocking: a future-dated success passed, and dated the checks past seven days.
+        later = (NOW + timedelta(days=30)).isoformat()
+        node = pr_node(1, issue=issue_node(10))
+        runs = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["checkRuns"]
+        runs["nodes"][0]["completedAt"] = later
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+        self.assertFalse(
+            self.with_status(later)["task"]["pull_request"].get("checks_complete", True)
+        )
+        # A minute ahead is clock drift: fresh.
+        item = self.with_status((NOW + timedelta(minutes=1)).isoformat())
+        self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
 
 class NoFifoAnywhere(Base):

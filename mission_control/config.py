@@ -65,7 +65,9 @@ def _keys(data: Any, expected: set[str], name: str) -> dict:
     _req(isinstance(data, dict), f"{name} must be a JSON object")
     missing, extra = expected - set(data), set(data) - expected
     _req(not missing, f"{name} is missing: {', '.join(sorted(missing))}")
-    _req(not extra, f"{name} has unknown keys: {', '.join(sorted(extra))}")
+    # Counted, never named: a key is the file's own text, and a credential pasted by mistake
+    # would be copied into a terminal or a log (Codex's review of 9650d02).
+    _req(not extra, f"{name} has {len(extra)} unknown key(s)")
     return data
 
 
