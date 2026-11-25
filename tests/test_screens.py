@@ -408,6 +408,23 @@ class CodexReviewOfCaa5552(unittest.TestCase):
         self.assertNotIn("never passed review", body)
         self.assertIn("clinical: not known", body)
 
+    def test_unread_reviews_never_show_a_clinician_approval(self):
+        # Codex's review of 72607b3 (blocking): MERGED alone was taken as proof.
+        raw = entry("example-site-919")
+        raw["task"]["pull_request"]["reviews"] = None
+        state, body = detail(raw)
+        self.assertNotEqual(path_row(body, "Clinician"), "done")
+        self.assertNotIn("approved this commit", body)
+
+    def test_a_merge_with_no_linked_issue_never_shows_authorisation(self):
+        # Codex's review of 72607b3 (blocking): MERGED is reachable with ISSUE_NOT_LINKED.
+        raw = entry("example-site-921")
+        raw["task"]["issue"] = None
+        raw["task"]["runs"] = None  # as the fetcher sends it
+        state, body = detail(raw)
+        self.assertEqual(state, State.MERGED)
+        self.assertNotEqual(path_row(body, "Authorised"), "done")
+
     def test_an_unreviewed_merge_says_so(self):
         e = DEMO.entry("example-tools-57")
         body = views.task_detail(DEMO, e)

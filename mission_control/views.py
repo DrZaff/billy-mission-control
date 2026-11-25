@@ -119,7 +119,8 @@ def clinician_approved(status: TaskStatus) -> bool:
     if Flag.CLINICAL not in status.flags or Flag.MERGED_WITHOUT_CLINICIAN in status.flags:
         return False
     if status.state is State.MERGED:
-        return True
+        # Unread reviews prove nothing (Codex's review of 72607b3).
+        return Flag.REVIEWS_UNVERIFIED not in status.flags
     return (
         status.state is State.AWAITING_OWNER
         and Flag.FIX_ROUNDS_EXHAUSTED not in status.flags
@@ -283,6 +284,9 @@ def _path(entry: Entry) -> str:
         authorised = ("!", "no")
     elif st.state is State.PROPOSED:
         authorised = ("-", "not yet")
+    elif Flag.ISSUE_NOT_LINKED in flags:
+        # A merged PR with no readable linked issue (Codex's review of 72607b3).
+        authorised = ("?", "not shown: no linked issue to show it")
     elif st.state in AUTHORISED_STATES:
         authorised = ("done", "yes, by the owner")
     else:
@@ -339,6 +343,8 @@ def _path(entry: Entry) -> str:
             rows.append(("!", "Clinician", "approval of this commit needed"))
         elif clinician_approved(st):
             rows.append(("done", "Clinician", "approved this commit"))
+        elif Flag.REVIEWS_UNVERIFIED in flags:
+            rows.append(("?", "Clinician", "not shown: the reviews couldn't be read"))
         else:
             rows.append(("-", "Clinician", "approval of the final commit needed, later"))
 

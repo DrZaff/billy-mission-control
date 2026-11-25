@@ -141,6 +141,27 @@ class Refresher:
         except OSError:
             # Unreadable is not "no earlier attempt": without it the floor can't be kept.
             return b"failed:status\n"
+        except ValueError:
+            # Malformed (Codex's review of 9aeff19): not "no earlier attempt" either. This
+            # attempt is recorded in a fresh status file, with no network work, so the next
+            # one, a minute later, goes ahead: the floor holds and nobody has to repair it.
+            try:
+                write_json(
+                    self.cfg.snapshot_dir,
+                    STATUS,
+                    {
+                        "boot_id": boot_id,
+                        "attempt_since_boot": since_boot,
+                        "attempt_epoch": now,
+                        "attempt_at": datetime.fromtimestamp(now, UTC).isoformat(),
+                        "snapshot_at": None,
+                        "result": "failed",
+                        "reason": "status",
+                    },
+                )
+            except OSError:
+                pass
+            return b"failed:status\n"
         if self._too_soon(previous, now, boot_id, since_boot):
             return TOO_SOON
         stamp = datetime.fromtimestamp(now, UTC)

@@ -83,6 +83,8 @@ def pr(head=A, checks=None, files=("app.py",), reviews=(), **over):
         "checks": [check("lint", head), check("test", head)] if checks is None else checks,
     }
     value.update(over)
+    if value["merged"] and "merged_at" not in over:
+        value["merged_at"] = "2026-12-31T00:00:00+00:00"  # after every event in these tests
     return value
 
 
@@ -353,6 +355,32 @@ class Merges(unittest.TestCase):
             runs=runs or [run("build"), passed(), published()],
             pull_request=pr(head=head, state="closed", merged=True, merged_by=by, **pr_over),
         )
+
+    def test_a_label_added_after_the_merge_never_authorises_it(self):
+        # Codex's review of 72607b3 (blocking): the issue's current timeline was read, so an
+        # owner's label added after an unauthorised merge made it look authorised.
+        late = task(
+            issue={"number": 7, "state": "closed", "timeline": [labeled(minute=30)]},
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(state="closed", merged=True, merged_by=OWNER, merged_at=t(20)),
+        )
+        s = derive(late)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.UNAUTHORIZED_WORK, s.flags)
+
+    def test_removing_the_label_after_the_merge_withdraws_nothing(self):
+        timeline = [labeled(minute=0), labeled(minute=30, kind="unlabeled")]
+        done = task(
+            issue={"number": 7, "state": "closed", "timeline": timeline},
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(state="closed", merged=True, merged_by=OWNER, merged_at=t(20)),
+        )
+        self.assertEqual(derive(done).state, State.MERGED)
+
+    def test_a_merge_without_its_time_is_unknown(self):
+        value = self.merged()
+        del value["pull_request"]["merged_at"]
+        self.assertEqual(derive(value).state, State.UNKNOWN)
 
     def test_owner_merge_of_the_reviewed_commit_is_merged(self):
         s = derive(self.merged())

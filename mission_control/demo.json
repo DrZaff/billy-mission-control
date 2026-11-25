@@ -1642,7 +1642,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "merged_at": "2026-11-14T16:45:00+00:00"
     }
    }
   },
@@ -1742,7 +1743,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "merged_at": "2026-11-14T17:05:00+00:00"
     }
    }
   },
@@ -1817,7 +1819,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "merged_at": "2026-11-14T18:00:00+00:00"
     }
    }
   },
@@ -2054,7 +2057,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "merged_at": "2026-11-14T17:25:00+00:00"
     }
    }
   },
@@ -2220,7 +2224,8 @@
        "status": "completed",
        "conclusion": "success"
       }
-     ]
+     ],
+     "merged_at": "2026-11-14T17:55:00+00:00"
     }
    }
   },
@@ -2271,7 +2276,8 @@
      "head_sha": "c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9c6d7e8f9",
      "files": null,
      "reviews": null,
-     "checks": null
+     "checks": null,
+     "merged_at": "2026-11-14T10:00:00+00:00"
     }
    }
   },
@@ -2397,7 +2403,8 @@
       "site/footer.css"
      ],
      "reviews": [],
-     "checks": null
+     "checks": null,
+     "merged_at": "2026-11-14T17:55:00+00:00"
     }
    }
   },

@@ -100,6 +100,7 @@ def pr_node(
         "closedAt": closed_at,
         "updatedAt": updated_at or closed_at or "2026-11-23T00:00:00Z",
         "mergedBy": {"login": OWNER} if merged else None,
+        "mergedAt": (closed_at or "2026-11-23T00:00:00Z") if merged else None,
         "headRefName": f"claude/task-{number}",
         "headRefOid": head,
         "potentialMergeCommit": merge_commit,
@@ -784,6 +785,35 @@ class Refresh(Base):
             self.assertIsNone(item["task"]["pull_request"]["files"])  # "not known"
             self.assertIn(tasks.Flag.FILES_UNVERIFIED, tasks.derive(self.task_of(item)).flags)
 
+    def test_the_path_cap_counts_escaped_bytes(self):
+        # Codex's review of 72607b3 (blocking): raw UTF-8 was counted, but each "é" is written
+        # as a six-byte escape.
+        paths = tuple(f"d/{i:02d}" + "é" * 200 for i in range(30))  # 12 KB raw, 36 KB written
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10), files=paths)
+        self.assertIsNone(self.run_refresh()["items"][0]["task"]["pull_request"]["files"])
+
+    def test_a_snapshot_over_its_limit_drops_file_lists_rather_than_failing(self):
+        # Codex's review of 72607b3 (blocking): PRs each within the per-PR cap could together
+        # push the snapshot over its limit, and every refresh failed.
+        paths = tuple(f"d/{i:02d}" + "x" * 100 for i in range(100))  # ~11 KB each
+        self.fake.prs[REPO_A]["open"] = [
+            pr_node(n, issue=issue_node(10), files=paths) for n in range(1, 5)
+        ]
+        full = len(snapshot.encode(self.run_refresh()))
+        saved = snapshot.MAX_SNAPSHOT
+        snapshot.MAX_SNAPSHOT = full - 15000  # room for two of the four lists, not all
+        try:
+            snap = self.run_refresh()
+        finally:
+            snapshot.MAX_SNAPSHOT = saved
+        self.assertLessEqual(len(snapshot.encode(snap)), full - 15000)
+        files = [i["task"]["pull_request"]["files"] for i in snap["items"][:4]]
+        self.assertIn(None, files)  # dropped to "not known"...
+        self.assertIn(list(paths), files)  # ...only as many as needed
+        for item in snap["items"][:4]:
+            if item["task"]["pull_request"]["files"] is None:
+                self.assertIn(tasks.Flag.FILES_UNVERIFIED, tasks.derive(self.task_of(item)).flags)
+
     def test_a_renamed_file_makes_the_file_list_incomplete(self):
         # Codex's review of f37d0c7 (blocking): a rename lists only the new path, so a move out
         # of a clinical folder would hide where it came from.
@@ -1138,6 +1168,20 @@ class RefresherFiles(Base):
         with mock.patch.object(snapshot.os, "open", side_effect=refuse):
             reply = self.make(lambda: NOW.timestamp() + 1).run()
         self.assertEqual(reply, b"failed:status\n")
+
+    def test_a_malformed_status_file_keeps_the_floor_and_heals_itself(self):
+        # Codex's review of 9aeff19: a malformed status file was read as "no earlier attempt".
+        wall = [NOW.timestamp()]
+        self.assertEqual(self.make(lambda: wall[0]).run(), server.OK)
+        for bad in (b"{not json", b"[]", b"\xff\xfe"):
+            with self.subTest(bad=bad):
+                (self.cfg.snapshot_dir / snapshot.STATUS).write_bytes(bad)
+                wall[0] += 1
+                self.assertEqual(self.make(lambda: wall[0]).run(), b"failed:status\n")
+                wall[0] += 1  # the attempt was recorded: still the floor
+                self.assertEqual(self.make(lambda: wall[0]).run(), server.TOO_SOON)
+                wall[0] += 61  # a minute later it goes ahead, with nobody repairing anything
+                self.assertEqual(self.make(lambda: wall[0]).run(), server.OK)
 
     def test_a_failed_write_still_says_when_the_token_outlived_it(self):
         # Pre-review of 9537b08: a failed revoke was lost when the snapshot write then failed.

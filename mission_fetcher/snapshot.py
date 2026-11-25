@@ -43,9 +43,10 @@ MAX_EVENTS = 100
 MAX_TITLE = 200
 MAX_TEXT = 255
 MAX_SNAPSHOT = 2 * 1024 * 1024
-# Bytes of file paths kept per pull request; past it the list is "not known". So no one pull
-# request (anyone can open one, with long paths) can push the snapshot over its limit and stop
-# every refresh (pre-review of 9537b08): 50 open and 30 closed at most stay far under it.
+# Bytes of file paths kept per pull request, measured as written (JSON escapes, Codex's review
+# of 72607b3); past it the list is "not known". If the whole snapshot is still over its limit,
+# the largest file lists are dropped to "not known" until it fits (see `_fit`), so pull requests
+# anyone can open never stop every refresh (pre-review of 9537b08).
 MAX_PATH_BYTES = 16 * 1024
 SHA = re.compile(r"[0-9a-f]{40}")
 CONTROL = re.compile(r"[\x00-\x1f\x7f  ‪-‮⁦-⁩]")
@@ -79,7 +80,7 @@ query($$owner: String!, $$name: String!) {
   }
 }
 fragment pr on PullRequest {
-  number title state isDraft merged closedAt
+  number title state isDraft merged closedAt mergedAt
   mergedBy { login }
   headRefName headRefOid
   potentialMergeCommit {
@@ -233,7 +234,7 @@ def _files(pr: dict) -> tuple[list[str], bool]:
         path = n.get("path")
         if not isinstance(path, str) or not 0 < len(path) <= 4096 or "\x00" in path:
             raise _Incomplete()
-        size += len(path.encode("utf-8", "surrogatepass"))
+        size += len(json.dumps(path)) + 3  # as written: escapes, comma, newline, indent
         if size > MAX_PATH_BYTES:
             raise _Incomplete()
         if n.get("changeType") not in ("ADDED", "MODIFIED", "DELETED", "CHANGED"):
@@ -420,6 +421,8 @@ def _item(repo: str, cfg: FetcherConfig, node: Any) -> dict:
         "draft": draft,
         "merged": merged,
         "merged_by": _login(pr.get("mergedBy")) if merged else None,
+        # Authorisation counts only up to the merge (Codex's review of 72607b3).
+        "merged_at": _time(pr.get("mergedAt")) if merged else None,
         "head_sha": head,
     }
     # Parts that can't be read whole are null ("not known"): the model never reads them as
@@ -534,8 +537,7 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
         }
         # Measured exactly as it will be written and read (Codex's review of 1cc6cf8), inside
         # the try so a failed revoke is reported with it too (Codex's review of 23bfb61).
-        if len(encode(dict(snapshot, token_revoked=False))) > MAX_SNAPSHOT:
-            raise FetchError("too-large")
+        _fit(snapshot)
     except BaseException as error:
         # The refresh failed, whatever the reason: revoke the token, and say too if it
         # outlived the refresh (Codex's review of bf76866).
@@ -547,6 +549,30 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
         raise
     snapshot["token_revoked"] = github.revoke(token)
     return snapshot
+
+
+def _fit(snapshot: dict) -> None:
+    """Keep the snapshot under MAX_SNAPSHOT as written. File lists are the one large part
+    anyone can make (Codex's review of 72607b3: several repositories of long, escaped paths
+    stopped every refresh), so the largest are dropped to "not known" (null: the model then
+    treats the PR as possibly clinical) until it fits. What remains is bounded: titles and
+    check names are capped, reviews carry no text, and labels come from people with triage
+    access. Only if it still doesn't fit does the refresh fail ("too-large")."""
+
+    def size() -> int:
+        return len(encode(dict(snapshot, token_revoked=False)))
+
+    if size() <= MAX_SNAPSHOT:
+        return
+    pulls = [i["task"]["pull_request"] for i in snapshot["items"]]
+    pulls = [p for p in pulls if p.get("files")]
+    pulls.sort(key=lambda p: len(encode({"f": p["files"]})), reverse=True)
+    for pull in pulls:
+        pull["files"] = None
+        pull.pop("files_complete", None)
+        if size() <= MAX_SNAPSHOT:
+            return
+    raise FetchError("too-large")
 
 
 def encode(data: dict) -> bytes:
@@ -612,8 +638,9 @@ def read_json(
     folder: Path, name: str, limit: int = MAX_SNAPSHOT, strict: bool = False
 ) -> dict | None:
     """The file's JSON object, or None when it is missing or unreadable. With `strict`, only a
-    missing file gives None; any other failure to open it raises OSError (pre-review of
-    9537b08: an unreadable status file was taken for "no earlier refresh")."""
+    missing file gives None: a failure to open it raises OSError (pre-review of 9537b08: an
+    unreadable status file was taken for "no earlier refresh"), and a malformed, oversized or
+    non-object file raises ValueError (Codex's review of 9aeff19)."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
         fd = os.open(folder / name, flags)
@@ -625,10 +652,14 @@ def read_json(
         return None
     with os.fdopen(fd, "rb") as f:
         data = f.read(limit + 1)
-    if len(data) > limit:
-        return None
     try:
+        if len(data) > limit:
+            raise ValueError("too large")
         value = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+        if not isinstance(value, dict):
+            raise ValueError("not an object")
+    except ValueError:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
+        if strict:
+            raise
         return None
-    return value if isinstance(value, dict) else None
+    return value

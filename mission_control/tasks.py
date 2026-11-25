@@ -48,7 +48,8 @@ clinical_paths may be an explicit empty list.
                    "pr": int,                                  (publish)
                    "files": [path]}                            (optional, any step)
     pull_request  {"number": int, "state": "open" | "closed", "draft": bool, "merged": bool,
-                   "merged_by": "login" | null, "head_sha": "<40 hex>", "files": [path],
+                   "merged_by": "login" | null, "merged_at": ISO 8601 (when merged),
+                   "head_sha": "<40 hex>", "files": [path],
                    "reviews": [{"user": "login", "user_type": "User" | "Bot",
                                 "state": "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" |
                                          "DISMISSED", "commit_id": "<40 hex>", "at": ISO 8601}],
@@ -68,7 +69,9 @@ clinical_paths may be an explicit empty list.
                    rename or a cut-off list): its known clinical paths still count, and the
                    rest may be clinical (FILES_UNVERIFIED). merged_by may be null for a merged
                    PR whose merger can't be identified: that is unsafe (MERGER_UNKNOWN), since
-                   nothing shows the owner merged it.
+                   nothing shows the owner merged it. Only authorisation
+                   given by then counts for the merge (a label added afterwards proves
+                   nothing, and removing it afterwards withdraws nothing).
     The task's "issue" may be null: no readable, authorised issue is linked (none, several,
     one in another repository, or one whose events couldn't be read; issue #15, decision
     A5-2). An open PR then shows as NOT_LINKED, calmly, rather than UNSAFE; a merged one is
@@ -320,6 +323,7 @@ class _PR:
     draft: bool
     merged: bool
     merged_by: str | None
+    merged_at: datetime | None  # None only when not merged
     head: str
     files: tuple[str, ...] | None  # None: not known
     files_complete: bool  # False: the list is known to be partial
@@ -475,6 +479,9 @@ def _parse_pr(raw: Any) -> _PR:
         draft=draft,
         merged=merged,
         merged_by=merged_by,
+        merged_at=_time(_need(p, "merged_at", "pull_request.merged_at"), "pull_request.merged_at")
+        if merged
+        else None,
         head=_sha(p.get("head_sha"), "pull_request.head_sha"),
         files=None
         if (raw_files := _need(p, "files", "pull_request.files")) is None
@@ -575,18 +582,23 @@ def _parse_runs(value: Any) -> tuple[_Run, ...] | None:
 # ---------------------------------------------------------------- derivation
 
 
-def _authorization(task: _Task, flags: set[Flag]) -> tuple[datetime | None, datetime | None]:
+def _authorization(
+    task: _Task, flags: set[Flag], until: datetime | None = None
+) -> tuple[datetime | None, datetime | None]:
     """(since, last): when the owner's current authorisation began, and the owner's latest
     authorising action, or (None, None) if the work is not authorised now.
 
     Only the owner's own "labeled agent:ready" or "authorized" event counts. Authorising again
     while already authorised keeps the start (so earlier work in the same authorisation still
     counts) and moves `last` (which answers an agent's question). Removing the label, by anyone,
-    withdraws it; an add and a removal at the same instant count as withdrawn."""
+    withdraws it; an add and a removal at the same instant count as withdrawn. With `until`
+    (a merge), later events are ignored: they can't authorise or withdraw what is done."""
     since: datetime | None = None
     last: datetime | None = None
     # At the same instant a removal sorts last, so it wins over an add or an authorisation.
     for e in sorted(task.timeline, key=lambda e: (e.at, e.kind == "unlabeled")):
+        if until is not None and e.at > until:
+            break
         ready = e.label == READY_LABEL
         if e.kind == "labeled" and ready and e.actor != task.owner:
             flags.add(Flag.LABEL_WITHOUT_OWNER)
@@ -693,7 +705,8 @@ def derive(raw: Any) -> TaskStatus:
         else:
             runs.append(r)
 
-    since, last_owner_action = _authorization(task, flags)
+    merged_at = pr.merged_at if pr and pr.merged else None
+    since, last_owner_action = _authorization(task, flags, merged_at)
     if not task.issue_known:
         flags.add(Flag.ISSUE_NOT_LINKED)
 
