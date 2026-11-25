@@ -714,8 +714,12 @@ def _checks(
             if not isinstance(name, str):
                 complete = False  # wrongly shaped: not known, never skipped (audit of 28009de)
                 continue
-            if name not in required:
-                continue  # only required names, matched exactly (Codex's review of dc1eb14)
+            # Only required names. A pass counts only under the exact name (Codex's review of
+            # dc1eb14); anything else under the name in another case still counts against it
+            # (Codex's review of 0f79663).
+            key = _required_name(name, required)
+            if key is None:
+                continue
             raw_status = run.get("status")
             conclusion = run.get("conclusion")
             if not isinstance(raw_status, str) or not (
@@ -746,9 +750,11 @@ def _checks(
                     continue
                 if finished < now - CHECK_FRESH:
                     continue
+                if key != name:
+                    continue  # a pass under another case of the name: never counted
             out.append(
                 {
-                    "name": name,
+                    "name": key,
                     "head_sha": head,
                     "status": status,
                     "conclusion": conclusion.lower() if conclusion else None,
@@ -756,6 +762,15 @@ def _checks(
             )
     cautions, statuses_complete = _status_cautions(commit, head, required, now)
     return out + cautions, complete and statuses_complete
+
+
+def _required_name(name: str, required: tuple[str, ...]) -> str | None:
+    """The required check this name stands for, matched exactly or else ignoring case, or
+    None."""
+    if name in required:
+        return name
+    folded = name.casefold()
+    return next((r for r in required if r.casefold() == folded), None)
 
 
 def _provably_harmless_runs(suite: dict, required: tuple[str, ...]) -> bool:
@@ -770,7 +785,7 @@ def _provably_harmless_runs(suite: dict, required: tuple[str, ...]) -> bool:
     for r in nodes:
         if not isinstance(r, dict) or not isinstance(r.get("name"), str):
             return False
-        if r["name"] in required and not (
+        if _required_name(r["name"], required) is not None and not (
             r.get("status") == "COMPLETED"
             and r.get("conclusion") in ("SUCCESS", "SKIPPED", "NEUTRAL")
         ):
@@ -787,7 +802,9 @@ def _provably_no_required(suite: dict, required: tuple[str, ...]) -> bool:
     if not isinstance(nodes, list) or type(total) is not int or total > len(nodes):
         return False
     return all(
-        isinstance(r, dict) and isinstance(r.get("name"), str) and r["name"] not in required
+        isinstance(r, dict)
+        and isinstance(r.get("name"), str)
+        and _required_name(r["name"], required) is None
         for r in nodes
     )
 
@@ -817,8 +834,11 @@ def _status_cautions(
         if not isinstance(name, str):
             complete = False  # wrongly shaped: not known (audit of 28009de)
             continue
-        if name not in required:
+        # In any case: a status only ever counts against a name (Codex's review of 0f79663).
+        key = _required_name(name, required)
+        if key is None:
             continue
+        name = key
         state = context.get("state")
         if not isinstance(state, str) or state not in STATUS_STATES:
             complete = False
@@ -1146,9 +1166,9 @@ def _details(
         return resolve(fetch_raw(batch, omit, lite))
 
     def resolve(entries: list) -> list:
-        """Each Retry asked for again without its pieces in error, adding to them each time
-        another piece errs (Codex's review of 0e2139f: retries alternated between two pieces
-        until the budget ran out), then with its core only. Still nothing usable: unreadable."""
+        """Each Retry asked for again once without its pieces in error; if another piece errs
+        too, then with its core only, so the budget always reaches the core read (Codex's
+        reviews of 0e2139f and 0f79663). Still nothing usable: unreadable."""
         out = []
         for number, node, lite in entries:
             if isinstance(node, Retry):
@@ -1162,8 +1182,8 @@ def _details(
                         if not _its_own(error, 1):
                             raise
                         got = UNREADABLE
-                    if isinstance(got, Retry) and not got.pieces <= omit:
-                        omit = omit | got.pieces  # one more piece in error: leave it out too
+                    if isinstance(got, Retry) and omit != ALL_PIECES:
+                        omit = ALL_PIECES  # another piece in error: the core only
                         continue
                     if isinstance(got, dict):
                         node = got

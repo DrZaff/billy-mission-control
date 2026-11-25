@@ -2116,8 +2116,9 @@ class Refresh(Base):
         self.assertEqual(state.state, tasks.State.UNSAFE)
         self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
 
-    def test_retries_leave_out_every_piece_that_errs(self):
-        # Codex's review of 0e2139f (blocking): retries alternated between two pieces.
+    def test_a_second_piece_in_error_goes_straight_to_the_core(self):
+        # Codex's review of 0e2139f (blocking): retries alternated between two pieces. And of
+        # 0f79663 (blocking): one retry per piece could spend the budget before the core read.
         real = self.fake.__call__
         calls = []
 
@@ -2137,8 +2138,9 @@ class Refresh(Base):
 
         github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
         item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
-        self.assertEqual(item["task"]["pull_request"]["files"], ["site/a.html"])  # still read
-        self.assertLessEqual(len(calls), 4)
+        self.assertIsNotNone(item["task"])  # read, with its core
+        self.assertIsNone(item["task"]["pull_request"]["files"])  # left out: not known
+        self.assertEqual(len(calls), 3)  # the full read, one retry, the core
 
     def test_an_odd_check_time_never_discards_a_known_failure(self):
         # Codex's review of 0e2139f (blocking).
@@ -4031,7 +4033,9 @@ class CodexReviewOf099ef9b(Base):
                 first.append(1)
                 status, h, data = self.fake(method, path, headers, body)
                 answer = json.loads(data)
-                answer["data"]["repository"]["p0"]["title"] = None
+                # GitHub nulls the whole pull request, so only a retry can read it (Codex's
+                # review of 0f79663: nulling the title alone never asked for one).
+                answer["data"]["repository"]["p0"] = None
                 answer["errors"] = [{"type": "X", "path": ["repository", "p0", "title"]}]
                 return status, h, json.dumps(answer).encode()
             return heavy_github.transport(method, path, headers, body)
@@ -4040,11 +4044,109 @@ class CodexReviewOf099ef9b(Base):
         item = self.run_refresh(github)["items"][0]
         self.assertIsNotNone(item["task"])
         self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNSAFE)
+        # The full read, the retry (too heavy), the lite read (too heavy), then the core.
+        self.assertEqual(len(asked), 3)
+        self.assertNotIn(b"closingIssuesReferences", asked[-1])
 
     def test_running_out_of_requests_has_its_own_reason(self):
         # Never taken for a heavy query: the budget's own code is not HEAVY.
         self.assertNotIn("over-budget", snapshot.HEAVY)
         self.assertRegex("over-budget", server.REASON)
+
+
+class CodexReviewOf0f79663(CodexReviewOf099ef9b):
+    def test_errors_on_every_piece_never_spend_the_budget_before_the_core(self):
+        # Blocking: each optional piece in error used a retry, and the budget ran out before
+        # the core read that would show the unsafe merge.
+        self.merged_by_stranger()
+        real = self.fake.__call__
+        pieces = [p for p in snapshot.PIECES if p != "reviews"]
+        markers = {
+            "files": b"files(",
+            "commits": b"commits(",
+            "potentialMergeCommit": b"potentialMergeCommit",
+            "closingIssuesReferences": b"closingIssuesReferences",
+        }
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number: 1)" in body:
+                asked = [p for p in pieces if markers.get(p, f"\n  {p}".encode()) in body]
+                if asked:
+                    answer = json.loads(data)
+                    answer["data"]["repository"]["p0"] = None
+                    answer["errors"] = [{"type": "X", "path": ["repository", "p0", asked[0]]}]
+                    data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        item = self.run_refresh(github)["items"][0]
+        self.assertIsNotNone(item["task"])
+        s = tasks.derive(self.task_of(item))
+        self.assertEqual(s.state, tasks.State.UNSAFE)
+        self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, s.flags)
+
+    def with_lint(self, kind, name, outcome):
+        node = pr_node(1, issue=issue_node(10))
+        commit = node["commits"]["nodes"][0]["commit"]
+        if kind == "status":
+            commit["status"] = {
+                "contexts": [
+                    {"context": name, "state": outcome, "createdAt": "2026-11-23T00:00:00Z"}
+                ]
+            }
+        else:
+            commit["checkSuites"]["nodes"][0]["checkRuns"]["nodes"].append(
+                {
+                    "name": name,
+                    "status": "COMPLETED",
+                    "conclusion": outcome,
+                    "completedAt": "2026-11-23T00:00:00Z",
+                }
+            )
+            commit["checkSuites"]["nodes"][0]["checkRuns"]["totalCount"] += 1
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        return tasks.derive(self.reviewed(item)).flags
+
+    def test_a_failure_under_another_case_of_a_required_name_counts(self):
+        # Blocking: a failing status "LINT" was ignored beside a passing run "lint".
+        for kind in ("status", "run"):
+            with self.subTest(kind=kind):
+                flags = self.with_lint(kind, "LINT", "FAILURE")
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
+                self.assertIn(tasks.Flag.CHECKS_FAILING, flags)
+        # A pass under another case adds nothing, and never stands in for the exact name.
+        self.assertIn(tasks.Flag.CHECKS_PASSED, self.with_lint("run", "LINT", "SUCCESS"))
+        node = pr_node(1, issue=issue_node(10), checks=("LINT", "test"))
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+
+    def test_another_case_counts_in_suites_whose_event_cant_count(self):
+        # A failing run under another case, in a suite started by hand or with no workflow
+        # run, still keeps the checks from passing.
+        for workflow_run in ({"event": "workflow_dispatch"}, None):
+            with self.subTest(workflow_run=workflow_run):
+                node = pr_node(1, issue=issue_node(10))
+                commit = node["commits"]["nodes"][0]["commit"]
+                commit["checkSuites"]["nodes"].append(
+                    {
+                        "app": {"slug": "github-actions"},
+                        "workflowRun": workflow_run,
+                        "checkRuns": {
+                            "totalCount": 1,
+                            "nodes": [
+                                {"name": "LINT", "status": "COMPLETED", "conclusion": "FAILURE"}
+                            ],
+                        },
+                    }
+                )
+                commit["checkSuites"]["totalCount"] = 2
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                flags = tasks.derive(self.reviewed(item)).flags
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
 
 
 class NoFifoAnywhere(Base):
