@@ -3682,6 +3682,56 @@ class CodexReviewOf322b659(Base):
         self.assertEqual(snapshot._listing(REPO_A, data, NOW), ([1], True))
 
 
+class CodexReviewOf07c05d4(Base):
+    def test_a_review_with_no_author_in_a_clinicians_list_is_not_known(self):
+        # Blocking: skipped as "someone else", it could hide a later changes request.
+        approved = review_node(OWNER, "APPROVED", at="2026-11-22T00:00:00Z")
+        later = review_node(OWNER, "CHANGES_REQUESTED", at="2026-11-23T00:00:00Z")
+        later["author"] = None
+        node = pr_node(
+            1, issue=issue_node(10), files=("evidence/a.json",), reviews=(approved, later)
+        )
+        self.fake.prs[REPO_A]["open"][0] = node
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            # GitHub returned it in this clinician's own connection.
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"rv0:" in body:
+                answer = json.loads(data)
+                for pr in answer["data"]["repository"].values():
+                    if pr and "rv0" in pr:
+                        pr["rv0"] = {"totalCount": 2, "nodes": [approved, later]}
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
+        self.assertIsNone(item["task"]["pull_request"]["reviews"])
+        self.assertNotIn(
+            tasks.Flag.CLINICIAN_APPROVED, tasks.derive(dict(item["task"], paused=False)).flags
+        )
+
+    def test_any_repeated_row_marks_the_list_cut_off(self):
+        # Should fix: repeats in the closed list were merged silently.
+        recent = (NOW - timedelta(days=1)).isoformat()
+        row = {"number": 5, "closedAt": recent, "updatedAt": recent}
+        for closed in ([row, row], [row]):
+            with self.subTest(rows=len(closed)):
+                data = {
+                    "repository": {
+                        "open": {"totalCount": 1, "nodes": [{"number": 5}]}
+                        if len(closed) == 1
+                        else {"totalCount": 0, "nodes": []},
+                        "closed": {"nodes": closed, "pageInfo": {"hasNextPage": False}},
+                    }
+                }
+                self.assertEqual(snapshot._listing(REPO_A, data, NOW), ([5], True))
+        # A list with no repeat is whole.
+        data["repository"]["open"] = {"totalCount": 0, "nodes": []}
+        self.assertEqual(snapshot._listing(REPO_A, data, NOW), ([5], False))
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now

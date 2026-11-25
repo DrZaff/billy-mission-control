@@ -615,8 +615,11 @@ def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) 
             if merged_at is not None and at > merged_at:
                 continue  # after the merge: skipped before anything else (audit of 0585599)
             author = n.get("author")
+            # GitHub returned it in this clinician's own connection, so an author it can't name
+            # (null, or a deleted account) is a surprise, never "someone else": the reviews are
+            # not known (Codex's review of 07c05d4: skipping one could hide a changes request).
             if author is None:
-                continue  # a deleted account: not this clinician
+                raise _Incomplete()
             # GitHub filtered by author, and logins are case-insensitive: anything else in this
             # connection is a surprise, so the reviews are "not known" (audit of 28009de).
             # Only a GitHub user is a clinician: a bot, or an author whose kind GitHub didn't
@@ -1169,9 +1172,6 @@ def _listing(
     more_open = _int(open_conn.get("totalCount")) != len(open_nodes)
     since = now - timedelta(days=RECENT_DAYS)
     numbers = [_int(_obj(n).get("number")) for n in open_nodes]
-    # A repeated row would match the count and then collapse: the list may be missing one
-    # (Codex's review of 322b659).
-    more_open = more_open or len(set(numbers)) != len(numbers)
     closed, cursor = _closed_page(repository.get("closed"), since)
     numbers += closed
     pages = 1
@@ -1180,7 +1180,10 @@ def _listing(
         closed, cursor = _closed_page(page, since)
         numbers += closed
         pages += 1
-    return list(dict.fromkeys(numbers)), more_open or cursor is not None
+    # Any repeat, within a page, across pages or between the lists, means the list changed while
+    # it was read, or GitHub's answer is odd: one may be missing (Codex's review of 07c05d4).
+    repeated = len(set(numbers)) != len(numbers)
+    return list(dict.fromkeys(numbers)), more_open or repeated or cursor is not None
 
 
 # Failures that may pass on asking again: a pull request is asked for in full once more before
