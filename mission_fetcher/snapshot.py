@@ -857,21 +857,24 @@ def _checks(
         # of f37d0c7). Only GitHub Actions suites have a
         # workflow run; another app's checks are taken as GitHub gives them (de9a6fb).
         if app == "github-actions":
-            if "workflowRun" not in suite:
-                complete = False  # left out: not known, like a missing app (audit of 0585599)
-                continue
             workflow_run = suite.get("workflowRun")
             event = workflow_run.get("event") if isinstance(workflow_run, dict) else None
-            if workflow_run is not None and not isinstance(event, str):
-                complete = False  # wrongly shaped: not known (audit of 42a3721)
-                continue
-            if workflow_run is None:
-                # Its event can't be told: skipped only if its runs are provably whole and hold
-                # no required check (audits of 28009de and 0585599).
-                if not _provably_no_required(suite, required):
-                    complete = False
-                continue
-            if event not in CHECK_EVENTS:
+            # Left out, wrongly shaped, or null with runs that may hold a required check: its
+            # event can't be told, so not known (audits of 0585599, 42a3721 and 28009de). Its
+            # runs are still read, so a failure in them still fails (pre-review of b8b1ca7);
+            # being partial, the list never passes on them.
+            unknown_event = "workflowRun" not in suite or (
+                workflow_run is not None and not isinstance(event, str)
+            )
+            if (
+                workflow_run is None
+                and not unknown_event
+                and _provably_no_required(suite, required)
+            ):
+                continue  # provably whole, with no required check: nothing to read
+            if unknown_event or workflow_run is None:
+                complete = False
+            elif event not in CHECK_EVENTS:
                 # GitHub leaves such a run out of a PR's required checks (Codex's review of
                 # f37d0c7), so its success never counts. But a failing or unfinished run with a
                 # required name may still bear on the merge box: not known, never dropped
@@ -990,7 +993,7 @@ def _provably_harmless_runs(suite: dict, required: tuple[str, ...]) -> bool:
     if not _distinct(nodes) or len(nodes) > MAX_RUNS:  # a repeat, or more than asked for
         return False
     for r in nodes:
-        if not isinstance(r, dict) or not isinstance(r.get("name"), str):
+        if not isinstance(r, dict) or not isinstance(r.get("name"), str) or not r["name"]:
             return False
         if _required_name(r["name"], required) is not None and not (
             r.get("status") == "COMPLETED"
@@ -1013,6 +1016,7 @@ def _provably_no_required(suite: dict, required: tuple[str, ...]) -> bool:
     return all(
         isinstance(r, dict)
         and isinstance(r.get("name"), str)
+        and r["name"] != ""
         and _required_name(r["name"], required) is None
         for r in nodes
     )
@@ -1358,7 +1362,9 @@ def _closed_page(
         # Closing updates a pull request: an update before its closing can't be, and the page's
         # update times then say nothing about the next (Codex's review of cc29d6e).
         impossible = impossible or updated[-1] < closed_at
-        if closed_at >= since:
+        # Never more read in detail than a page holds: more than asked for is doubtful (below)
+        # and cut to the page's size (pre-review of b8b1ca7).
+        if closed_at >= since and len(rows) <= MAX_CLOSED:
             numbers.append(number)
     info = _obj(conn.get("pageInfo"))
     has_next = info.get("hasNextPage")

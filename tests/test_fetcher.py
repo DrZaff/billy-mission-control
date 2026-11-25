@@ -4381,6 +4381,51 @@ class PreReviewOf8c4bfec(PreReviewOf07c3480):
         self.assertFalse(snapshot._optional_place(("repository", "p9", "files"), 2))
 
 
+class PreReviewOfB8b1ca7(PreReviewOf07c3480):
+    def test_an_oversized_closed_page_is_never_all_read(self):
+        recent = (NOW - timedelta(days=1)).isoformat()
+        rows = [{"number": n, "closedAt": recent, "updatedAt": recent} for n in range(1, 2001)]
+        data = {
+            "repository": {
+                "open": {"totalCount": 0, "nodes": []},
+                "closed": {"nodes": rows, "pageInfo": {"hasNextPage": False}},
+            }
+        }
+        numbers, cut_off = snapshot._listing(REPO_A, data, NOW)
+        self.assertEqual((len(numbers), cut_off), (snapshot.MAX_CLOSED, True))
+
+    def test_an_actions_suites_failure_is_read_whatever_its_workflow_run(self):
+        for workflow_run in ("left out", None, {"event": 7}):
+            with self.subTest(workflow_run=workflow_run):
+                node = pr_node(1, issue=issue_node(10))
+                suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+                suite["checkRuns"]["nodes"][0]["conclusion"] = "FAILURE"
+                if workflow_run == "left out":
+                    del suite["workflowRun"]
+                else:
+                    suite["workflowRun"] = workflow_run
+                item = self.item_for(node)
+                self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+                self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
+
+    def test_an_empty_name_in_another_suite_is_never_harmless(self):
+        node = pr_node(1, issue=issue_node(10))
+        suites = node["commits"]["nodes"][0]["commit"]["checkSuites"]
+        suites["nodes"].append(
+            {
+                "app": {"slug": "other-ci"},
+                "workflowRun": None,
+                "checkRuns": {
+                    "totalCount": 1,
+                    "nodes": [{"name": "", "status": "COMPLETED", "conclusion": "FAILURE"}],
+                },
+            }
+        )
+        suites["totalCount"] = 2
+        pull = self.item_for(node)["task"]["pull_request"]
+        self.assertFalse(pull.get("checks_complete", True))
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now
