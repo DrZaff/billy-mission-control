@@ -15,7 +15,9 @@ import base64
 import http.client
 import json
 import re
+import socket
 import ssl
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -78,28 +80,39 @@ def tls_context() -> ssl.SSLContext:
 def https_transport(method: str, path: str, headers: dict[str, str], body: bytes | None):
     """One HTTPS request to api.github.com. The real transport; tests pass a fake one."""
     conn = http.client.HTTPSConnection(HOST, 443, timeout=TIMEOUT, context=tls_context())
+    # A whole request has a time limit, not only each socket operation (Codex's review of
+    # 9dbb868). A check between reads can't enforce it: one read, or the status line and
+    # headers, can drip a byte at a time for hours (Fable's pre-review of a21bd27). So a
+    # watchdog shuts the connection's socket at the limit, whatever is waiting on it.
+    expired = threading.Event()
+
+    def stop() -> None:
+        expired.set()
+        sock = conn.sock
+        if sock is not None:
+            try:
+                # The plain socket's shutdown: it wakes a blocked read without touching the TLS
+                # state another thread is using.
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    watchdog = threading.Timer(REQUEST_LIMIT, stop)
+    watchdog.daemon = True
+    watchdog.start()
     try:
-        # A whole request has a time limit too, not only each socket operation: a slow drip
-        # could otherwise run far past the refresh's limit (Codex's review of 9dbb868).
-        ends = time.monotonic() + REQUEST_LIMIT
         conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
-        chunks, size = [], 0
-        while size <= MAX_RESPONSE:
-            if time.monotonic() > ends:
-                raise TimeoutError()
-            chunk = resp.read(min(64 * 1024, MAX_RESPONSE + 1 - size))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            size += len(chunk)
-        data = b"".join(chunks)
+        data = resp.read(MAX_RESPONSE + 1)
+        if expired.is_set():
+            raise TimeoutError()
         return resp.status, {k.lower(): v for k, v in resp.getheaders()}, data
     except TimeoutError:
         raise FetchError("timeout") from None
-    except (OSError, http.client.HTTPException):
-        raise FetchError("network") from None
+    except (OSError, ValueError, http.client.HTTPException):
+        raise FetchError("timeout" if expired.is_set() else "network") from None
     finally:
+        watchdog.cancel()
         conn.close()
 
 

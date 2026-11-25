@@ -29,7 +29,7 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
-from mission_control.tasks import READY_LABEL, InvalidInput, derive, parse
+from mission_control.tasks import READY_LABEL, InvalidInput, State, derive, parse
 
 from .config import FetcherConfig
 from .github import FetchError, GitHub
@@ -668,6 +668,10 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, lite: bool = False) -> dict:
     # state MERGED with merged false read as closed without merging).
     if merged != (state == "MERGED") or merged != (pr.get("mergedAt") is not None):
         raise _bad()
+    # An open pull request has no closing time, and a closed one has one: otherwise an "open"
+    # one closed long ago fell out of the window silently (Fable's pre-review of a21bd27).
+    if (state == "OPEN") != (pr.get("closedAt") is None):
+        raise _bad()
     settings = cfg.repos[repo]
     pull = {
         "number": number,
@@ -986,11 +990,14 @@ def repo_items(
         # either: fail, keeping the last good snapshot, rather than replace known results with
         # "not known" under an "ok" (Fable's pre-review of 8152df0).
         raise FetchError("too-heavy")
-    if details and not readable:
+    if len(details) > 1 and not readable:
         # Every pull request unreadable is no per-PR problem: fail, keeping the last good
         # snapshot, rather than replace it with nothing but unreadable entries (7faf35a).
         # Judged on the items as built, not on GitHub's answer: pull requests that were all
         # there but all failed their checks here passed the guard (Codex's review of c3ee86b).
+        # Only with more than one: a lone pull request with bad data of its own is shown as
+        # unreadable, never a reason to leave every repository stale (Fable's pre-review of
+        # a21bd27).
         raise _bad()
     return items, more
 
@@ -1024,6 +1031,7 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
         # the try so a failed revoke is reported with it too (Codex's review of 23bfb61).
         _on_time(deadline)
         _fit(snapshot)
+        _on_time(deadline)
     except BaseException as error:
         # The refresh failed, whatever the reason: revoke the token, and say too if it
         # outlived the refresh (Codex's review of bf76866).
@@ -1052,16 +1060,36 @@ def _fit(snapshot: dict) -> None:
     def size() -> int:
         return len(encode(dict(snapshot, token_revoked=False)))
 
+    def cut(candidates: list, saving, apply) -> bool:
+        """Cut candidates in order until the estimated saving covers the excess, then
+        measure once, and repeat: a handful of full measurements, not one per cut (Fable's
+        pre-review of a21bd27: re-measuring after every cut took up to 38 s)."""
+        excess = size() - MAX_SNAPSHOT
+        while excess > 0 and candidates:
+            saved = 0
+            while candidates and saved < excess:
+                candidate = candidates.pop(0)
+                saved += saving(candidate)
+                apply(candidate)
+            excess = size() - MAX_SNAPSHOT
+        return excess <= 0
+
     if size() <= MAX_SNAPSHOT:
         return
     tasks = [
         i["task"] for i in snapshot["items"] if i["task"] and i["task"]["pull_request"].get("files")
     ]
     tasks.sort(key=lambda t: len(encode({"f": t["pull_request"]["files"]})), reverse=True)
-    for task in tasks:
-        _cut(task["pull_request"], tuple(task["clinical_paths"]), keep_one=True)
-        if size() <= MAX_SNAPSHOT:
-            return
+
+    def files_saving(task: dict) -> int:
+        return len(encode({"f": task["pull_request"]["files"]}))
+
+    if cut(
+        tasks,
+        files_saving,
+        lambda t: _cut(t["pull_request"], tuple(t["clinical_paths"]), keep_one=True),
+    ):
+        return
     # Then every file list still there: null (Fable's pre-review of 8152df0: lists were kept
     # while whole items, a known unsafe merge among them, were cut).
     for item in snapshot["items"]:
@@ -1069,46 +1097,45 @@ def _fit(snapshot: dict) -> None:
             _cut(item["task"]["pull_request"], tuple(item["task"]["clinical_paths"]), False)
     if size() <= MAX_SNAPSHOT:
         return
-    # Then the clinicians' reviews, largest first: null, "not known", never approved.
-    pulls = [i["task"]["pull_request"] for i in snapshot["items"] if i["task"]]
-    pulls = [p for p in pulls if p.get("reviews")]
-    pulls.sort(key=lambda p: len(encode({"r": p["reviews"]})), reverse=True)
-    for pull in pulls:
-        pull["reviews"] = None
-        if size() <= MAX_SNAPSHOT:
-            return
-    # Then the checks: null, "not known", never passed (CHECKS_UNVERIFIED).
-    pulls = [i["task"]["pull_request"] for i in snapshot["items"] if i["task"]]
-    pulls = [p for p in pulls if p.get("checks")]
-    pulls.sort(key=lambda p: len(encode({"c": p["checks"]})), reverse=True)
-    for pull in pulls:
-        pull["checks"] = None
-        if size() <= MAX_SNAPSHOT:
+    # Then the clinicians' reviews, then the checks, largest first: null, "not known", never
+    # approved or passed.
+    for key in ("reviews", "checks"):
+        pulls = [i["task"]["pull_request"] for i in snapshot["items"] if i["task"]]
+        pulls = [p for p in pulls if p.get(key)]
+        pulls.sort(key=lambda p, key=key: len(encode({"x": p[key]})), reverse=True)
+        if cut(
+            pulls,
+            lambda p, key=key: len(encode({"x": p[key]})),
+            lambda p, key=key: p.__setitem__(key, None),
+        ):
             return
     # Last, whole items, each repository so cut listed in "truncated", as when GitHub's list is
     # cut off. A stale snapshot for every repository would be worse (Codex's review of
-    # dc1eb14). Unreadable items go first, then calm ones (oldest closed, then least recently
-    # updated open), and items that need attention last, so a known unsafe merge is the last
-    # thing cut (Fable's pre-review of 8152df0).
+    # dc1eb14). The order is by how much an item matters: unreadable first, then calm ones
+    # (oldest closed, then least recently updated open), then those needing attention, and
+    # UNSAFE ones last, so a known unsafe merge is the last thing cut, after any number of
+    # strangers' fork PRs (Fable's pre-reviews of 8152df0 and a21bd27).
     items = snapshot["items"]
 
-    def calm(item: dict) -> bool:
+    def rank(item: dict) -> int:
         if item["task"] is None:
-            return True
-        return not derive(dict(item["task"], paused=False)).needs_attention
+            return 0
+        status = derive(dict(item["task"], paused=False))
+        if status.state is State.UNSAFE:
+            return 3
+        return 2 if status.needs_attention else 1
 
-    unreadable = [i for i in items if i["task"] is None]
-    rest = [i for i in items if i["task"] is not None]
-    closed = sorted((i for i in rest if i["closed_at"] is not None), key=lambda i: i["closed_at"])
-    opened = [i for i in rest if i["closed_at"] is None][::-1]
-    order = unreadable + [i for i in closed + opened if calm(i)]
-    order += [i for i in closed + opened if not calm(i)]
-    for item in order:
+    closed = sorted((i for i in items if i["closed_at"] is not None), key=lambda i: i["closed_at"])
+    opened = [i for i in items if i["closed_at"] is None][::-1]
+    order = sorted(closed + opened, key=rank)  # stable: the age order holds within a rank
+
+    def drop(item: dict) -> None:
         items.remove(item)
         if item["repo"] not in snapshot["truncated"]:
             snapshot["truncated"].append(item["repo"])
-        if size() <= MAX_SNAPSHOT:
-            return
+
+    if cut(order, lambda i: len(encode(i)), drop):
+        return
     raise FetchError("too-large")
 
 

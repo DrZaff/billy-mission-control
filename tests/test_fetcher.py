@@ -897,36 +897,120 @@ class Refresh(Base):
         self.assertEqual(caught.exception.code, "too-slow")
 
     def test_a_slow_drip_answer_is_cut_off_by_the_request_limit(self):
-        class Response:
-            status = 200
+        # Codex's review of 9dbb868, and Fable's pre-review of a21bd27: a check between reads
+        # never ran, since one read (or the headers) can drip a byte at a time. A real
+        # loopback server drips here; the watchdog must end the request near the limit.
+        import http.client as hc
+        import socket as so
+        import threading as th
+        import time as tm
 
-            def read(self, n):
-                return b"x"
+        def serve(listener, prefix):
+            conn, _ = listener.accept()
+            with conn:
+                conn.recv(65536)
+                conn.sendall(prefix)
+                ends = tm.monotonic() + 5
+                while tm.monotonic() < ends:
+                    try:
+                        conn.sendall(b"x")
+                    except OSError:
+                        return
+                    tm.sleep(0.05)
 
-            def getheaders(self):
-                return []
-
-        class Connection:
-            def __init__(self, *a, **k):
-                pass
-
-            def request(self, *a, **k):
-                pass
-
-            def getresponse(self):
-                return Response()
-
-            def close(self):
-                pass
-
-        clock = iter(range(0, 10**6, 5))  # each look: 5 s later
-        with (
-            mock.patch.object(gh.http.client, "HTTPSConnection", Connection),
-            mock.patch.object(gh.time, "monotonic", side_effect=lambda: next(clock)),
+        headers_then_body = b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n"
+        for name, prefix in (
+            ("headers", b"HTTP/1.1 200 OK\r\nX-Slow: "),
+            ("body", headers_then_body),
         ):
-            with self.assertRaises(gh.FetchError) as caught:
-                gh.https_transport("GET", "/x", {}, None)
-        self.assertEqual(caught.exception.code, "timeout")
+            with self.subTest(drip=name):
+                listener = so.socket(so.AF_INET, so.SOCK_STREAM)
+                listener.bind(("127.0.0.1", 0))
+                listener.listen(1)
+                port = listener.getsockname()[1]
+                th.Thread(target=serve, args=(listener, prefix), daemon=True).start()
+                plain = lambda host, p, timeout, context, port=port: hc.HTTPConnection(  # noqa: E731
+                    "127.0.0.1", port, timeout=timeout
+                )
+                started = tm.monotonic()
+                with (
+                    mock.patch.object(gh.http.client, "HTTPSConnection", plain),
+                    mock.patch.object(gh, "REQUEST_LIMIT", 0.5),
+                ):
+                    with self.assertRaises(gh.FetchError) as caught:
+                        gh.https_transport("GET", "/x", {}, None)
+                listener.close()
+                self.assertEqual(caught.exception.code, "timeout")
+                self.assertLess(tm.monotonic() - started, 3)  # not the 5 s drip
+
+    # ------------------------------------------------ Fable's pre-review of a21bd27
+
+    def test_an_unsafe_merge_is_cut_last_after_any_number_of_fork_prs(self):
+        # Finding 2: fork PRs (attention) outranked a known unsafe merge when items were cut.
+        recent = (NOW - timedelta(days=3)).isoformat()
+        merge = pr_node(900, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
+        merge["mergedBy"] = {"login": "someone-else"}
+        forks = []
+        for n in range(1, 41):
+            node = pr_node(n, issue=issue_node(10), title="\U0001f600" * 200, files=())
+            node["isCrossRepository"] = True
+            forks.append(node)
+        self.fake.prs[REPO_A]["open"] = forks
+        self.fake.prs[REPO_A]["closed"] = [merge]
+        full = len(snapshot.encode(self.run_refresh()))
+        saved = snapshot.MAX_SNAPSHOT
+        snapshot.MAX_SNAPSHOT = full // 2  # only cutting whole items can fit it
+        try:
+            snap = self.run_refresh()
+        finally:
+            snapshot.MAX_SNAPSHOT = saved
+        self.assertIn(REPO_A, snap["truncated"])
+        kept = next(i for i in snap["items"] if i["number"] == 900)
+        self.assertEqual(tasks.derive(self.task_of(kept)).state, tasks.State.UNSAFE)
+
+    def test_a_lone_unreadable_pr_never_stalls_every_repository(self):
+        # Finding 3.
+        node = pr_node(3, issue=issue_node(11, repo=REPO_B))
+        node["isDraft"] = "no"  # wrongly shaped: this PR's own data
+        self.fake.prs[REPO_B]["open"] = [node]
+        snap = self.run_refresh()  # no bad-response
+        lone = next(i for i in snap["items"] if i["repo"] == REPO_B)
+        self.assertIsNone(lone["task"])  # shown, as unreadable
+        self.assertTrue(any(i["task"] for i in snap["items"] if i["repo"] == REPO_A))
+
+    def test_an_open_pr_with_a_closing_time_is_never_dropped(self):
+        # Finding 4: state OPEN with an old closedAt fell out of the window silently.
+        node = pr_node(1, issue=issue_node(10))
+        node["closedAt"] = (NOW - timedelta(days=60)).isoformat()
+        self.fake.prs[REPO_A]["open"][0] = node
+        items = self.run_refresh()["items"]
+        bad = next(i for i in items if i["number"] == 1)
+        self.assertIsNone(bad["task"])  # unreadable: UNKNOWN
+
+    def test_fitting_measures_the_snapshot_a_handful_of_times(self):
+        # Finding 5: re-measuring after every cut took up to 38 s at worst case.
+        paths = tuple(f"d/{i:02d}" + "x" * 100 for i in range(100))
+        self.fake.prs[REPO_A]["open"] = [
+            pr_node(n, issue=issue_node(10), files=paths) for n in range(1, 41)
+        ]
+        full = len(snapshot.encode(self.run_refresh()))
+        calls = []
+        real = snapshot.encode
+
+        def counted(data):
+            if "items" in data:
+                calls.append(1)
+            return real(data)
+
+        saved = snapshot.MAX_SNAPSHOT
+        snapshot.MAX_SNAPSHOT = full // 4
+        try:
+            with mock.patch.object(snapshot, "encode", side_effect=counted):
+                snap = self.run_refresh()
+        finally:
+            snapshot.MAX_SNAPSHOT = saved
+        self.assertLessEqual(len(real(snap)), full // 4)
+        self.assertLess(len(calls), 10)  # not one per cut list (40)
 
     def test_a_contradictory_merge_state_is_never_read_as_the_calmer_half(self):
         # Finding 3: state MERGED with merged false read as closed without merging.
