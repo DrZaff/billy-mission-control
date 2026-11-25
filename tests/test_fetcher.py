@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import signal
 import socket
 import stat
@@ -177,8 +176,6 @@ class Refresh(Base):
         self.assertIsNone(item["task"]["issue"])
 
     def test_paths_are_kept_exactly_so_clinical_rules_still_match(self):
-        # Codex's review of f772122 (blocking): cleaning collapsed distinct paths, and a path
-        # covered by a clinical rule could lose its match.
         paths = ("evidence/a  b.md", "evidence/a b.md", "evidence/\u202ex.md", "site/x\ty.html")
         self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10), files=paths)
         item = self.run_refresh()["items"][0]
@@ -187,8 +184,6 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.CLINICAL, state.flags)
 
     def test_a_label_name_is_never_cleaned_into_the_authorisation_label(self):
-        # Codex's review of 1cc6cf8 (blocking): cleaning "agent:ready " (or one with a control
-        # character) gave "agent:ready", an authorisation.
         for name in ("agent:ready ", "agent:ready\u200b", "agent:\x01ready", " agent:ready"):
             with self.subTest(name=repr(name)):
                 self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10, label=name))
@@ -198,9 +193,6 @@ class Refresh(Base):
                 self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.UNSAFE)
 
     def test_check_names_are_matched_exactly(self):
-        # Codex's review of 1cc6cf8 (blocking): cleaning made " lint" satisfy "lint", and kept
-        # a configured name with doubled spaces from ever matching. An open pull request with a
-        # passing review is where the model weighs the required checks.
         for required, ran, flag in (
             ("unit  tests", "unit  tests", tasks.Flag.CHECKS_PASSED),
             ("lint", " lint", tasks.Flag.CHECKS_MISSING),
@@ -227,8 +219,6 @@ class Refresh(Base):
                 self.assertIn(flag, tasks.derive(self.reviewed(item)).flags)
 
     def test_only_the_configured_apps_checks_count(self):
-        # Codex's review of bf76866 (blocking): a same-named check from another app could pass a
-        # required check.
         for app, flag in (
             ("github-actions", tasks.Flag.CHECKS_PASSED),
             ("someone-elses-app", tasks.Flag.CHECKS_MISSING),
@@ -246,8 +236,6 @@ class Refresh(Base):
                 self.assertIn(flag, tasks.derive(self.reviewed(item)).flags)
 
     def test_results_on_the_test_merge_commit_leave_the_checks_out(self):
-        # Codex's review of 23bfb61 (blocking): GitHub judges the test merge commit when it has
-        # results; reading only the head could look greener than GitHub.
         clean = {"oid": SHA2, "status": None, "checkSuites": {"totalCount": 0}}
         with_status = dict(clean, status={"contexts": [{"context": "ci/other"}]})
         with_suite = dict(clean, checkSuites={"totalCount": 1})
@@ -269,9 +257,6 @@ class Refresh(Base):
                 self.assertEqual(passed, has_checks)
 
     def test_a_commit_status_can_only_add_caution(self):
-        # Codex's review of ab64500 (blocking): when a status and a check run share a required
-        # name, GitHub needs both to pass. A status that isn't a success counts against the name;
-        # a successful one never makes a check pass.
         for checks, statuses, flag in (
             (("lint", "test"), [("lint", "FAILURE")], tasks.Flag.CHECKS_FAILING),
             (("lint", "test"), [("lint", "ERROR")], tasks.Flag.CHECKS_FAILING),
@@ -294,7 +279,6 @@ class Refresh(Base):
                 self.assertIn(flag, tasks.derive(self.reviewed(item)).flags)
 
     def test_an_internal_error_also_says_when_the_token_outlived_it(self):
-        # Codex's review of ab64500: only a FetchError carried the failed-revoke warning.
         self.fake.fail["/graphql"] = ValueError("a surprise")
         self.fake.fail["/installation/token"] = (500, {}, b"")
         with self.assertRaises(gh.FetchError) as caught:
@@ -302,9 +286,6 @@ class Refresh(Base):
         self.assertEqual(caught.exception.code, "internal+token-not-revoked")
 
     def test_a_malformed_check_status_makes_that_pr_unreadable(self):
-        # Codex's review of 23bfb61: an unhashable status raised TypeError and stopped the
-        # fetcher. Since de9a6fb it makes that one pull request unreadable (UNKNOWN), and the
-        # rest are still read.
         node = pr_node(1, issue=issue_node(10))
         suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
         suite["checkRuns"]["nodes"][0]["status"] = ["COMPLETED"]
@@ -320,8 +301,6 @@ class Refresh(Base):
         self.assertEqual([i["number"] for i in items], [1, 2, 3])
 
     def test_a_field_error_on_one_pr_never_stalls_the_others(self):
-        # Codex's review of de9a6fb (blocking): a GraphQL error on one pull request's field
-        # discarded the whole answer and failed the refresh for every repository.
         self.fake.prs[REPO_A]["open"] = [pr_node(n, issue=issue_node(10)) for n in range(1, 8)]
         real = self.fake.__call__
 
@@ -341,7 +320,6 @@ class Refresh(Base):
                 self.assertEqual(item["task"]["pull_request"]["files"], ["site/a.html"])
 
     def test_a_pr_missing_from_githubs_answer_is_never_silently_dropped(self):
-        # Codex's review of 48929aa (blocking).
         self.fake.prs[REPO_A]["open"] = [pr_node(n, issue=issue_node(10)) for n in range(1, 4)]
         real = self.fake.__call__
 
@@ -361,7 +339,6 @@ class Refresh(Base):
         self.assertIsNone(next(i for i in items if i["number"] == 2)["task"])  # unreadable
 
     def test_any_wrongly_shaped_value_makes_only_that_pr_unreadable(self):
-        # Codex's review of 48929aa (blocking): an unhashable review state raised TypeError.
         bad_review = review_node()
         bad_review["state"] = ["APPROVED"]
         self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10), reviews=[bad_review])
@@ -371,8 +348,6 @@ class Refresh(Base):
         self.assertIsNotNone(items[1]["task"]["pull_request"]["reviews"])
 
     def test_a_query_wide_graphql_error_fails_the_refresh(self):
-        # Codex's review of 7faf35a (blocking): an error about the whole query (no place in
-        # the answer) made every pull request unreadable while the refresh reported success.
         real = self.fake.__call__
 
         def call(method, path, headers, body):
@@ -461,9 +436,6 @@ class Refresh(Base):
         )
 
     def test_cutting_a_list_never_erases_that_it_was_clinical(self):
-        # Codex's review of 9dbb868 (blocking): a clinical path over 512 bytes as written, or
-        # the step that nulls every list, erased the evidence, and with it the warning that
-        # clinical files were merged without a clinician.
         recent = (NOW - timedelta(days=1)).isoformat()
         long_clinical = "evidence/" + "\u00e9" * 3000  # ~18 KB as written: over the cap
         node = pr_node(
@@ -500,7 +472,6 @@ class Refresh(Base):
         )
 
     def test_a_request_that_ends_past_the_time_limit_fails_the_refresh(self):
-        # Codex's review of 9dbb868: the limit was checked only before detail requests.
         times = iter([0.0] + [10_000.0] * 1000)  # the start, then everything is too late
         with mock.patch.object(snapshot.time, "monotonic", side_effect=lambda: next(times)):
             with self.assertRaises(gh.FetchError) as caught:
@@ -508,16 +479,12 @@ class Refresh(Base):
         self.assertEqual(caught.exception.code, "too-slow")
 
     def test_item_ids_are_unique_across_owners(self):
-        # Codex's review of 0cf099c: IDs held the short name only.
         self.assertNotEqual(
             snapshot._unreadable("one/site", 1)["id"], snapshot._unreadable("two/site", 1)["id"]
         )
         self.assertEqual(self.run_refresh()["items"][0]["id"], f"{REPO_A}#1")
 
     def test_a_slow_drip_answer_is_cut_off_by_the_request_limit(self):
-        # Codex's review of 9dbb868, and Fable's pre-review of a21bd27: a check between reads
-        # never ran, since one read (or the headers) can drip a byte at a time. A real
-        # loopback server drips here; the watchdog must end the request near the limit.
         import http.client as hc
         import socket as so
         import threading as th
@@ -646,8 +613,6 @@ class Refresh(Base):
         self.assertLess(len(calls), 10)  # not one per cut list (40)
 
     def test_an_error_inside_one_file_entry_keeps_its_clinical_siblings(self):
-        # Codex's review of c5adbba (blocking): an error on one file's entry discarded the
-        # whole list, and with it the evidence that a merged change was clinical.
         recent = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(
             1,
@@ -685,8 +650,6 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
 
     def test_every_request_keeps_within_the_refresh_limit(self):
-        # Codex's review of c5adbba: the installation, token and repository requests ran
-        # outside the limit, and a request could start with less time left than its own limit.
         limits = []
         real = self.fake.__call__
 
@@ -780,9 +743,6 @@ class Refresh(Base):
         self.assertEqual(caught.exception.code, "too-slow")
 
     def test_a_pr_nulled_whole_for_an_optional_field_is_read_by_its_core(self):
-        # Codex's review of 8152df0 (blocking): an error on a non-null optional field (the
-        # title) makes GitHub null the whole pull request; it was marked unreadable, hiding a
-        # merge by someone other than the owner.
         recent = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
         node["mergedBy"] = {"__typename": "User", "login": "someone-else"}
@@ -836,7 +796,6 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, state.flags)
 
     def test_tasks_the_model_rejects_never_replace_the_snapshot(self):
-        # Codex's review of 8152df0 (blocking): any built task counted as readable.
         real_item = snapshot._item
 
         def rejected(*args, **kwargs):
@@ -850,8 +809,6 @@ class Refresh(Base):
         self.assertEqual(caught.exception.code, "bad-response")
 
     def test_an_error_on_an_optional_field_never_hides_a_known_unsafe_merge(self):
-        # Codex's review of c3ee86b (blocking): a GraphQL error on one optional field threw
-        # away the whole partial answer, so a merge by someone else showed as UNKNOWN.
         recent = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
         node["mergedBy"] = {"__typename": "User", "login": "someone-else"}
@@ -868,8 +825,6 @@ class Refresh(Base):
                 self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, state.flags)
 
     def test_a_field_github_nulled_for_an_error_is_never_read_as_clean(self):
-        # Codex's review of c3ee86b: GitHub sets the errored field to null. Null must mean
-        # "not known", never no files, no result on the test merge commit or no linked issue.
         self.fake.prs[REPO_A]["open"] = [
             pr_node(n, issue=issue_node(10), files=("evidence/a.json",), reviews=[review_node()])
             for n in range(1, 6)
@@ -905,7 +860,6 @@ class Refresh(Base):
         self.assertEqual(len(details), 1)
 
     def test_an_errored_issue_link_gives_no_issue(self):
-        # Codex's review of c3ee86b: the link is "not known" (null), and nothing is shown.
         self.fake.prs[REPO_A]["open"] = [pr_node(1, issue=issue_node(10)), pr_node(2)]
         github = self.with_field_errors({1: ["closingIssuesReferences"]})
         item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
@@ -915,8 +869,6 @@ class Refresh(Base):
         self.assertEqual(tasks.derive(self.task_of(item)).state, tasks.State.NOT_LINKED)
 
     def test_an_error_on_a_core_field_makes_only_that_pr_unreadable(self):
-        # Codex's review of c3ee86b: who merged it can't be judged from a null GitHub put
-        # there for an error.
         recent = (NOW - timedelta(days=1)).isoformat()
         for field in ("mergedBy", "merged", "state", "headRefOid", "mergedAt", "closedAt"):
             with self.subTest(field=field):
@@ -931,8 +883,6 @@ class Refresh(Base):
                 self.assertIsNotNone(by_number[2]["task"])
 
     def test_partial_data_with_an_error_outside_the_pull_requests_fails_the_refresh(self):
-        # Codex's review of c3ee86b: partial data is used only when every error is inside a
-        # pull request that was asked for.
         for path in (None, ["repository"], ["repository", "p9", "files"], ["rateLimit"], "p0"):
             with self.subTest(path=path):
                 error = {"type": "FORBIDDEN"} if path is None else {"type": "X", "path": path}
@@ -942,9 +892,6 @@ class Refresh(Base):
                 self.assertEqual(caught.exception.code, "graphql-error")
 
     def test_prs_that_all_fail_validation_never_replace_the_snapshot(self):
-        # Codex's review of c3ee86b (blocking): the all-unreadable guard looked at GitHub's
-        # answer before the items were built, so pull requests that were all there but all
-        # wrongly shaped passed it, and the refresh reported success.
         self.fake.prs[REPO_A]["open"] = [pr_node(1, head="not-a-sha"), pr_node(2, head="nor-this")]
         with self.assertRaises(gh.FetchError) as caught:
             self.run_refresh()
@@ -4411,6 +4358,25 @@ class PreReviewOfB8b1ca7(PreReviewOf07c3480):
                 self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
                 self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
 
+    def test_a_failure_in_a_suite_of_unknown_app_still_fails(self):
+        for suite_app in ("left out", 7, {"slug": 7}):
+            for conclusion in ("FAILURE", "SUCCESS"):
+                with self.subTest(app=suite_app, conclusion=conclusion):
+                    node = pr_node(1, issue=issue_node(10))
+                    suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+                    suite["checkRuns"]["nodes"][0]["conclusion"] = conclusion
+                    if suite_app == "left out":
+                        del suite["app"]
+                    else:
+                        suite["app"] = suite_app
+                    item = self.item_for(node)
+                    pull = item["task"]["pull_request"]
+                    self.assertFalse(pull.get("checks_complete", True))
+                    flags = tasks.derive(self.reviewed(item)).flags
+                    self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
+                    if conclusion == "FAILURE":
+                        self.assertIn(tasks.Flag.CHECKS_FAILING, flags)
+
     def test_an_empty_name_in_another_suite_is_never_harmless(self):
         # Both guards: another app's suite, and an Actions suite with no workflow run
         # (pre-review of e4a8096: the second had no test).
@@ -4670,11 +4636,13 @@ class CodexReviewOfB7d0915(Base):
             "entry.main([])\n"
         )
         root = Path(__file__).resolve().parent.parent
+        # The child's files go inside this test's own folder, removed with it (Codex, 0f323f6).
+        env = dict(os.environ, TMPDIR=str(self.base))
         child = subprocess.Popen(
-            [sys.executable, "-c", code], cwd=root, stdout=subprocess.PIPE, text=True
+            [sys.executable, "-c", code], cwd=root, env=env, stdout=subprocess.PIPE, text=True
         )
         folder = Path(child.stdout.readline().strip())
-        self.addCleanup(shutil.rmtree, folder.parent, True)
+        self.assertTrue(folder.is_absolute() and folder.is_relative_to(self.base), folder)
         self.assertEqual(child.stdout.readline().strip(), "reading")
         child.send_signal(signal.SIGTERM)
         out, _ = child.communicate(timeout=60)
@@ -4715,7 +4683,7 @@ class CodexReviewOfB7d0915(Base):
     def test_sigterm_ends_at_once_when_idle_and_after_the_refresh_otherwise(self):
         before = signal.getsignal(signal.SIGTERM)
         killed = []
-        with mock.patch.object(entry.os, "kill", lambda pid, sig: killed.append(sig)):
+        with mock.patch.object(entry.signal, "raise_signal", killed.append):
             server.ACTIVE.set()
             try:
                 entry._on_sigterm(signal.SIGTERM, None)
@@ -4738,7 +4706,7 @@ class CodexReviewOfB7d0915(Base):
 
         with (
             mock.patch.object(entry, "_main", fake_main),
-            mock.patch.object(entry.os, "kill", lambda pid, sig: killed.append(sig)),
+            mock.patch.object(entry.signal, "raise_signal", killed.append),
         ):
             entry.main([])
         self.assertEqual((seen, killed), ([entry._on_sigterm], [signal.SIGTERM]))

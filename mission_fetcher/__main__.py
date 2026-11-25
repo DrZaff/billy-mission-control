@@ -80,7 +80,7 @@ def _end() -> None:
         except (OSError, ValueError):
             pass
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
-    os.kill(os.getpid(), signal.SIGTERM)
+    signal.raise_signal(signal.SIGTERM)  # this process only
 
 
 def _on_sigterm(signum, frame) -> None:

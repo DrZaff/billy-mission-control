@@ -835,14 +835,13 @@ def _checks(
                 if run_id in run_ids:
                     complete = False
                 run_ids.add(run_id)
-        if "app" not in suite:
-            complete = False  # left out: not known (audit of 28009de)
-            continue
         suite_app = suite.get("app")
         slug = suite_app.get("slug") if isinstance(suite_app, dict) else None
-        if suite_app is not None and not isinstance(slug, str):
-            complete = False  # wrongly shaped: not known, never skipped silently (42a3721)
-            continue
+        if "app" not in suite or (suite_app is not None and not isinstance(slug, str)):
+            # Left out or wrongly shaped: not known (28009de, 42a3721), yet read as the
+            # configured app's, so a failure in it still fails (Codex's review of 0f323f6).
+            complete = False
+            suite_app, slug = {}, app
         if slug != "github-actions" and suite.get("workflowRun") is not None:
             # Only Actions suites have a workflow run (pre-review of 6b7da87): not known. The
             # configured app's own suite is still read on, so a failure in it still fails

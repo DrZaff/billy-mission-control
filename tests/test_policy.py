@@ -133,7 +133,7 @@ APP_ALLOWED_PARTS = {
 }
 # Ways to start a process or signal one through os, banned in both packages.
 PROCESS_NAMES = re.compile(
-    r"system|popen|posix_spawnp?|fork|forkpty|exec[lv]p?e?|spawn[lv]p?e?|startfile|killpg?"
+    r"system|popen|posix_spawnp?|fork|forkpty|exec[lv]p?e?|spawn[lv]p?e?|startfile|kill(pg)?"
 )
 
 # Ways to reach a module, a builtin or an object's insides without naming it in the code,
@@ -264,6 +264,8 @@ class App(unittest.TestCase):
                     self.assertIn(node.asname, (None, "os"), (path.name, node.lineno))
                 for name in names:
                     self.assertIsNone(PROCESS_NAMES.fullmatch(name), (path.name, node.lineno))
+        # The pattern itself (Codex's review of 0f323f6: it missed "kill").
+        self.assertTrue(all(PROCESS_NAMES.fullmatch(n) for n in ("kill", "killpg", "fork")))
 
     def test_nothing_is_reached_around_the_rules(self):
         # Audit of 7712dec: __import__, sys.modules, a star import, __dict__, type(conn)(...),
