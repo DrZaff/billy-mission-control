@@ -113,8 +113,9 @@ class Refresher:
         self.github = github
         self.clock = clock
         self.boot = boot
+        self.results: list = []  # selfcheck --github's results, after run(work)
 
-    def run(self) -> bytes:
+    def run(self, work: Callable[[], list] | None = None) -> bytes:
         """One refresh, if none is running and none started in the last minute. A lock file
         held for the whole refresh keeps the service and `fetch-now` from running at once, and
         the attempt is recorded before any network work, so neither a second process nor a
@@ -136,7 +137,7 @@ class Refresher:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 return BUSY
-            return self._locked()
+            return self._locked(work)
         finally:
             os.close(lock)  # releases the lock
 
@@ -167,7 +168,7 @@ class Refresher:
             return since_boot < MIN_INTERVAL
         return False
 
-    def _locked(self) -> bytes:
+    def _locked(self, work: Callable[[], list] | None = None) -> bytes:
         now = self.clock()
         boot_id, since_boot = self.boot()
         try:
@@ -220,6 +221,29 @@ class Refresher:
             write_json(self.cfg.snapshot_dir, STATUS, status, durable=True)
         except OSError:
             return b"failed:write\n"  # without a durably recorded attempt, no network work
+        if work is not None:
+            # `selfcheck --github`: GitHub requests under the same lock, floor and durably
+            # recorded attempt as a refresh, though it writes no snapshot (audit of e58b933).
+            try:
+                self.results = work()
+                reply, status["result"] = OK, "selfcheck"
+            except FetchError as error:
+                reply, status["result"], status["reason"] = (
+                    f"failed:{error.code}\n".encode(),
+                    "failed",
+                    error.code,
+                )
+            except Exception:  # noqa: BLE001 - as for a refresh
+                reply, status["result"], status["reason"] = (
+                    b"failed:internal\n",
+                    "failed",
+                    "internal",
+                )
+            try:
+                write_json(self.cfg.snapshot_dir, STATUS, status)
+            except OSError:
+                pass
+            return reply
         snapshot = None
         try:
             snapshot = refresh(self.cfg, self.github(self.cfg), stamp)

@@ -15,6 +15,7 @@ import base64
 import contextvars
 import http.client
 import json
+import os
 import re
 import socket
 import ssl
@@ -27,6 +28,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 HOST = "api.github.com"
+PORT = 443
 TIMEOUT = 15.0
 REQUEST_LIMIT = 60.0  # seconds for a whole request
 REVOKE_LIMIT = 15.0  # the token's revocation, which runs even past a refresh's limit
@@ -76,24 +78,56 @@ def tls_context() -> ssl.SSLContext:
     f772122)."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # verifies certificates and host names
     context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+    # The system's own trust store, by its compiled-in paths: load_default_certs() also obeys
+    # SSL_CERT_FILE and SSL_CERT_DIR, so one variable in the environment could swap the trusted
+    # authorities and hand the App's JWT and token to another host (audit of e58b933).
+    paths = ssl.get_default_verify_paths()
+    cafile = paths.openssl_cafile if os.path.isfile(paths.openssl_cafile or "") else None
+    capath = paths.openssl_capath if os.path.isdir(paths.openssl_capath or "") else None
+    if cafile is None and capath is None:
+        raise FetchError("no-trust-store")
+    context.load_verify_locations(cafile=cafile, capath=capath)
     context.keylog_filename = None
     return context
 
 
+class _Connection(http.client.HTTPSConnection):
+    """An HTTPS connection whose socket the watchdog can reach before the TLS handshake: the
+    TCP connection is made, the socket wrapped without a handshake and handed over, and only
+    then the handshake run, so a peer that drips it is cut off at the limit like any other read
+    (audit of e58b933: the handshake ran out of the watchdog's reach, leaking a thread and a
+    socket per timed-out request)."""
+
+    def __init__(self, held: list, expired: threading.Event, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._held = held
+        self._expired = expired
+
+    def connect(self) -> None:
+        http.client.HTTPConnection.connect(self)  # TCP only, each step bounded by the timeout
+        sock = self._context.wrap_socket(
+            self.sock, server_hostname=self.host, do_handshake_on_connect=False
+        )
+        self.sock = sock
+        self._held.append(sock)
+        if self._expired.is_set():
+            raise TimeoutError()
+        sock.do_handshake()
+
+
 def https_transport(method: str, path: str, headers: dict[str, str], body: bytes | None):
     """One HTTPS request to api.github.com. The real transport; tests pass a fake one."""
-    conn = http.client.HTTPSConnection(HOST, 443, timeout=TIMEOUT, context=tls_context())
+    expired = threading.Event()
+    # The socket, kept from the moment it connects (before the handshake), for the watchdog:
+    # the connection lets go of it for a response that ends with "Connection: close", while
+    # the response still reads from it (Codex's review of d75f891).
+    held: list = []
+    conn = _Connection(held, expired, HOST, PORT, timeout=TIMEOUT, context=tls_context())
+
     # A whole request has a time limit, not only each socket operation (Codex's review of
     # 9dbb868). A check between reads can't enforce it: one read, or the status line and
     # headers, can drip a byte at a time for hours (Fable's pre-review of a21bd27). So a
     # watchdog shuts the connection's socket at the limit, whatever is waiting on it.
-    expired = threading.Event()
-    # The socket, kept from the moment it connects: the connection lets go of it for a response
-    # that ends with "Connection: close", while the response still reads from it (Codex's
-    # review of d75f891).
-    held: list = []
-
     def stop() -> None:
         expired.set()
         for sock in list(held):
@@ -132,7 +166,6 @@ def https_transport(method: str, path: str, headers: dict[str, str], body: bytes
             raise TimeoutError()
         if failure:
             raise failure[0]
-        held.append(conn.sock)
         if expired.is_set():  # the limit passed just as it connected
             raise TimeoutError()
         conn.request(method, path, body=body, headers=headers)

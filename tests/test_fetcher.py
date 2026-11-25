@@ -944,7 +944,7 @@ class Refresh(Base):
         closed = []
 
         class SlowConnection:
-            def __init__(self, *a, **k):
+            def __init__(self, held, expired, *a, **k):
                 self.sock = None
 
             def connect(self):
@@ -956,7 +956,7 @@ class Refresh(Base):
         limit = gh._LIMIT.set(0.3)
         started = tm.monotonic()
         try:
-            with mock.patch.object(gh.http.client, "HTTPSConnection", SlowConnection):
+            with mock.patch.object(gh, "_Connection", SlowConnection):
                 with self.assertRaises(gh.FetchError) as caught:
                     gh.https_transport("GET", "/x", {}, None)
         finally:
@@ -1010,13 +1010,23 @@ class Refresh(Base):
                 listener.listen(1)
                 port = listener.getsockname()[1]
                 th.Thread(target=serve, args=(listener, prefix), daemon=True).start()
-                plain = lambda host, p, timeout, context, port=port: hc.HTTPConnection(  # noqa: E731
-                    "127.0.0.1", port, timeout=timeout
-                )
+
+                class Plain(hc.HTTPConnection):
+                    """Plain HTTP to the local server, handing its socket over as the real
+                    connection class does."""
+
+                    def __init__(self, held, expired, host, p, timeout, context, port=port):
+                        super().__init__("127.0.0.1", port, timeout=timeout)
+                        self._held = held
+
+                    def connect(self):
+                        super().connect()
+                        self._held.append(self.sock)
+
                 started = tm.monotonic()
                 limit = gh._LIMIT.set(0.5)  # as GitHub.call sets it for each request
                 try:
-                    with mock.patch.object(gh.http.client, "HTTPSConnection", plain):
+                    with mock.patch.object(gh, "_Connection", Plain):
                         with self.assertRaises(gh.FetchError) as caught:
                             gh.https_transport("GET", "/x", {}, None)
                 finally:
@@ -3288,3 +3298,186 @@ class StartupChecks(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuditOfE58b933(Base):
+    """An audit from a different angle: the trust store, the handshake, the start-up gate and
+    guards no test exercised."""
+
+    def test_the_trust_store_never_comes_from_the_environment(self):
+        loaded = []
+        real = __import__("ssl").SSLContext.load_verify_locations
+
+        def spy(context, cafile=None, capath=None, cadata=None):
+            loaded.append((cafile, capath))
+            return real(context, cafile=cafile, capath=capath, cadata=cadata)
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SSL_CERT_FILE": str(self.base / "other-ca.pem"),
+                    "SSL_CERT_DIR": str(self.base / "other-certs"),
+                },
+            ),
+            mock.patch.object(gh.ssl.SSLContext, "load_verify_locations", spy),
+            mock.patch.object(
+                gh.ssl.SSLContext,
+                "load_default_certs",
+                side_effect=AssertionError("reads the environment"),
+            ),
+        ):
+            gh.tls_context()
+        paths = gh.ssl.get_default_verify_paths()
+        self.assertEqual(len(loaded), 1)
+        cafile, capath = loaded[0]
+        self.assertIn(cafile, (paths.openssl_cafile, None))
+        self.assertIn(capath, (paths.openssl_capath, None))
+        self.assertNotIn(str(self.base), f"{cafile}{capath}")
+
+    def test_a_dripping_handshake_is_cut_off_and_leaves_no_thread(self):
+        import socket as so
+        import threading as th
+        import time as tm
+
+        listener = so.socket(so.AF_INET, so.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+
+        def drip():
+            conn, _ = listener.accept()
+            with conn:
+                # A TLS record header promising 16 KB of handshake, then its body one byte at a
+                # time: each read waits, never long enough to time the socket out.
+                conn.sendall(b"\x16\x03\x03\x40\x00")
+                ends = tm.monotonic() + 6
+                while tm.monotonic() < ends:
+                    try:
+                        conn.sendall(b"\x00")
+                    except OSError:
+                        return
+                    tm.sleep(0.05)
+
+        th.Thread(target=drip, daemon=True).start()
+        before = th.active_count()
+        limit = gh._LIMIT.set(0.5)
+        started = tm.monotonic()
+        try:
+            with mock.patch.object(gh, "HOST", "127.0.0.1"), mock.patch.object(gh, "PORT", port):
+                with self.assertRaises(gh.FetchError) as caught:
+                    gh.https_transport("GET", "/x", {}, None)
+        finally:
+            gh._LIMIT.reset(limit)
+        self.assertEqual(caught.exception.code, "timeout")
+        self.assertLess(tm.monotonic() - started, 3)
+        for _ in range(40):  # the connect thread ends once the watchdog shuts its socket
+            if th.active_count() <= before:
+                break
+            tm.sleep(0.05)
+        self.assertLessEqual(th.active_count(), before)
+        listener.close()
+
+    def main_with(self, argv, results):
+        from mission_fetcher import __main__ as entry
+
+        with (
+            mock.patch.object(entry, "read_config", return_value="{}"),
+            mock.patch.object(entry, "parse_fetcher", return_value=self.cfg),
+            mock.patch.object(entry, "fetcher_checks", return_value=results),
+            mock.patch.object(entry, "github_checks") as github_checks,
+            mock.patch("mission_fetcher.server.Refresher") as refresher,
+            mock.patch.object(entry.os, "umask") as umask,
+        ):
+            refresher.return_value.run.return_value = b"ok\n"
+            refresher.return_value.results = []
+            code = entry.main(argv)
+        return code, github_checks, refresher, umask
+
+    def test_nothing_starts_unless_every_check_passes(self):
+        from mission_fetcher.checks import Check
+
+        failing = [Check("key file", False, "readable by others")]
+        for command in (["serve", "--config", "x"], ["fetch-now", "--config", "x"]):
+            with self.subTest(command[0]):
+                code, _, refresher, _ = self.main_with(command, failing)
+                self.assertNotEqual(code, 0)
+                refresher.assert_not_called()
+        code, github_checks, refresher, _ = self.main_with(
+            ["selfcheck", "--github", "--config", "x"], failing
+        )
+        self.assertNotEqual(code, 0)
+        github_checks.assert_not_called()
+        refresher.assert_not_called()
+
+    def test_fetch_now_writes_privately_and_reports_failure(self):
+        from mission_fetcher.checks import Check
+
+        code, _, refresher, umask = self.main_with(
+            ["fetch-now", "--config", "x"], [Check("all", True, "yes")]
+        )
+        umask.assert_called_with(0o077)
+        self.assertEqual(code, 0)
+        refresher.return_value.run.return_value = b"failed:http-502\n"
+        from mission_fetcher import __main__ as entry
+
+        with (
+            mock.patch.object(entry, "read_config", return_value="{}"),
+            mock.patch.object(entry, "parse_fetcher", return_value=self.cfg),
+            mock.patch.object(entry, "fetcher_checks", return_value=[Check("all", True, "yes")]),
+            mock.patch("mission_fetcher.server.Refresher") as failing,
+            mock.patch.object(entry.os, "umask"),
+        ):
+            failing.return_value.run.return_value = b"failed:http-502\n"
+            self.assertNotEqual(entry.main(["fetch-now", "--config", "x"]), 0)
+
+    def test_the_github_selfcheck_keeps_the_floor_and_records_its_attempt(self):
+        refresher = RefresherFiles.make(self, lambda: NOW.timestamp())
+        calls = []
+        self.assertEqual(refresher.run(lambda: calls.append(1) or []), server.OK)
+        status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+        self.assertEqual(status["result"], "selfcheck")
+        again = RefresherFiles.make(self, lambda: NOW.timestamp() + 5)
+        self.assertEqual(again.run(lambda: calls.append(1) or []), server.TOO_SOON)
+        self.assertEqual(calls, [1])  # no GitHub work within the minute
+
+    def test_every_start_up_check_is_run(self):
+        names = set(StartupChecks.checks(self._startup()))
+        for expected in ("not root", "reader key", "snapshot folder"):
+            self.assertTrue(any(expected in n for n in names), (expected, sorted(names)))
+        self.assertGreaterEqual(len(names), 12)
+
+    def _startup(self):
+        startup = StartupChecks("test_a_readable_key_fails")
+        startup.setUp()
+        self.addCleanup(startup.doCleanups)
+        return startup
+
+    def test_small_guards(self):
+        github = client(FakeGitHub())
+        with self.assertRaises(gh.FetchError) as caught:
+            github.call("GET", "//evil", TOKEN)
+        self.assertEqual(caught.exception.code, "bad-path")
+        fake = FakeGitHub()
+        fake_token = fake.__call__
+
+        def short_token(method, path, headers, body):
+            status, h, data = fake_token(method, path, headers, body)
+            if path.endswith("/access_tokens"):
+                answer = json.loads(data)
+                answer["token"] = "short"  # noqa: S105 - a malformed test token
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        bad = gh.GitHub(APP_ID, KEY, transport=short_token, clock=lambda: NOW.timestamp())
+        with self.assertRaises(gh.FetchError):
+            bad.token(bad.installation(OWNER, [REPO_A, REPO_B]))
+        big = self.base / "big.pem"
+        big.write_bytes(b"x" * (server.MAX_KEY + 1))
+        with self.assertRaises(gh.FetchError) as caught:
+            server.read_key(big)
+        self.assertEqual(caught.exception.code, "key-unreadable")
+        data = config_data(self.base)
+        data["repos"][REPO_A]["required_checks"] = []
+        with self.assertRaises(fconfig.ConfigError):
+            fconfig.parse_fetcher(json.dumps(data))

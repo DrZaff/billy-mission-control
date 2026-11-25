@@ -41,7 +41,18 @@ def imported_modules(path: Path) -> set[str]:
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             names.add(node.module)
+            # `from http import client` imports http.client (audit of e58b933).
+            names.update(f"{node.module}.{alias.name}" for alias in node.names)
     return names
+
+
+def _is_from_name(name: str, path: Path) -> bool:
+    """Whether `name` is `module.name` from a `from module import name` in the file."""
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            if any(name == f"{node.module}.{a.name}" for a in node.names):
+                return True
+    return False
 
 
 class Workflows(unittest.TestCase):
@@ -113,17 +124,17 @@ class App(unittest.TestCase):
             names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
             self.assertEqual(names & banned, set(), path.name)
             for node in ast.walk(tree):
+                # Every socket made: a Unix one, or one handed over by systemd (fileno=). A
+                # bare socket.socket() is an internet socket (audit of e58b933).
                 if (
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "socket"
-                    and node.args
                 ):
-                    first = node.args[0]
-                    self.assertTrue(
-                        isinstance(first, ast.Attribute) and first.attr == "AF_UNIX",
-                        (path.name, node.lineno),
-                    )
+                    first = node.args[0] if node.args else None
+                    unix = isinstance(first, ast.Attribute) and first.attr == "AF_UNIX"
+                    handed = any(k.arg == "fileno" for k in node.keywords) and not node.args
+                    self.assertTrue(unix or handed, (path.name, node.lineno))
 
     def test_only_the_fetchers_github_module_reaches_the_network(self):
         # Owner's decision for A5a (issues #15 and #16): one module may make outbound calls,
@@ -143,23 +154,47 @@ class App(unittest.TestCase):
             and any(isinstance(t, ast.Name) and t.id == "HOST" for t in node.targets)
         ]
         self.assertEqual(hosts, ["api.github.com"])
-        connections = [
+        ports = [
+            node.value.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "PORT" for t in node.targets)
+        ]
+        self.assertEqual(ports, [443])
+        # No HTTP(S) connection is made directly: the one connection class is _Connection, an
+        # HTTPSConnection, made once, to HOST and PORT.
+        direct = [
             node
             for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr in ("HTTPSConnection", "HTTPConnection")
         ]
-        self.assertEqual(len(connections), 1)
-        call = connections[0]
-        self.assertEqual(call.func.attr, "HTTPSConnection")
-        self.assertEqual(ast.unparse(call.args[0]), "HOST")
-        self.assertEqual(ast.unparse(call.args[1]), "443")
+        self.assertEqual(direct, [])
+        classes = [
+            n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "_Connection"
+        ]
+        self.assertEqual(len(classes), 1)
+        self.assertEqual(
+            [ast.unparse(b) for b in classes[0].bases], ["http.client.HTTPSConnection"]
+        )
+        made = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_Connection"
+        ]
+        self.assertEqual(len(made), 1)
+        self.assertEqual([ast.unparse(a) for a in made[0].args[2:4]], ["HOST", "PORT"])
         # No redirects or proxy settings: nothing reads the environment.
         names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
         # TLS is set up by hand: create_default_context() honours SSLKEYLOGFILE and would write
         # session secrets (Codex's review of f772122).
         self.assertNotIn("create_default_context", names)
+        # load_default_certs() honours SSL_CERT_FILE and SSL_CERT_DIR, which would swap the
+        # trusted authorities (audit of e58b933).
+        self.assertNotIn("load_default_certs", names)
         self.assertNotIn("environ", names)
         self.assertNotIn("getenv", names)
 
@@ -256,7 +291,9 @@ class PureTaskModel(unittest.TestCase):
         self.tree = ast.parse(self.path.read_text(encoding="utf-8"))
 
     def test_imports_only_pure_standard_modules(self):
-        self.assertLessEqual(imported_modules(self.path), TASKS_ALLOWED_IMPORTS)
+        # Modules only (the scan also records `from x import y` as x.y, for the network rule).
+        modules = {m for m in imported_modules(self.path) if not _is_from_name(m, self.path)}
+        self.assertLessEqual(modules, TASKS_ALLOWED_IMPORTS)
 
     def test_no_io_clock_or_code_execution(self):
         for node in ast.walk(self.tree):

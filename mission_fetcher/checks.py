@@ -1,4 +1,4 @@
-"""The fetcher's start-up checks (phase A5a). Each fails closed; `selfcheck fetcher` prints them.
+"""The fetcher's start-up checks (phase A5a). Each fails closed; `selfcheck` prints them.
 
 The same checks as the app's and the stop helper's (mission_control.checks), for the fetcher's
 own files: it never runs as root or as the wrong account, never while it can read a forbidden

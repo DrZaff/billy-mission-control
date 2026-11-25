@@ -84,12 +84,16 @@ def main(argv: list[str] | None = None) -> int:
     results = fetcher_checks(cfg, Path(args.config))
     if args.command == "selfcheck":
         if args.github and not failures(results):
-            from .server import github_for
+            from .server import Refresher, github_for
 
-            try:
-                results += github_checks(cfg, github_for(cfg))
-            except FetchError as error:
-                results.append(Check("reader key", False, error.code))
+            os.umask(0o077)
+            refresher = Refresher(cfg)
+            reply = refresher.run(lambda: github_checks(cfg, github_for(cfg))).decode().strip()
+            if reply == "ok":
+                results += refresher.results
+            else:
+                # Too soon, busy or failed: said, never skipped (audit of e58b933).
+                results.append(Check("GitHub checks", False, reply))
         print(report(results))
         failed = failures(results)
         print(f"{len(results) - len(failed)} of {len(results)} checks passed.")

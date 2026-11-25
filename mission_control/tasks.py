@@ -52,6 +52,8 @@ clinical_paths may be an explicit empty list.
                    "head_sha": "<40 hex>", "from_fork": bool, "files": [path],
                    "clinical_known": bool (optional; true: a list cut to fit held a clinical
                    path, so the change is clinical whatever is still listed),
+                   "checks_complete": bool (optional, default true; false: the results are
+                   partial, so a failure among them fails and nothing passes),
                    "reviews": [{"user": "login", "user_type": "User" | "Bot",
                                 "state": "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" |
                                          "DISMISSED", "commit_id": "<40 hex>", "at": ISO 8601}],
