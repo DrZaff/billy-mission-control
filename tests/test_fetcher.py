@@ -4196,32 +4196,6 @@ class CodexReviewOf05062fc(unittest.TestCase):
         self.assertEqual(github.requests, 1 + 10 * 2)
 
 
-class FreshForTheWholeRefresh(CodexReviewOf099ef9b):
-    """Codex's review of 05062fc (blocking): a result fresh when the refresh began but seven
-    days old before it ended still passed."""
-
-    def test_a_result_expiring_during_the_refresh_never_passes(self):
-        # Expiring before the snapshot is written: within the refresh's limit, the token's
-        # revocation and the write (Codex's reviews of 05062fc and a34154f).
-        margin = snapshot.REFRESH_DEADLINE + gh.REVOKE_LIMIT
-        expiring = (NOW - snapshot.CHECK_FRESH + timedelta(seconds=margin + 30)).isoformat()
-        node = pr_node(1, issue=issue_node(10))
-        for r in node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["checkRuns"][
-            "nodes"
-        ]:
-            r["completedAt"] = expiring
-        self.fake.prs[REPO_A]["open"][0] = node
-        item = self.run_refresh()["items"][0]
-        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
-        # A status the same: not known, never passed.
-        item = self.with_status(expiring)
-        self.assertFalse(item["task"]["pull_request"]["checks_complete"])
-        # Fresh for the whole refresh: passes.
-        safe = NOW - snapshot.CHECK_FRESH + timedelta(seconds=margin + 120)
-        item = self.with_status(safe.isoformat())
-        self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
-
-
 class PreReviewOfE995f6a(CodexReviewOf099ef9b):
     def deep_error(self, field):
         """A passing PR whose answer has an error deep in its checks, nulled there."""
@@ -4335,41 +4309,50 @@ class CodexReviewOfA34154f(CodexReviewOf099ef9b):
         self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
 
-class PublishedOnTimeOrNotAtAll(Base):
-    """Codex's review of d9a70f4 (blocking): a stalled write could publish a snapshot whose
-    results had expired since; one not ready in time is never put in place."""
+class ChecksFreshUntil(CodexReviewOf099ef9b):
+    """Freshness changes with time, and a snapshot is read long after it is written: each item
+    says when its counted passes stop being fresh, and a reader treats its checks as not known
+    after that (Codex's reviews of 05062fc to 28d71fe; owner's decision, 2026-11-25)."""
 
-    def test_a_late_write_never_replaces_the_snapshot(self):
-        folder = self.base / "snapshot"
-        snapshot.write_json(folder, snapshot.SNAPSHOT, {"old": True})
-        with self.assertRaises(OSError):
-            snapshot.write_json(folder, snapshot.SNAPSHOT, {"new": True}, by=0.0)
-        self.assertEqual(snapshot.read_json(folder, snapshot.SNAPSHOT), {"old": True})
-        self.assertEqual(sorted(p.name for p in folder.iterdir()), [snapshot.SNAPSHOT])
-        snapshot.write_json(folder, snapshot.SNAPSHOT, {"new": True}, by=time.monotonic() + 60)
-        self.assertEqual(snapshot.read_json(folder, snapshot.SNAPSHOT), {"new": True})
+    def item_for(self, node):
+        self.fake.prs[REPO_A]["open"][0] = node
+        return self.run_refresh()["items"][0]
 
-    def test_the_refresh_publishes_by_its_deadline(self):
-        # A refresh whose write comes too late fails, and the last snapshot stays.
-        published = []
-        real = server.write_json
+    def test_the_earliest_pass_to_go_stale_dates_the_checks(self):
+        node = pr_node(1, issue=issue_node(10))
+        runs = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["checkRuns"]
+        runs["nodes"][1]["completedAt"] = "2026-11-21T08:00:00Z"
+        item = self.item_for(node)
+        self.assertEqual(item["checks_fresh_until"], "2026-11-28T08:00:00+00:00")
+        # A required status's pass dates them too.
+        node = pr_node(1, issue=issue_node(10), statuses=[("lint", "SUCCESS")])
+        status = node["commits"]["nodes"][0]["commit"]["status"]["contexts"][0]
+        status["createdAt"] = "2026-11-20T00:00:00Z"
+        self.assertEqual(self.item_for(node)["checks_fresh_until"], "2026-11-27T00:00:00+00:00")
 
-        def write(folder, name, data, durable=False, by=None):
-            if name == snapshot.SNAPSHOT:
-                published.append(by)
-            return real(folder, name, data, durable, by)
+    def test_a_pass_about_to_go_stale_counts_but_is_dated(self):
+        soon = NOW - snapshot.CHECK_FRESH + timedelta(seconds=30)
+        node = pr_node(1, issue=issue_node(10))
+        for r in node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["checkRuns"][
+            "nodes"
+        ]:
+            r["completedAt"] = soon.isoformat()
+        item = self.item_for(node)
+        self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+        expected = (soon + snapshot.CHECK_FRESH).astimezone(UTC).isoformat()
+        self.assertEqual(item["checks_fresh_until"], expected)
 
-        start = time.monotonic()
-        with mock.patch.object(server, "write_json", write):
-            server.Refresher(self.cfg, lambda cfg: client(self.fake)).run()
-        self.assertEqual(len(published), 1)
-        self.assertIsNotNone(published[0])
-        self.assertLessEqual(published[0], start + snapshot.PUBLISH_WITHIN + 5)
-        self.assertGreater(snapshot.FRESH_UNTIL.total_seconds(), 0)
-        self.assertEqual(
-            snapshot.CHECK_FRESH - snapshot.FRESH_UNTIL,
-            timedelta(seconds=snapshot.PUBLISH_WITHIN),
-        )
+    def test_no_checks_read_means_no_date(self):
+        merged_at = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(1, state="MERGED", merged=True, closed_at=merged_at, issue=issue_node(10))
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        self.assertIsNone(self.run_refresh()["items"][0]["checks_fresh_until"])
+        node = pr_node(1, issue=issue_node(10), checks=())
+        self.fake.prs[REPO_A]["open"] = [node]
+        self.fake.prs[REPO_A]["closed"] = []
+        self.assertIsNone(self.run_refresh()["items"][0]["checks_fresh_until"])
+        self.assertIsNone(snapshot._unreadable(REPO_A, 1)["checks_fresh_until"])
 
 
 class NoFifoAnywhere(Base):

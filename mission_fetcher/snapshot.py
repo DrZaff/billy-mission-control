@@ -16,6 +16,10 @@ module checks, plus the title and links the screens show. Everything from GitHub
 One key the model needs is left for the web app (phase A5b): `paused`, which it reads from the
 stop marker itself. `runs` is null, "not read": phase A5 starts with GitHub data only (issue
 #15, 2026-11-24), and an empty list would claim no review ever happened.
+
+Each item's `checks_fresh_until` is when its first counted pass stops being fresh (GitHub needs
+one within seven days). After that time the web app must treat the item's checks as not known
+(A5b): a snapshot is read long after it is written, so freshness is judged when it is read.
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ from typing import Any
 from mission_control.tasks import READY_LABEL, InvalidInput, State, derive, parse
 
 from .config import FetcherConfig
-from .github import REVOKE_LIMIT, FetchError, GitHub
+from .github import FetchError, GitHub
 
 SNAPSHOT = "snapshot.json"
 STATUS = "status.json"
@@ -613,16 +617,19 @@ def _reviews(pr: dict, clinicians: tuple[str, ...], merged_at: datetime | None) 
 
 
 CHECK_FRESH = timedelta(days=7)
-# A snapshot is published within this long of the refresh's start, or not at all (Codex's
-# review of d9a70f4: a stalled write could publish it later): the refresh's limit, the token's
-# revocation and a minute to write it. A success counts only if it stays fresh until then
-# (Codex's reviews of 05062fc and a34154f).
-PUBLISH_WITHIN = REFRESH_DEADLINE + REVOKE_LIMIT + 60
-FRESH_UNTIL = CHECK_FRESH - timedelta(seconds=PUBLISH_WITHIN)
+# Freshness changes with time, and a snapshot is read long after it is written: each item says
+# when its counted passes stop being fresh (checks_fresh_until), and a reader treats its checks
+# as not known after that (A5b). The time a snapshot takes to be written then never matters
+# (Codex's reviews of 05062fc, a34154f, d9a70f4 and 28d71fe; owner's decision, 2026-11-25).
 
 
 def _checks(
-    pr: dict, head: str, app: str, required: tuple[str, ...], now: datetime | None = None
+    pr: dict,
+    head: str,
+    app: str,
+    required: tuple[str, ...],
+    now: datetime | None = None,
+    expiry: list | None = None,
 ) -> tuple[list[dict], bool]:
     """(the head commit's results for the required check names, whether they are complete).
     Check runs from the configured app only: a same-named run from any other app can never
@@ -630,7 +637,9 @@ def _checks(
     the list partial, never empty: a failure GitHub did report is kept, since any failure
     fails a check, and a partial list never passes (Fable's pre-review of 4945de9: a failing
     check vanished whenever the reading was degraded). Names that aren't required are passed
-    over before anything else about them is read."""
+    over before anything else about them is read. Each pass counted adds the time it stops
+    being fresh to `expiry`."""
+    expiry = [] if expiry is None else expiry
     complete = not pr.get("__checks_partial__")
     out: list[dict] = []
     # When GitHub has results for the test merge commit, it judges that commit, not the head.
@@ -760,11 +769,12 @@ def _checks(
                     # review of 0e2139f: it discarded failures already read).
                     complete = False
                     continue
-                if finished < now - FRESH_UNTIL:
+                if finished < now - CHECK_FRESH:
                     complete = False
                     continue
                 if key != name:
                     continue  # a pass under another case of the name: never counted
+                expiry.append(finished + CHECK_FRESH)
             out.append(
                 {
                     "name": key,
@@ -773,7 +783,7 @@ def _checks(
                     "conclusion": conclusion.lower() if conclusion else None,
                 }
             )
-    cautions, statuses_complete = _status_cautions(commit, head, required, now)
+    cautions, statuses_complete = _status_cautions(commit, head, required, now, expiry)
     return out + cautions, complete and statuses_complete
 
 
@@ -823,7 +833,11 @@ def _provably_no_required(suite: dict, required: tuple[str, ...]) -> bool:
 
 
 def _status_cautions(
-    commit: dict, head: str, required: tuple[str, ...], now: datetime | None = None
+    commit: dict,
+    head: str,
+    required: tuple[str, ...],
+    now: datetime | None = None,
+    expiry: list | None = None,
 ) -> tuple[list[dict], bool]:
     """(the head commit's statuses for required names, as cautions only, whether complete).
     When a status and a check run share a required name, GitHub needs both to pass (Codex's
@@ -864,8 +878,10 @@ def _status_cautions(
                 at = datetime.fromisoformat(_time(created)) if created is not None else None
             except FetchError:
                 at = None
-            if at is None or now is None or at < now - FRESH_UNTIL:
+            if at is None or now is None or at < now - CHECK_FRESH:
                 complete = False
+            elif expiry is not None:
+                expiry.append(at + CHECK_FRESH)  # the passes stand only while it is fresh
             continue
         pending = state in ("PENDING", "EXPECTED")
         out.append(
@@ -1016,14 +1032,19 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
     # merge box enforced them at the time (owner's decision, 2026-11-25, after Codex's review
     # of a1e05e5).
     pull["checks"] = None
+    expiry: list[datetime] = []
     if state == "OPEN" and "commits" in pr:
         try:
             required = tuple(settings.required_checks)
-            pull["checks"], complete = _checks(pr, head, settings.checks_app, required, now)
+            pull["checks"], complete = _checks(pr, head, settings.checks_app, required, now, expiry)
             if not complete:
                 pull["checks_complete"] = False  # a failure in it still fails; it never passes
         except (_Incomplete, *_SHAPE):
             pull["checks"] = None
+    # When the first counted pass stops being fresh: after it the checks are not known.
+    fresh_until = None
+    if pull["checks"] is not None and expiry:
+        fresh_until = min(expiry).astimezone(UTC).isoformat()
     try:
         linked, issue, issue_screen = _issue(repo, pr)
     except _SHAPE:
@@ -1067,6 +1088,7 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
         "issue": None
         if issue_screen is None
         else dict(issue_screen, url=f"https://github.com/{repo}/issues/{issue_screen['number']}"),
+        "checks_fresh_until": fresh_until,
         "task": task,
     }
 
@@ -1271,6 +1293,7 @@ def _unreadable(repo: str, number: int) -> dict:
         "closed_at": None,
         "linked_issues": None,  # not known
         "issue": None,
+        "checks_fresh_until": None,
         "task": None,
     }
 
@@ -1535,14 +1558,11 @@ def encode(data: dict) -> bytes:
 # ---------------------------------------------------------------- files
 
 
-def write_json(
-    folder: Path, name: str, data: dict, durable: bool = False, by: float | None = None
-) -> None:
+def write_json(folder: Path, name: str, data: dict, durable: bool = False) -> None:
     """Write `name` in `folder` whole, then rename it into place: a reader never sees half a
-    file. With `by` (a time.monotonic() deadline), a file not ready by then is never put in
-    place (OSError), and the one there stays. Never through a symlink (the folder is opened
-    with O_NOFOLLOW and used by its file descriptor); private while being written, then
-    readable by the folder's group (the web app's account) only."""
+    file. Never through a symlink (the folder is opened with O_NOFOLLOW and used by its file
+    descriptor); private while being written, then readable by the folder's group (the web
+    app's account) only."""
     text = encode(data)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     folder_fd = os.open(folder, flags)
@@ -1571,8 +1591,6 @@ def write_json(
                 os.fchmod(fd, 0o640)
             finally:
                 os.close(fd)
-            if by is not None and time.monotonic() > by:
-                raise OSError("too late to publish")
             os.replace(tmp, name, src_dir_fd=folder_fd, dst_dir_fd=folder_fd)
         except BaseException:
             try:
