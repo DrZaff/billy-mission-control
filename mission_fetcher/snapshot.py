@@ -649,7 +649,12 @@ def _reviews(
             n = _obj(node)
             state = n.get("state")
             if state == "PENDING":
-                continue  # a draft review nobody else can see
+                # A draft review nobody else can see, never submitted: one with a submission
+                # time contradicts itself, so the reviews are not known (Codex's review of
+                # b03ad71).
+                if n.get("submittedAt") is not None:
+                    raise _Incomplete()
+                continue
             submitted = n.get("submittedAt")
             if submitted is None:
                 raise _Incomplete()  # a review that can't be placed in time: no guess
@@ -1243,9 +1248,12 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
     }
 
 
-def _closed_page(conn: Any, since: datetime) -> tuple[list[int], str | None, list[int]]:
+def _closed_page(
+    conn: Any, since: datetime
+) -> tuple[list[int], str | None, list[int], list[datetime]]:
     """(numbers closed in the window, the cursor of the next page if it may hold more, every
-    row's number, for finding repeats)."""
+    row's number, for finding repeats, and every row's update time, for checking the order
+    across pages)."""
     conn = _obj(conn)
     nodes = _list(conn.get("nodes"))
     numbers, rows, updated = [], [], []
@@ -1279,8 +1287,8 @@ def _closed_page(conn: Any, since: datetime) -> tuple[list[int], str | None, lis
         cursor = info.get("endCursor")
         if not isinstance(cursor, str) or not 0 < len(cursor) <= 512:
             raise _bad()
-        return numbers, cursor, rows
-    return numbers, None, rows
+        return numbers, cursor, rows, updated
+    return numbers, None, rows, updated
 
 
 def _listing(
@@ -1296,13 +1304,19 @@ def _listing(
     since = now - timedelta(days=RECENT_DAYS)
     numbers = [_int(_obj(n).get("number")) for n in open_nodes]
     rows = list(numbers)  # every row read, older closed ones included
-    closed, cursor, page_rows = _closed_page(repository.get("closed"), since)
+    closed, cursor, page_rows, times = _closed_page(repository.get("closed"), since)
     numbers += closed
     rows += page_rows
     pages = 1
+    # The order is checked across pages too: a page that starts later than the last one ended
+    # breaks the cut-off the earlier pages relied on (Codex's review of b03ad71).
+    disordered = False
     while cursor is not None and more_pages is not None and pages < CLOSED_PAGES:
         page = _obj(_obj(more_pages(cursor)).get("repository")).get("closed")
-        closed, cursor, page_rows = _closed_page(page, since)
+        closed, cursor, page_rows, page_times = _closed_page(page, since)
+        if times and page_times and page_times[0] > times[-1]:
+            disordered = True
+        times += page_times
         numbers += closed
         rows += page_rows
         pages += 1
@@ -1310,7 +1324,8 @@ def _listing(
     # ones included, means the list changed while it was read, or GitHub's answer is odd: one
     # may be missing (Codex's reviews of 07c05d4 and 96cb8a9).
     repeated = len(set(rows)) != len(rows)
-    return list(dict.fromkeys(numbers)), more_open or repeated or cursor is not None
+    cut_off = more_open or repeated or disordered or cursor is not None
+    return list(dict.fromkeys(numbers)), cut_off
 
 
 # Failures that may pass on asking again: a pull request is asked for in full once more before

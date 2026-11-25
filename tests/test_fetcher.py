@@ -4107,6 +4107,42 @@ class CodexReviewOf2084eb4(PreReviewOf07c3480):
                 self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
 
 
+class CodexReviewOfB03ad71(PreReviewOf07c3480):
+    def test_a_pending_review_with_a_submission_time_is_not_known(self):
+        pending = review_node(OWNER, "PENDING")  # with a submittedAt: contradictory
+        approved = review_node(OWNER, "APPROVED", at="2026-11-21T00:00:00Z")
+        node = pr_node(
+            1, issue=issue_node(10), files=("evidence/a.json",), reviews=(approved, pending)
+        )
+        self.assertIsNone(self.item_for(node)["task"]["pull_request"]["reviews"])
+        # A real draft (no submission time) is still passed over.
+        pending["submittedAt"] = None
+        reviews = self.item_for(node)["task"]["pull_request"]["reviews"]
+        self.assertEqual([r["state"] for r in reviews], ["APPROVED"])
+
+    def test_the_order_is_checked_across_pages(self):
+        recent = NOW - timedelta(days=1)
+
+        def row(n, updated):
+            at = updated.isoformat()
+            return {"number": n, "closedAt": at, "updatedAt": at}
+
+        first = {
+            "nodes": [row(2, recent), row(3, recent - timedelta(hours=1))],
+            "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+        }
+        second = {  # starts later than the first page ended: out of order
+            "nodes": [row(4, recent + timedelta(hours=2))],
+            "pageInfo": {"hasNextPage": False},
+        }
+        data = {"repository": {"open": {"totalCount": 0, "nodes": []}, "closed": first}}
+        pages = {"c1": {"repository": {"closed": second}}}
+        numbers, cut_off = snapshot._listing(REPO_A, data, NOW, pages.get)
+        self.assertEqual((numbers, cut_off), ([2, 3, 4], True))
+        second["nodes"] = [row(4, recent - timedelta(hours=2))]  # in order: whole
+        self.assertEqual(snapshot._listing(REPO_A, data, NOW, pages.get), ([2, 3, 4], False))
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now
