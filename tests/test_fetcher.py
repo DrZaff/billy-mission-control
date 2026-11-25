@@ -3531,6 +3531,57 @@ class CodexReviewOfB1f5a1a(CodexReviewOf099ef9b):
         self.assertEqual(caught.exception.code, "too-heavy")
 
 
+class CodexReviewOf96a9e17(CodexReviewOf099ef9b):
+    def test_an_error_inside_the_file_list_never_reads_as_complete(self):
+        # Blocking: the error was dropped, and with the count matching the nodes the list read
+        # as complete, weakening the clinical gate.
+        node = pr_node(1, issue=issue_node(10), files=("site/a.html", "site/b.html"))
+        self.fake.prs[REPO_A]["open"][0] = node
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"files(" in body and b"p0:" in body:
+                answer = json.loads(data)
+                place = ["repository", "p0", "files", "nodes", 1, "changeType"]
+                answer["errors"] = [{"type": "X", "path": place}]
+                data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        item = self.run_refresh(github)["items"][0]
+        pull = item["task"]["pull_request"]
+        self.assertFalse(pull.get("files_complete", True))
+        self.assertIn(tasks.Flag.FILES_UNVERIFIED, tasks.derive(self.reviewed(item)).flags)
+
+    def test_a_config_error_is_shown_without_control_characters(self):
+        # Should fix: the message may quote the file, and went to logs as it was.
+        from mission_control.config import ConfigError, shown
+
+        text = shown(ConfigError("unknown key 'a\nFAKE LOG LINE\x1b[31m'" + "x" * 500))
+        self.assertNotRegex(text, "[\x00-\x1f\x7f-\x9f]")
+        self.assertLessEqual(len(text), 200)
+        self.assertEqual(shown(ConfigError("plain")), "plain")
+
+    def test_the_command_line_shows_config_errors_that_way(self):
+        import contextlib
+        import io
+
+        from mission_fetcher.__main__ import main
+
+        bad = self.base / "bad.json"
+        data = config_data(self.base)
+        data["odd\nkey\x1b[31m" + "x" * 5000] = 1  # an unknown key, quoted in the error
+        bad.write_text(json.dumps(data))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertNotEqual(main(["selfcheck", "--config", str(bad)]), 0)
+        message = err.getvalue().rstrip("\n")
+        self.assertIn("unknown keys", message)
+        self.assertNotRegex(message, "[\x00-\x1f\x7f-\x9f]")
+        self.assertLess(len(message), 300)  # never the file's text at length
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now

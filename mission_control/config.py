@@ -28,6 +28,13 @@ class ConfigError(ValueError):
     pass
 
 
+def shown(error: ConfigError) -> str:
+    """A config error's text, fit for a terminal or a service log: it may quote the file, so no
+    control characters and at most 200 characters (Codex's review of 96a9e17)."""
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", "?", str(error))
+    return text if len(text) <= 200 else text[:199] + "…"
+
+
 @dataclass(frozen=True)
 class AppConfig:
     origin: str

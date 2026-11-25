@@ -226,6 +226,7 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
         return None
     marks: dict[str, set | None] = {}
     deep_commits: set[str] = set()
+    deep_files: set[str] = set()
     # The parts with an error deep inside them, by pull request: if GitHub nulled the whole
     # pull request for it, a retry without them may still read it (Codex's review of b1fef32).
     deep: dict[str, set[str]] = {}
@@ -236,8 +237,9 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
             deep.setdefault(alias, set()).add(field)
         if field == "files" and len(path) > 3:
             # An error inside one file's entry: GitHub nulled that entry, and the paths it did
-            # give are kept, so a clinical one among them is still found (clinical_known) before
-            # the list itself is "not known" (Codex's review of c5adbba).
+            # give are kept, so a clinical one among them is still found (clinical_known), but
+            # the list is marked partial, never complete (Codex's reviews of c5adbba and 96a9e17).
+            deep_files.add(alias)
             continue
         if field == "commits" and len(path) > 3:
             # An error inside the checks: what GitHub did give is kept, marked partial, so a
@@ -264,6 +266,8 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
                 node = {**node, **dict.fromkeys(fields, ERRORED)}
             if alias in deep_commits:
                 node = {**node, "__checks_partial__": True}
+            if alias in deep_files:
+                node = {**node, "__files_partial__": True}
         out.append((number, node, lite))
     return out
 
@@ -505,7 +509,7 @@ def _files(pr: dict, clinical_paths: tuple[str, ...]) -> tuple[list[str] | None,
     rest may be clinical. A path that isn't a plain, bounded string makes the list unknown."""
     conn = _obj(pr.get("files"))
     nodes = _list(conn.get("nodes"))
-    complete = _int(conn.get("totalCount")) == len(nodes)
+    complete = _int(conn.get("totalCount")) == len(nodes) and not pr.get("__files_partial__")
     paths = []
     size = 0
     for node in nodes:

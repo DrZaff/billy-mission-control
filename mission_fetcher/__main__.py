@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mission_control.checks import Check, failures, report
+from mission_control.config import shown
 
 from .checks import fetcher_checks
 from .config import ConfigError, parse_fetcher
@@ -80,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = parse_fetcher(read_config(args.config))
     except (OSError, ValueError, ConfigError) as error:
-        detail = str(error) if isinstance(error, ConfigError) else type(error).__name__
+        detail = shown(error) if isinstance(error, ConfigError) else type(error).__name__
         return _fail("the config could not be read: " + detail)
 
     results = fetcher_checks(cfg, Path(args.config))
