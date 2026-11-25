@@ -22,6 +22,7 @@ import ssl
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -308,7 +309,7 @@ class GitHub:
             # 07c3480).
             if "suspended_at" not in inst:
                 raise FetchError("bad-response")
-            if inst.get("suspended_at") is not None:
+            if inst.get("suspended_at") is not None or inst.get("suspended_by") is not None:
                 raise FetchError("suspended")
             if inst.get("repository_selection") != "selected":
                 raise FetchError("not-selected-repositories")
@@ -338,7 +339,26 @@ class GitHub:
             # of f772122).
             revoked = self.revoke(token)
             raise FetchError("token-not-read-only" + ("" if revoked else "+token-not-revoked"))
+        # It must also be for the selected repositories only, and last about an hour, as the
+        # warnings about a token left unrevoked say (pre-review of 6b7da87).
+        if answer.get("repository_selection") != "selected" or not self._expires_soon(
+            answer.get("expires_at")
+        ):
+            revoked = self.revoke(token)
+            raise FetchError("token-not-limited" + ("" if revoked else "+token-not-revoked"))
         return token
+
+    def _expires_soon(self, value: Any) -> bool:
+        """Whether a token's expires_at is a real time, about an hour away. Bounded loosely, a
+        day either way: the machine's clock may be off, and an exact bound would then fail
+        every refresh; a token said to last for years is still refused."""
+        if not isinstance(value, str):
+            return False
+        try:
+            left = datetime.fromisoformat(value).timestamp() - self.clock()
+        except (ValueError, OverflowError):
+            return False
+        return -86400 < left <= 86400
 
     def repositories(self, token: str, repos: list[str]) -> None:
         """The installation reaches exactly the configured repositories, no more."""
@@ -351,11 +371,31 @@ class GitHub:
         names = [r.get("full_name") if isinstance(r, dict) else None for r in rows]
         if not all(isinstance(n, str) for n in names):
             raise FetchError("bad-response")
+        # Nor may the list say the App can write, or reach every repository (pre-review of
+        # 6b7da87).
+        selection = answer.get("repository_selection", "selected")
+        writes = any(
+            isinstance(r.get("permissions"), dict)
+            and any(r["permissions"].get(k) for k in ("admin", "maintain", "push"))
+            for r in rows
+        )
+        if selection != "selected" or writes:
+            raise FetchError("not-read-only")
         exact = len(names) == len(set(names)) == len(repos) and set(names) == set(repos)
         if answer.get("total_count") != len(repos) or not exact:
             raise FetchError("wrong-repositories")
 
-    def graphql(self, token: str, query: str, variables: dict[str, Any]) -> dict:
+    def graphql(
+        self,
+        token: str,
+        query: str,
+        variables: dict[str, Any],
+        placeable: Callable[[tuple], bool] | None = None,
+    ) -> dict:
+        """The query's data. With `placeable`, a cost error GitHub placed where it says yes (a
+        part the caller can leave out) is a partial error like any other; anywhere else, on a
+        whole pull request, on the repository, or with no place, it is too heavy, and the
+        caller splits the batch (pre-review of 6b7da87)."""
         answer = self.call("POST", "/graphql", token, {"query": query, "variables": variables})
         if not isinstance(answer, dict):
             raise FetchError("bad-response")
@@ -386,10 +426,21 @@ class GitHub:
             # The partial answer goes with the error, never in its place: a caller that
             # doesn't look at the places gets no data at all (Codex's review of c3ee86b).
             data = answer.get("data")
-            if kinds & HEAVY_KINDS and (not isinstance(data, dict) or None in paths):
-                # GitHub stopped the query for its cost, and gave nothing placed: too heavy. One
-                # placed on a part, with the rest of the answer, is like any other partial
-                # error, so what it did give is still read (Codex's review of b1f5a1a).
+            heavy = [
+                path
+                for e, path in zip(errors, paths, strict=True)
+                if isinstance(e, dict)
+                and isinstance(e.get("type"), str)
+                and e["type"] in HEAVY_KINDS
+            ]
+            if heavy and (
+                not isinstance(data, dict)
+                or placeable is None
+                or not all(p is not None and placeable(p) for p in heavy)
+            ):
+                # GitHub stopped the query for its cost, and placed it nowhere a part can be
+                # left out: too heavy. One placed on such a part, with the rest of the answer,
+                # is like any other partial error (Codex's review of b1f5a1a).
                 raise FetchError("too-heavy")
             raise FetchError("graphql-error", paths, data if isinstance(data, dict) else None)
         data = answer.get("data")

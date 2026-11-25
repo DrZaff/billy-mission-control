@@ -213,6 +213,12 @@ class Retry:
         self.pieces = pieces
 
 
+def _optional_place(path: tuple) -> bool:
+    """Whether a place in a detail answer is inside an optional part of one pull request (one
+    a retry can leave out), not the pull request itself or one of its core fields."""
+    return len(path) >= 3 and path[0] == "repository" and _piece(path[2]) is not None
+
+
 def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
     """The answer GitHub gave along with field errors, as [(number, node, lite)], or None when
     it can't be used. Each error must be inside one of the pull requests asked for (_its_own).
@@ -293,7 +299,6 @@ _LIMITS = {
 # ones. Reviews are asked for per clinician (`reviews`, below).
 PIECES = {
     "title": "title",
-    "updatedAt": "updatedAt",
     "headRefName": "headRefName",
     "closingIssuesReferences": Template("""
   closingIssuesReferences(first: $issues) {
@@ -553,12 +558,17 @@ def _files(pr: dict, clinical_paths: tuple[str, ...]) -> tuple[list[str] | None,
     conn = _obj(pr.get("files"))
     nodes = _list(conn.get("nodes"))
     complete = _int(conn.get("totalCount")) == len(nodes) and not pr.get("__files_partial__")
+    complete = complete and len(nodes) <= MAX_FILES  # more than asked for: not whole
     paths = []
     size = 0
     for node in nodes:
         n = _obj(node)
         path = n.get("path")
         if not isinstance(path, str) or not 0 < len(path) <= 4096 or "\x00" in path:
+            raise _Incomplete()
+        # A path git can't have: never read as an ordinary, non-clinical one (pre-review of
+        # 6b7da87).
+        if any(part in ("", ".", "..") for part in path.split("/")):
             raise _Incomplete()
         try:
             path.encode("utf-8")
@@ -642,19 +652,22 @@ def _reviews(
     42a3721: dropping them all hid a changes request in force at the merge). A review of a
     vanished commit is kept as one that is never the head."""
     out = []
+    ids: set[str] = set()
     for i, login in enumerate(clinicians):
         if f"rv{i}" not in pr:
             raise _Incomplete()
         for node in _connection(pr.get(f"rv{i}"), MAX_REVIEWS):
             n = _obj(node)
+            # One review in two clinicians' lists may stand for an omitted one (pre-review of
+            # 6b7da87), as a repeat within one list may.
+            if n.get("id") in ids:
+                raise _Incomplete()
+            ids.add(n.get("id"))
             state = n.get("state")
             if state == "PENDING":
-                # A draft review nobody else can see, never submitted: one with a submission
-                # time contradicts itself, so the reviews are not known (Codex's review of
-                # b03ad71).
-                if n.get("submittedAt") is not None:
-                    raise _Incomplete()
-                continue
+                # An App never sees another user's draft review: one here is a surprise, and
+                # the reviews are not known (Codex's review of b03ad71; pre-review of 6b7da87).
+                raise _Incomplete()
             submitted = n.get("submittedAt")
             if submitted is None:
                 raise _Incomplete()  # a review that can't be placed in time: no guess
@@ -680,6 +693,8 @@ def _reviews(
                 raise _bad()
             commit = n.get("commit")
             commit_id = VANISHED if commit is None else _sha(_obj(commit).get("oid"))
+            if commit is not None and commit_id == VANISHED:
+                raise _Incomplete()  # GitHub's own oid can't be the sentinel (6b7da87)
             out.append(
                 {
                     "user": login,
@@ -729,6 +744,8 @@ def _checks(
     if merge is not None:
         try:
             merge = _obj(merge)
+            if _sha(merge.get("oid")) == head:
+                complete = False  # the test merge commit can't be the head (6b7da87)
             if "status" not in merge:
                 complete = False  # left out: not known, never "no statuses" (Codex, a34154f)
             merge_status = merge.get("status")
@@ -799,6 +816,9 @@ def _checks(
         if suite_app is not None and not isinstance(slug, str):
             complete = False  # wrongly shaped: not known, never skipped silently (42a3721)
             continue
+        if slug != "github-actions" and suite.get("workflowRun") is not None:
+            complete = False  # only Actions suites have a workflow run (pre-review of 6b7da87)
+            continue
         if suite_app is None or slug != app:
             # Not the configured app: its successes never count, but a failing or unfinished
             # run with a required name keeps the checks from passing (pre-review of e995f6a).
@@ -866,6 +886,14 @@ def _checks(
                 # freshness check below and still read as passed (Codex's review of b1fef32).
                 complete = False
                 continue
+            if (
+                "conclusion" not in run
+                or "completedAt" not in run
+                or (raw_status != "COMPLETED" and run.get("completedAt") is not None)
+            ):
+                # Left out, or a finish time on a run not completed: not known, never pending
+                # (pre-review of 6b7da87). Still read on: a failure it reports still fails.
+                complete = False
             if raw_status not in CHECK_STATUS_STATES or (
                 conclusion is not None and raw_status != "COMPLETED"
             ):
@@ -932,7 +960,7 @@ def _provably_harmless_runs(suite: dict, required: tuple[str, ...]) -> bool:
     nodes, total = runs.get("nodes"), runs.get("totalCount")
     if not isinstance(nodes, list) or type(total) is not int or total != len(nodes):
         return False
-    if not _distinct(nodes):  # a repeat may stand for an omitted run (Codex's review of 0dc0f8b)
+    if not _distinct(nodes) or len(nodes) > MAX_RUNS:  # a repeat, or more than asked for
         return False
     for r in nodes:
         if not isinstance(r, dict) or not isinstance(r.get("name"), str):
@@ -953,7 +981,7 @@ def _provably_no_required(suite: dict, required: tuple[str, ...]) -> bool:
     nodes, total = runs.get("nodes"), runs.get("totalCount")
     if not isinstance(nodes, list) or type(total) is not int or total != len(nodes):
         return False
-    if not _distinct(nodes):  # a repeat may stand for an omitted run (Codex's review of 0dc0f8b)
+    if not _distinct(nodes) or len(nodes) > MAX_RUNS:  # a repeat, or more than asked for
         return False
     return all(
         isinstance(r, dict)
@@ -1009,11 +1037,19 @@ def _status_cautions(
         if not isinstance(state, str) or state not in STATUS_STATES:
             complete = False
             continue
+        # Every state's time is checked, not only a success's: one left out, odd or in the
+        # future makes the list not known (pre-review of 6b7da87); a failure is still read on.
+        created: datetime | None
+        try:
+            created = datetime.fromisoformat(_time(context.get("createdAt")))
+            if now is not None and created > now + FUTURE_SKEW:
+                raise _bad()
+        except FetchError:
+            created, complete = None, False
         if state == "SUCCESS":
-            created = context.get("createdAt")
             try:
-                stale_at = datetime.fromisoformat(_time(created)) + CHECK_FRESH
-            except (FetchError, OverflowError):
+                stale_at = None if created is None else created + CHECK_FRESH
+            except OverflowError:
                 stale_at = None
             if stale_at is None or now is None or not _fresh(stale_at, now):
                 complete = False
@@ -1052,6 +1088,8 @@ def _issue(
     state = node.get("state")
     if state not in ("OPEN", "CLOSED"):
         raise _bad()
+    if number == 0 or number == pr.get("number"):
+        return total, None, None  # no issue has number 0, or the pull request's own number
     screen = {"number": number, "title": _str(node.get("title"), MAX_TITLE) or "(untitled)"}
     try:
         events = _connection(node.get("timelineItems"), MAX_EVENTS)
@@ -1065,6 +1103,11 @@ def _issue(
             # no others, and keeping them all, once per pull request, could fill the snapshot
             # (Codex's review of dc1eb14). A closing ends the authorisation as an unlabel does,
             # so leaving them out would show a closed-and-reopened issue as still authorised.
+            # GitHub's label names ignore case: an event on the label in another case is a
+            # surprise, never another label (pre-review of 6b7da87).
+            label = e["label"]
+            if label not in (None, READY_LABEL) and label.casefold() == READY_LABEL.casefold():
+                raise _Incomplete()
             if e["event"] in ("closed", "reopened") or e["label"] == READY_LABEL:
                 timeline.append(e)
     except _Incomplete:
@@ -1119,6 +1162,12 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
     pr = _obj(node)
     number = _int(pr.get("number"))
     head = _sha(pr.get("headRefOid"))
+    if head == VANISHED:
+        raise _bad()  # the sentinel for a vanished commit is never a head (pre-review of 6b7da87)
+    # Each of these may be null, but GitHub always gives the key: one left out is never read as
+    # null, "not merged" or "open" (pre-review of 6b7da87).
+    if not {"closedAt", "mergedAt", "mergedBy"} <= set(pr):
+        raise _bad()
     state = pr.get("state")
     if state not in ("OPEN", "CLOSED", "MERGED"):
         raise _bad()
@@ -1177,6 +1226,14 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
         pull.pop("files_complete", None)
     merged_at = datetime.fromisoformat(pull["merged_at"]) if merged else None
     try:
+        # The head the reviews are matched against must be the one GitHub's own commit row
+        # names: if the answer contradicts itself, no approval is read (pre-review of 6b7da87).
+        # (An open PR's row is checked with its checks.)
+        if state != "OPEN" and "commits" in pr:
+            rows = _list(_obj(pr.get("commits")).get("nodes"))
+            oids = [_sha(_obj(_obj(r).get("commit")).get("oid")) for r in rows]
+            if oids != [head]:
+                raise _Incomplete()
         pull["reviews"] = _reviews(pr, cfg.clinicians, merged_at, now)
     except (_Incomplete, *_SHAPE):
         # null: "not known", so the model still judges what is known (Codex's review of
@@ -1250,10 +1307,10 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
 
 def _closed_page(
     conn: Any, since: datetime
-) -> tuple[list[int], str | None, list[int], list[datetime]]:
+) -> tuple[list[int], str | None, list[int], list[datetime], bool]:
     """(numbers closed in the window, the cursor of the next page if it may hold more, every
-    row's number, for finding repeats, and every row's update time, for checking the order
-    across pages)."""
+    row's number, for finding repeats, every row's update time, for checking the order across
+    pages, and whether the page casts doubt on stopping early)."""
     conn = _obj(conn)
     nodes = _list(conn.get("nodes"))
     numbers, rows, updated = [], [], []
@@ -1283,12 +1340,16 @@ def _closed_page(
     disordered = any(a < b for a, b in zip(updated, updated[1:], strict=False))
     # An empty page that says more follow is never the end: the next is read, or the list is
     # marked cut off (Codex's review of 9cc8f43).
-    if has_next and (last_in_window or disordered or impossible or not nodes):
+    # A page that can't support stopping (out of order, impossible, empty, or more rows than
+    # asked for) is remembered: a later page that looks orderly never clears it (pre-review of
+    # 6b7da87).
+    doubtful = has_next and (disordered or impossible or not nodes or len(nodes) > MAX_CLOSED)
+    if has_next and (last_in_window or doubtful):
         cursor = info.get("endCursor")
         if not isinstance(cursor, str) or not 0 < len(cursor) <= 512:
             raise _bad()
-        return numbers, cursor, rows, updated
-    return numbers, None, rows, updated
+        return numbers, cursor, rows, updated, doubtful
+    return numbers, None, rows, updated, doubtful
 
 
 def _listing(
@@ -1300,11 +1361,11 @@ def _listing(
     repository = _obj(_obj(data).get("repository"))
     open_conn = _obj(repository.get("open"))
     open_nodes = _list(open_conn.get("nodes"))
-    more_open = _int(open_conn.get("totalCount")) != len(open_nodes)
+    more_open = _int(open_conn.get("totalCount")) != len(open_nodes) or len(open_nodes) > MAX_OPEN
     since = now - timedelta(days=RECENT_DAYS)
     numbers = [_int(_obj(n).get("number")) for n in open_nodes]
     rows = list(numbers)  # every row read, older closed ones included
-    closed, cursor, page_rows, times = _closed_page(repository.get("closed"), since)
+    closed, cursor, page_rows, times, doubt = _closed_page(repository.get("closed"), since)
     numbers += closed
     rows += page_rows
     pages = 1
@@ -1313,7 +1374,8 @@ def _listing(
     disordered = False
     while cursor is not None and more_pages is not None and pages < CLOSED_PAGES:
         page = _obj(_obj(more_pages(cursor)).get("repository")).get("closed")
-        closed, cursor, page_rows, page_times = _closed_page(page, since)
+        closed, cursor, page_rows, page_times, page_doubt = _closed_page(page, since)
+        doubt = doubt or page_doubt
         if times and page_times and page_times[0] > times[-1]:
             disordered = True
         times += page_times
@@ -1324,7 +1386,7 @@ def _listing(
     # ones included, means the list changed while it was read, or GitHub's answer is odd: one
     # may be missing (Codex's reviews of 07c05d4 and 96cb8a9).
     repeated = len(set(rows)) != len(rows)
-    cut_off = more_open or repeated or disordered or cursor is not None
+    cut_off = more_open or repeated or disordered or doubt or cursor is not None
     return list(dict.fromkeys(numbers)), cut_off
 
 
@@ -1350,7 +1412,9 @@ def _details(
     def fetch(batch: list[int], omit: frozenset, lite) -> list:
         try:
             query = detail_query(batch, omit, clinicians)
-            data = github.graphql(token, query, {"owner": owner, "name": name})
+            data = github.graphql(
+                token, query, {"owner": owner, "name": name}, placeable=_optional_place
+            )
             _on_time(deadline)
         except FetchError as error:
             # Errors on some fields, with the rest of the answer: what GitHub did supply is

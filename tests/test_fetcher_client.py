@@ -697,6 +697,75 @@ class GitHubClient(Base):
                     github.installation(OWNER, [REPO_A, REPO_B])
                 self.assertEqual(caught.exception.code, "bad-response")
 
+    def test_the_token_and_the_list_must_be_limited_and_read_only(self):
+        # Pre-review of 6b7da87.
+        real = self.fake.__call__
+        for change, code in (
+            ({"repository_selection": "all"}, "token-not-limited"),
+            ({"expires_at": "2099-01-01T00:00:00Z"}, "token-not-limited"),
+        ):
+            with self.subTest(change=change):
+
+                def call(method, path, headers, body, change=change):
+                    status, h, data = real(method, path, headers, body)
+                    if path.endswith("/access_tokens"):
+                        data = json.dumps(dict(json.loads(data), **change)).encode()
+                    return status, h, data
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.token(77)
+                self.assertEqual(caught.exception.code, code)
+
+        def rows(method, path, headers, body):
+            if path == "/installation/repositories?per_page=100":
+                writable = {"full_name": REPO_B, "permissions": {"push": True}}
+                answer = {"total_count": 2, "repositories": [{"full_name": REPO_A}, writable]}
+                return 200, {}, json.dumps(answer).encode()
+            return real(method, path, headers, body)
+
+        github = gh.GitHub(APP_ID, KEY, transport=rows, clock=lambda: NOW.timestamp())
+        with self.assertRaises(gh.FetchError) as caught:
+            github.repositories(TOKEN, [REPO_A, REPO_B])
+        self.assertEqual(caught.exception.code, "not-read-only")
+
+    def test_suspended_by_alone_is_suspended(self):
+        self.fake.suspended = None
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path.endswith("/installation"):
+                data = json.dumps(dict(json.loads(data), suspended_by={"login": "x"})).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        with self.assertRaises(gh.FetchError) as caught:
+            github.installation(OWNER, [REPO_A, REPO_B])
+        self.assertEqual(caught.exception.code, "suspended")
+
+    def test_a_cost_error_is_partial_only_on_a_part_that_can_be_left_out(self):
+        def answer(place):
+            def call(method, path, headers, body):
+                errors = [{"type": "RESOURCE_LIMITS_EXCEEDED", "path": place}]
+                data = {"repository": {"p0": None}}
+                return 200, {}, json.dumps({"data": data, "errors": errors}).encode()
+
+            return gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+
+        def placeable(path):
+            return len(path) >= 3 and path[2] == "files"
+
+        for place, code in (
+            (["repository", "p0", "files"], "graphql-error"),
+            (["repository", "p0"], "too-heavy"),
+            (["repository"], "too-heavy"),
+            (["repository", "p0", "state"], "too-heavy"),
+        ):
+            with self.subTest(place=place), self.assertRaises(gh.FetchError) as caught:
+                answer(place).graphql(TOKEN, "q", {}, placeable=placeable)
+            self.assertEqual(caught.exception.code, code)
+
     def test_an_odd_or_repeated_repository_row_is_never_skipped(self):
         # Codex's review of df5912d (should fix).
         real = self.fake.__call__

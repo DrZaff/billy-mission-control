@@ -123,7 +123,10 @@ def pr_node(
                             "nodes": [
                                 {
                                     "app": {"slug": checks_app},
-                                    "workflowRun": {"event": check_event},
+                                    # Only GitHub Actions suites have a workflow run.
+                                    "workflowRun": {"event": check_event}
+                                    if checks_app == "github-actions"
+                                    else None,
                                     "checkRuns": {
                                         "totalCount": len(checks),
                                         "nodes": [
@@ -192,7 +195,6 @@ def answer_for(node, query: str):
         "closingIssuesReferences": "closingIssuesReferences",
         "headRefName": "\n  headRefName",
         "title": "\n  title",
-        "updatedAt": "\n  updatedAt",
     }
     for key, marker in pieces.items():
         if marker not in query:
@@ -317,6 +319,7 @@ class FakeGitHub:
                     {
                         "token": TOKEN,
                         "permissions": self.token_permissions,
+                        "repository_selection": "selected",
                         "expires_at": "2026-11-24T13:00:00Z",
                     }
                 ).encode(),

@@ -16,6 +16,7 @@ import argparse
 import os
 import pwd
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from mission_control.config import shown
 from .checks import fetcher_checks
 from .config import ConfigError, parse_fetcher
 from .github import FetchError
-from .snapshot import open_regular
+from .snapshot import REFRESH_DEADLINE, open_regular
 
 MAX_CONFIG = 65536
 
@@ -92,7 +93,15 @@ def main(argv: list[str] | None = None) -> int:
 
             os.umask(0o077)
             refresher = Refresher(cfg)
-            reply = refresher.run(lambda: github_checks(cfg, github_for(cfg))).decode().strip()
+
+            def checked() -> list[Check]:
+                # The same time limit as a refresh: the lock is never held longer (pre-review
+                # of 6b7da87).
+                github = github_for(cfg)
+                github.deadline = time.monotonic() + REFRESH_DEADLINE
+                return github_checks(cfg, github)
+
+            reply = refresher.run(checked).decode().strip()
             results += refresher.results
             if not refresher.results:
                 # Too soon, busy or failed before any check: said, never skipped (audits of

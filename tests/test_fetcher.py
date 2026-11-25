@@ -3254,7 +3254,7 @@ class CodexReviewOf05062fc(unittest.TestCase):
         def __init__(self):
             self.requests = 0
 
-        def graphql(self, token, query, variables):
+        def graphql(self, token, query, variables, placeable=None):
             self.requests += 1
             numbers = [int(n) for n in re.findall(r"pullRequest\(number: (\d+)\)", query)]
             if "files(" in query:
@@ -3275,7 +3275,7 @@ class CodexReviewOf05062fc(unittest.TestCase):
         # Ten pull requests, each answered with a Retry, each retry too heavy: one batch read,
         # then a retry and a core read each, never a split.
         class Partial(self.Adversary):
-            def graphql(self, token, query, variables):
+            def graphql(self, token, query, variables, placeable=None):
                 self.requests += 1
                 numbers = [int(n) for n in re.findall(r"pullRequest\(number: (\d+)\)", query)]
                 if len(numbers) > 1:
@@ -4115,10 +4115,10 @@ class CodexReviewOfB03ad71(PreReviewOf07c3480):
             1, issue=issue_node(10), files=("evidence/a.json",), reviews=(approved, pending)
         )
         self.assertIsNone(self.item_for(node)["task"]["pull_request"]["reviews"])
-        # A real draft (no submission time) is still passed over.
+        # Nor any other pending row: an App never sees another user's draft (pre-review of
+        # 6b7da87).
         pending["submittedAt"] = None
-        reviews = self.item_for(node)["task"]["pull_request"]["reviews"]
-        self.assertEqual([r["state"] for r in reviews], ["APPROVED"])
+        self.assertIsNone(self.item_for(node)["task"]["pull_request"]["reviews"])
 
     def test_the_order_is_checked_across_pages(self):
         recent = NOW - timedelta(days=1)
@@ -4141,6 +4141,143 @@ class CodexReviewOfB03ad71(PreReviewOf07c3480):
         self.assertEqual((numbers, cut_off), ([2, 3, 4], True))
         second["nodes"] = [row(4, recent - timedelta(hours=2))]  # in order: whole
         self.assertEqual(snapshot._listing(REPO_A, data, NOW, pages.get), ([2, 3, 4], False))
+
+
+class PreReviewOf6b7da87(PreReviewOf07c3480):
+    """An exhaustive audit of 6b7da87: answers GitHub wouldn't give, each read as not known."""
+
+    def checks_partial(self, node):
+        item = self.item_for(node)
+        self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+        return item
+
+    def run0(self, node):
+        return node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["checkRuns"][
+            "nodes"
+        ][0]
+
+    def test_the_vanished_sentinel_is_never_a_head_or_an_oid(self):
+        self.assertIsNone(self.item_for(pr_node(1, head="0" * 40))["task"])
+        review = review_node(OWNER, "APPROVED", commit="0" * 40)
+        node = pr_node(1, issue=issue_node(10), files=("evidence/a.json",), reviews=(review,))
+        self.assertIsNone(self.item_for(node)["task"]["pull_request"]["reviews"])
+
+    def test_runs_and_suites_that_contradict_themselves_are_not_known(self):
+        node = pr_node(1, issue=issue_node(10))
+        self.run0(node).update(status="IN_PROGRESS", conclusion=None)  # completedAt still set
+        self.checks_partial(node)
+        node = pr_node(1, issue=issue_node(10))
+        node["potentialMergeCommit"] = {
+            "oid": SHA1,
+            "status": None,
+            "checkSuites": {"totalCount": 0},
+        }
+        self.checks_partial(node)  # the test merge commit can't be the head
+        node = pr_node(1, issue=issue_node(10))
+        suites = node["commits"]["nodes"][0]["commit"]["checkSuites"]
+        other = json.loads(json.dumps(suites["nodes"][0]))
+        other["app"] = {"slug": "other-ci"}  # with a workflow run: only Actions has one
+        suites["nodes"].append(other)
+        suites["totalCount"] = 2
+        self.checks_partial(node)
+
+    def test_a_failure_with_keys_left_out_is_still_a_failure(self):
+        node = pr_node(1, issue=issue_node(10))
+        run = self.run0(node)
+        run["conclusion"] = "FAILURE"
+        del run["completedAt"]
+        item = self.checks_partial(node)
+        self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
+        node = pr_node(1, issue=issue_node(10), statuses=[("lint", "FAILURE")])
+        del node["commits"]["nodes"][0]["commit"]["status"]["contexts"][0]["createdAt"]
+        item = self.checks_partial(node)
+        self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
+
+    def test_a_label_event_in_another_case_is_not_known(self):
+        issue = issue_node(10)
+        removal = dict(issue["timelineItems"]["nodes"][0], __typename="UnlabeledEvent")
+        removal.update(label={"name": "Agent:Ready"}, createdAt="2026-11-21T00:00:00Z")
+        issue["timelineItems"]["nodes"].append(removal)
+        issue["timelineItems"]["totalCount"] = 2
+        self.assertIsNone(self.item_for(pr_node(1, issue=issue))["task"]["issue"])
+
+    def test_a_closed_prs_commit_row_must_name_its_head(self):
+        review = review_node(OWNER, "APPROVED")
+        merged_at = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(
+            1,
+            state="MERGED",
+            merged=True,
+            closed_at=merged_at,
+            issue=issue_node(10),
+            files=("evidence/a.json",),
+            reviews=(review,),
+        )
+        node["commits"]["nodes"][0]["commit"]["oid"] = SHA2
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        item = self.run_refresh()["items"][0]
+        self.assertIsNone(item["task"]["pull_request"]["reviews"])
+
+    def test_one_review_in_two_clinicians_lists_is_not_known(self):
+        row = review_node("a", "APPROVED")
+        row["id"] = "R1"
+        twin = dict(review_node("b", "APPROVED"), id="R1")
+        pr = {"rv0": {"totalCount": 1, "nodes": [row]}, "rv1": {"totalCount": 1, "nodes": [twin]}}
+        with self.assertRaises(snapshot._Incomplete):
+            snapshot._reviews(pr, ("a", "b"), None, NOW)
+
+    def test_paths_git_cant_have_leave_the_files_not_known(self):
+        for path in ("/evidence/x.md", "./evidence/x.md", "site/../evidence/x.md", "site//a.html"):
+            with self.subTest(path=path):
+                node = pr_node(1, issue=issue_node(10), files=(path,))
+                self.assertIsNone(self.item_for(node)["task"]["pull_request"]["files"])
+
+    def test_an_impossible_issue_number_is_no_issue(self):
+        for number in (0, 1):  # none, or the pull request's own
+            with self.subTest(number=number):
+                issue = issue_node(10)
+                issue["number"] = number
+                self.assertIsNone(self.item_for(pr_node(1, issue=issue))["task"]["issue"])
+
+    def test_more_rows_than_asked_for_are_never_whole(self):
+        files = tuple(f"site/{i}.html" for i in range(snapshot.MAX_FILES + 1))
+        node = pr_node(1, issue=issue_node(10), files=files)
+        self.assertFalse(snapshot._files(node, ())[1])
+        open_rows = [{"number": n} for n in range(1, snapshot.MAX_OPEN + 2)]
+        data = {
+            "repository": {
+                "open": {"totalCount": len(open_rows), "nodes": open_rows},
+                "closed": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+            }
+        }
+        self.assertTrue(snapshot._listing(REPO_A, data, NOW)[1])
+
+    def test_a_core_key_left_out_makes_the_pr_unreadable(self):
+        for key in ("closedAt", "mergedAt", "mergedBy"):
+            with self.subTest(key=key):
+                node = pr_node(1, issue=issue_node(10))
+                del node[key]
+                self.assertIsNone(self.item_for(node)["task"])
+
+    def test_doubt_on_one_page_is_never_cleared_by_the_next(self):
+        now = NOW
+
+        def row(n, days):
+            at = (now - timedelta(days=days)).isoformat()
+            return {"number": n, "closedAt": at, "updatedAt": at}
+
+        first = {
+            "nodes": [row(2, 1), row(3, 20), row(4, 2)],  # out of order
+            "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+        }
+        second = {"nodes": [row(5, 21)], "pageInfo": {"hasNextPage": True, "endCursor": "c2"}}
+        data = {"repository": {"open": {"totalCount": 0, "nodes": []}, "closed": first}}
+        pages = {"c1": {"repository": {"closed": second}}}
+        self.assertTrue(snapshot._listing(REPO_A, data, NOW, pages.get)[1])
+
+    def test_the_detail_query_asks_for_no_field_it_never_reads(self):
+        self.assertNotIn("updatedAt", snapshot.detail_query([1], frozenset(), (OWNER,)))
 
 
 class NoFifoAnywhere(Base):
