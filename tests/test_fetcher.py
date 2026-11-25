@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
-import select
 import signal
 import socket
 import stat
@@ -938,6 +938,12 @@ class Refresh(Base):
         names = sorted(c["name"] for c in item["task"]["pull_request"]["checks"])
         self.assertEqual(names, ["lint", "test"])
         self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+        # Left out, the workflow run is not known, never taken as null (Codex's review of
+        # d99b49a): the suite never passes on it.
+        del node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["workflowRun"]
+        item = self.run_refresh()["items"][0]
+        self.assertFalse(item["task"]["pull_request"]["checks_complete"])
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
     def test_too_large_also_says_when_the_token_outlived_it(self):
         # Codex's review of 23bfb61: the size error dropped the failed-revoke warning.
@@ -3286,6 +3292,7 @@ class PreReviewOfE995f6a(CodexReviewOf099ef9b):
         commit["checkSuites"]["nodes"].append(
             {
                 "app": app,
+                "workflowRun": None,
                 "checkRuns": {
                     "totalCount": 1,
                     "nodes": [{"name": "lint", "status": "COMPLETED", "conclusion": conclusion}],
@@ -3297,11 +3304,14 @@ class PreReviewOfE995f6a(CodexReviewOf099ef9b):
         return tasks.derive(self.reviewed(self.run_refresh()["items"][0])).flags
 
     def test_another_apps_failure_keeps_the_checks_from_passing(self):
-        for app in ({"slug": "other-ci"}, None):
-            with self.subTest(app=app):
-                self.assertNotIn(tasks.Flag.CHECKS_PASSED, self.another_suite(app, "FAILURE"))
-                # Its success is harmless: never counted, never in the way.
-                self.assertIn(tasks.Flag.CHECKS_PASSED, self.another_suite(app, "SUCCESS"))
+        app = {"slug": "other-ci"}
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, self.another_suite(app, "FAILURE"))
+        # Its success is harmless: never counted, never in the way.
+        self.assertIn(tasks.Flag.CHECKS_PASSED, self.another_suite(app, "SUCCESS"))
+        # No app at all (a GraphQL error can null it), with a required name: not known, read on
+        # so its failure still fails (Codex's review of d99b49a).
+        self.assertIn(tasks.Flag.CHECKS_FAILING, self.another_suite(None, "FAILURE"))
+        self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, self.another_suite(None, "SUCCESS"))
 
     def test_a_required_status_in_an_unknown_state_is_not_known(self):
         node = pr_node(1, issue=issue_node(10), statuses=[("lint", "WHATEVER")])
@@ -4645,18 +4655,23 @@ class CodexReviewOfB7d0915(Base):
         self.addCleanup(child.stdout.close)
         self.addCleanup(child.wait)
         self.addCleanup(child.kill)  # never left running, whatever fails
+        # Every line read by one thread into a queue, waited for 30 s at most: no read that
+        # could wait for ever, and none buffered out of a select's sight (Codex, d99b49a).
+        lines: queue.Queue = queue.Queue()
 
-        def line():
-            # Never a read that could wait for ever (Codex's review of 9044492).
-            self.assertTrue(select.select([child.stdout], [], [], 30)[0], "no answer")
-            return child.stdout.readline().strip()
+        def pump():
+            for text in child.stdout:
+                lines.put(text.strip())
+            lines.put(None)
 
-        folder = Path(line())
+        threading.Thread(target=pump, daemon=True).start()
+        folder = Path(lines.get(timeout=30))
         self.assertTrue(folder.is_absolute() and folder.is_relative_to(self.base), folder)
-        self.assertEqual(line(), "reading")
+        self.assertEqual(lines.get(timeout=30), "reading")
         child.send_signal(signal.SIGTERM)
-        out, _ = child.communicate(timeout=60)
-        self.assertEqual(child.returncode, -signal.SIGTERM)
+        self.assertEqual(child.wait(timeout=60), -signal.SIGTERM)
+        out = list(iter(lambda: lines.get(timeout=30), None))
+        out = "\n".join(out)
         self.assertIn("b'failed:interrupted\\n' ('DELETE', '/installation/token')", out)
         status = snapshot.read_json(folder, snapshot.STATUS)
         self.assertEqual((status["result"], status["reason"]), ("failed", "interrupted"))
