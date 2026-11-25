@@ -62,6 +62,7 @@ FLAG_WORDS = {
     Flag.FILES_UNVERIFIED: "Changed files not verified here (they may include clinical files)",
     Flag.REVIEWS_UNVERIFIED: "Reviews not verified here (no clinician's approval is assumed)",
     Flag.ISSUE_NOT_LINKED: "No readable, authorised issue is linked to this pull request",
+    Flag.ISSUE_CLOSED_PR_OPEN: "The linked issue is closed, but this pull request is open",
     Flag.MERGER_UNKNOWN: "Merged by an account that can't be identified",
 }
 

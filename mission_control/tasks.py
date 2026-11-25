@@ -155,6 +155,8 @@ class Flag(StrEnum):
     FILES_UNVERIFIED = "files_unverified"
     # The PR's reviews aren't known here (pull_request.reviews is null): no clinical approval.
     REVIEWS_UNVERIFIED = "reviews_unverified"
+    # An open PR whose linked issue is closed: it isn't finished, whatever the issue says.
+    ISSUE_CLOSED_PR_OPEN = "issue_closed_pr_open"
     # No readable, authorised issue is linked to the PR (issue is null).
     ISSUE_NOT_LINKED = "issue_not_linked"
     # A merged PR whose merger can't be identified: nothing shows the owner merged it.
@@ -182,6 +184,11 @@ ATTENTION_FLAGS = frozenset(
         Flag.CHECKS_FAILING,
         Flag.MERGED_WITH_CHECKS_NOT_PASSED,
         Flag.ISSUE_NOT_LINKED,
+        Flag.ISSUE_CLOSED_PR_OPEN,
+        # Unknown files or reviews can hide a clinical change merged without a clinician, so
+        # they always need a look (pre-review of 9537b08).
+        Flag.FILES_UNVERIFIED,
+        Flag.REVIEWS_UNVERIFIED,
     }
 )
 
@@ -748,7 +755,11 @@ def derive(raw: Any) -> TaskStatus:
             pr.head,
         )
 
-    if (pr and not pr.open) or not task.issue_open:
+    # A closed issue never makes an open PR look finished: anyone can open a PR that "fixes"
+    # a closed issue (pre-review of 9537b08). The PR goes on through every gate, flagged.
+    if pr and pr.open and not task.issue_open:
+        flags.add(Flag.ISSUE_CLOSED_PR_OPEN)
+    elif (pr and not pr.open) or not task.issue_open:
         return status(State.CLOSED, "Closed without merging.", head)
 
     if since is None and not task.issue_known:

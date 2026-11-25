@@ -125,13 +125,22 @@ class Refresher:
         unknown_boot = boot_id is None or previous.get("boot_id") is None
         if number(last_boot) and (same_boot or (unknown_boot and since_boot >= last_boot)):
             return since_boot - last_boot < MIN_INTERVAL
-        last = previous.get("attempt_epoch")
-        return number(last) and abs(now - last) < MIN_INTERVAL
+        if number(last_boot) or number(previous.get("attempt_epoch")):
+            # Another boot. It began after the last attempt, so time since this boot is a
+            # lower bound on the time since that attempt; the wall clock may be wrong after a
+            # reboot (before it syncs), so it is not trusted (pre-review of 9537b08). At most
+            # one minute's wait after a restart.
+            return since_boot < MIN_INTERVAL
+        return False
 
     def _locked(self) -> bytes:
         now = self.clock()
         boot_id, since_boot = self.boot()
-        previous = read_json(self.cfg.snapshot_dir, STATUS) or {}
+        try:
+            previous = read_json(self.cfg.snapshot_dir, STATUS, strict=True) or {}
+        except OSError:
+            # Unreadable is not "no earlier attempt": without it the floor can't be kept.
+            return b"failed:status\n"
         if self._too_soon(previous, now, boot_id, since_boot):
             return TOO_SOON
         stamp = datetime.fromtimestamp(now, UTC)
@@ -148,6 +157,7 @@ class Refresher:
             write_json(self.cfg.snapshot_dir, STATUS, status)
         except OSError:
             return b"failed:write\n"  # without a recorded attempt, no network work
+        snapshot = None
         try:
             snapshot = refresh(self.cfg, self.github(self.cfg), stamp)
             write_json(self.cfg.snapshot_dir, SNAPSHOT, snapshot)
@@ -158,7 +168,14 @@ class Refresher:
                 error.code,
             )
         except OSError:
-            reply, status["result"], status["reason"] = b"failed:write\n", "failed", "write"
+            reason = "write"
+            if snapshot is not None and snapshot.get("token_revoked") is not True:
+                reason += "+token-not-revoked"  # pre-review of 9537b08: it was lost here
+            reply, status["result"], status["reason"] = (
+                f"failed:{reason}\n".encode(),
+                "failed",
+                reason,
+            )
         except Exception:  # noqa: BLE001 - a surprise fails this refresh, never the service
             # (Codex's review of 23bfb61: one escaped and stopped the fetcher).
             reply, status["result"], status["reason"] = b"failed:internal\n", "failed", "internal"
@@ -204,7 +221,17 @@ def serve(
     """Answer requests one at a time; the connection is closed before the log line is handed
     over, and the log never waits (the stop helper's LineLog)."""
     while True:
-        conn, _ = listener.accept()
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            # A failed accept (an aborted connection, too many open files) fails that one
+            # request, never the service (pre-review of 9537b08). A short pause keeps a
+            # persistent error from spinning.
+            log("fetcher: error: accept")
+            time.sleep(1)
+            if once:
+                return
+            continue
         with conn:
             result = handle(conn, refresher, client_uid)
         log("fetcher: " + result)

@@ -42,6 +42,10 @@ MAX_EVENTS = 100
 MAX_TITLE = 200
 MAX_TEXT = 255
 MAX_SNAPSHOT = 2 * 1024 * 1024
+# Bytes of file paths kept per pull request; past it the list is "not known". So no one pull
+# request (anyone can open one, with long paths) can push the snapshot over its limit and stop
+# every refresh (pre-review of 9537b08): 50 open and 30 closed at most stay far under it.
+MAX_PATH_BYTES = 16 * 1024
 SHA = re.compile(r"[0-9a-f]{40}")
 CONTROL = re.compile(r"[\x00-\x1f\x7f  ‪-‮⁦-⁩]")
 REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"}
@@ -222,10 +226,14 @@ def _files(pr: dict) -> tuple[list[str], bool]:
     nodes = _list(conn.get("nodes"))
     complete = _int(conn.get("totalCount")) <= len(nodes)
     paths = []
+    size = 0
     for node in nodes:
         n = _obj(node)
         path = n.get("path")
         if not isinstance(path, str) or not 0 < len(path) <= 4096 or "\x00" in path:
+            raise _Incomplete()
+        size += len(path.encode("utf-8", "surrogatepass"))
+        if size > MAX_PATH_BYTES:
             raise _Incomplete()
         if n.get("changeType") not in ("ADDED", "MODIFIED", "DELETED", "CHANGED"):
             complete = False
@@ -559,6 +567,12 @@ def write_json(folder: Path, name: str, data: dict) -> None:
     try:
         group = os.fstat(folder_fd).st_gid
         tmp = f".{name}.{os.getpid()}.tmp"
+        # A temp file left by a process killed mid-write, with the same pid, would otherwise
+        # block every write (pre-review of 9537b08). Callers hold the refresh lock.
+        try:
+            os.unlink(tmp, dir_fd=folder_fd)
+        except FileNotFoundError:
+            pass
         create = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
         fd = os.open(tmp, create, 0o600, dir_fd=folder_fd)
         try:
@@ -593,11 +607,20 @@ def write_json(folder: Path, name: str, data: dict) -> None:
         os.close(folder_fd)
 
 
-def read_json(folder: Path, name: str, limit: int = MAX_SNAPSHOT) -> dict | None:
+def read_json(
+    folder: Path, name: str, limit: int = MAX_SNAPSHOT, strict: bool = False
+) -> dict | None:
+    """The file's JSON object, or None when it is missing or unreadable. With `strict`, only a
+    missing file gives None; any other failure to open it raises OSError (pre-review of
+    9537b08: an unreadable status file was taken for "no earlier refresh")."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
         fd = os.open(folder / name, flags)
+    except FileNotFoundError:
+        return None
     except OSError:
+        if strict:
+            raise
         return None
     with os.fdopen(fd, "rb") as f:
         data = f.read(limit + 1)

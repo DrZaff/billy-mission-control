@@ -732,6 +732,29 @@ class Refresh(Base):
                 item = self.run_refresh()["items"][0]
                 self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
+    def test_an_open_pr_is_never_closed_by_its_issue(self):
+        # Pre-review of 9537b08: a PR that "fixes" an already closed issue showed as closed,
+        # calmly, though it was open and mergeable.
+        issue = issue_node(10)
+        issue["state"] = "CLOSED"
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue)
+        state = tasks.derive(self.task_of(self.run_refresh()["items"][0]))
+        self.assertNotEqual(state.state, tasks.State.CLOSED)
+        self.assertIn(tasks.Flag.ISSUE_CLOSED_PR_OPEN, state.flags)
+        self.assertTrue(state.needs_attention)
+
+    def test_long_paths_in_one_pr_never_stop_the_refresh(self):
+        # Pre-review of 9537b08: six PRs of 100 files on ~4000-character paths pushed every
+        # snapshot over its limit, freezing it for all repositories.
+        long_files = tuple("d/" + "x" * 3990 + f"{i:03d}" for i in range(100))
+        self.fake.prs[REPO_A]["open"] = [
+            pr_node(n, issue=issue_node(10), files=long_files) for n in range(1, 7)
+        ]
+        snap = self.run_refresh()  # no too-large
+        for item in snap["items"][:6]:
+            self.assertIsNone(item["task"]["pull_request"]["files"])  # "not known"
+            self.assertIn(tasks.Flag.FILES_UNVERIFIED, tasks.derive(self.task_of(item)).flags)
+
     def test_a_renamed_file_makes_the_file_list_incomplete(self):
         # Codex's review of f37d0c7 (blocking): a rename lists only the new path, so a move out
         # of a clinical folder would hide where it came from.
@@ -992,6 +1015,17 @@ class RefresherFiles(Base):
         now[0] += 31
         self.assertEqual(self.make(lambda: now[0]).run(), server.OK)
 
+    def test_an_accept_error_never_stops_the_service(self):
+        # Pre-review of 9537b08: accept() errors escaped serve().
+        class Broken:
+            def accept(self):
+                raise OSError(24, "Too many open files")
+
+        lines = []
+        with mock.patch.object(server.time, "sleep"):
+            server.serve(Broken(), object(), os.getuid(), log=lines.append, once=True)
+        self.assertEqual(lines, ["fetcher: error: accept"])
+
     def test_a_wall_clock_change_never_moves_the_floor_within_a_boot(self):
         # Codex's reviews of a1e05e5 and b24ac2d: a recorded future time held refreshes until
         # the clock caught up, and then a clock moved back let a refresh skip the floor. Within
@@ -1042,17 +1076,61 @@ class RefresherFiles(Base):
         since_boot[0], wall[0] = 66.0, wall[0] + 26  # 66 s since that boot began
         self.assertEqual(make().run(), server.OK)  # and in fact at least 66 s have passed
 
-    def test_after_a_restart_of_the_machine_the_wall_clock_decides(self):
+    def test_after_a_restart_only_time_since_boot_counts(self):
+        # Pre-review of 9537b08: after a reboot the wall clock may be wrong (before it syncs),
+        # so a refresh 35 s after the last one, with the clock a few minutes off, got through.
+        # A new boot began after the last attempt, so time since boot is a lower bound on the
+        # real time since it: under a minute since boot always waits.
         wall = [NOW.timestamp()]
         self.assertEqual(
-            self.make(lambda: wall[0], boot=lambda: ("boot-1", 1000.0)).run(), server.OK
+            self.make(lambda: wall[0], boot=lambda: ("boot-1", 5000.0)).run(), server.OK
         )
-        wall[0] += 10  # a new boot ten seconds later: the floor holds on the wall clock
+        wall[0] += 5 * 60  # the clock comes up five minutes fast...
         self.assertEqual(
-            self.make(lambda: wall[0], boot=lambda: ("boot-2", 20.0)).run(), server.TOO_SOON
-        )
-        wall[0] -= 3 * 3600  # the clock went back hours: no waiting for it to catch up
-        self.assertEqual(self.make(lambda: wall[0], boot=lambda: ("boot-2", 30.0)).run(), server.OK)
+            self.make(lambda: wall[0], boot=lambda: ("boot-2", 15.0)).run(), server.TOO_SOON
+        )  # ...but only 15 s since boot: wait
+        self.assertEqual(
+            self.make(lambda: wall[0], boot=lambda: (None, 15.0)).run(), server.TOO_SOON
+        )  # the same with the boot id unreadable
+        self.assertEqual(
+            self.make(lambda: wall[0], boot=lambda: ("boot-2", 61.0)).run(), server.OK
+        )  # a minute since boot proves a minute since the attempt
+
+    def test_an_unreadable_status_file_is_not_no_earlier_attempt(self):
+        # Pre-review of 9537b08: any failure to read the status file skipped the floor.
+        self.assertEqual(self.make(lambda: NOW.timestamp()).run(), server.OK)
+        real_open = os.open
+
+        def refuse(path, *a, **k):
+            if str(path).endswith(snapshot.STATUS):
+                raise OSError(24, "Too many open files")
+            return real_open(path, *a, **k)
+
+        with mock.patch.object(snapshot.os, "open", side_effect=refuse):
+            reply = self.make(lambda: NOW.timestamp() + 1).run()
+        self.assertEqual(reply, b"failed:status\n")
+
+    def test_a_failed_write_still_says_when_the_token_outlived_it(self):
+        # Pre-review of 9537b08: a failed revoke was lost when the snapshot write then failed.
+        self.fake.fail["/installation/token"] = (500, {}, b"")
+        real_replace = os.replace
+
+        def fail_snapshot(src, dst, *a, **k):
+            if dst == snapshot.SNAPSHOT:
+                raise OSError(28, "No space left on device")
+            return real_replace(src, dst, *a, **k)
+
+        with mock.patch.object(snapshot.os, "replace", side_effect=fail_snapshot):
+            reply = self.make(lambda: NOW.timestamp()).run()
+        self.assertEqual(reply, b"failed:write+token-not-revoked\n")
+
+    def test_a_leftover_temp_file_never_blocks_writes(self):
+        # Pre-review of 9537b08: a process killed mid-write left a temp file a later process
+        # with the same pid couldn't get past.
+        leftover = self.cfg.snapshot_dir / f".{snapshot.SNAPSHOT}.{os.getpid()}.tmp"
+        leftover.write_text("half")
+        self.assertEqual(self.make(lambda: NOW.timestamp()).run(), server.OK)
+        self.assertFalse(leftover.exists())
 
     def test_no_token_or_key_reaches_any_file(self):
         self.make(lambda: NOW.timestamp()).run()

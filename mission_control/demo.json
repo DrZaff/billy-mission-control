@@ -2431,6 +2431,59 @@
      "checks": null
     }
    }
+  },
+  {
+   "id": "example-tools-66",
+   "title": "Old menu link (its issue is closed, but the pull request is open)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-tools",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 65,
+     "state": "closed",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/old-menu-link",
+     "head": "f9a0b1c2f9a0b1c2f9a0b1c2f9a0b1c2f9a0b1c2"
+    },
+    "runs": [],
+    "pull_request": {
+     "number": 66,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "f9a0b1c2f9a0b1c2f9a0b1c2f9a0b1c2f9a0b1c2",
+     "files": [
+      "site/menu.html"
+     ],
+     "reviews": [],
+     "checks": []
+    }
+   }
   }
  ]
 }
