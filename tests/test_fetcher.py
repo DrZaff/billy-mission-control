@@ -4597,86 +4597,116 @@ class AuditOf8c62413(unittest.TestCase):
         self.assertEqual(asked, [time.CLOCK_BOOTTIME])
 
 
-class PreReviewOfE4a8096(Base):
-    """Fable's pre-review of e4a8096 (should fix): a SIGTERM mid-refresh ended the process with
-    the token unrevoked and the status left "running". The stop now unwinds: the token is
-    revoked, the attempt is recorded as interrupted, and the process still ends."""
+class CodexReviewOfB7d0915(Base):
+    """A SIGTERM mid-refresh (Fable's pre-review of e4a8096, then Codex's review of b7d0915):
+    it only marks the stop. Every request after it fails as "interrupted" except the token's
+    revocation, so the refresh ends as an ordinary failure, token revoked and status written,
+    never cut off part way; the process ends once nothing is under way."""
 
     make = RefresherFiles.make
 
-    def stopping(self, revoke_fails=False):
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(gh.STOPPING.clear)
+
+    def stop_at(self, when):
+        """A transport that marks the stop as the request `when` is sent, and answers it."""
         fake = self.fake
 
         def transport(method, path, headers, body):
-            if path == "/graphql":
-                fake.calls.append((method, path))
-                raise entry.Stopped
+            if path.startswith(when):
+                gh.STOPPING.set()
             return fake(method, path, headers, body)
 
         self.fake = transport
-        if revoke_fails:
-            fake.fail["/installation/token"] = (500, {}, b"")
-        refresher = self.make(lambda: NOW.timestamp())
-        with self.assertRaises(entry.Stopped):
-            refresher.run()
-        self.fake = fake
-        return snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+        return fake
 
-    def test_a_stopped_refresh_revokes_its_token_and_says_so(self):
-        status = self.stopping()
-        self.assertIn(("DELETE", "/installation/token"), self.fake.calls)
+    def test_a_stop_mid_refresh_fails_it_revokes_the_token_and_keeps_the_snapshot(self):
+        now = [NOW.timestamp()]
+        refresher = self.make(lambda: now[0])
+        self.assertEqual(refresher.run(), server.OK)
+        good = (self.cfg.snapshot_dir / snapshot.SNAPSHOT).read_bytes()
+        now[0] += 120
+        fake = self.stop_at("/graphql")
+        self.assertEqual(refresher.run(), b"failed:interrupted\n")
+        self.assertEqual(fake.calls[-1], ("DELETE", "/installation/token"))
+        self.assertEqual((self.cfg.snapshot_dir / snapshot.SNAPSHOT).read_bytes(), good)
+        status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
         self.assertEqual((status["result"], status["reason"]), ("failed", "interrupted"))
         self.assertEqual(status["last_refresh"]["reason"], "interrupted")
 
-    def test_a_stopped_refresh_says_when_the_token_outlived_it(self):
-        status = self.stopping(revoke_fails=True)
-        self.assertEqual(status["reason"], "interrupted+token-not-revoked")
+    def test_a_stop_mid_refresh_says_when_the_token_outlived_it(self):
+        fake = self.stop_at("/graphql")
+        fake.fail["/installation/token"] = (500, {}, b"")
+        reply = self.make(lambda: NOW.timestamp()).run()
+        self.assertEqual(reply, b"failed:interrupted+token-not-revoked\n")
 
-    def test_a_stopped_selfcheck_is_recorded_too(self):
-        refresher = self.make(lambda: NOW.timestamp())
+    def test_a_stop_during_the_revocation_never_cuts_it_off(self):
+        fake = self.stop_at("/installation/token")
+        self.assertEqual(self.make(lambda: NOW.timestamp()).run(), server.OK)
+        self.assertEqual(fake.revoked, 1)
+        status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+        self.assertEqual((status["result"], status["reason"]), ("ok", None))
+
+    def test_a_stopped_selfcheck_keeps_the_last_refresh_and_revokes(self):
+        now = [NOW.timestamp()]
+        refresher = self.make(lambda: now[0])
+        self.assertEqual(refresher.run(), server.OK)
+        now[0] += 120
+        fake = self.stop_at("/app/installations/")
 
         def work():
-            raise entry.Stopped
+            github = gh.GitHub(APP_ID, KEY, transport=self.fake, clock=lambda: now[0])
+            return github_checks(self.cfg, github)
 
-        with self.assertRaises(entry.Stopped):
-            refresher.run(work)
+        self.assertEqual(refresher.run(work), b"failed:selfcheck-failed\n")
+        self.assertEqual(fake.calls[-1], ("DELETE", "/installation/token"))
         status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
-        self.assertEqual((status["result"], status["reason"]), ("failed", "interrupted"))
+        self.assertEqual(status["last_refresh"]["result"], "ok")
 
-    def test_sigterm_is_caught_only_while_the_fetcher_runs(self):
+    def test_sigterm_ends_at_once_when_idle_and_after_the_refresh_otherwise(self):
         before = signal.getsignal(signal.SIGTERM)
-        seen = []
+        killed = []
+        with mock.patch.object(entry.os, "kill", lambda pid, sig: killed.append(sig)):
+            server.ACTIVE.set()
+            try:
+                entry._on_sigterm(signal.SIGTERM, None)
+            finally:
+                server.ACTIVE.clear()
+            self.assertEqual(killed, [])  # mid-refresh: only marked
+            self.assertTrue(gh.STOPPING.is_set())
+            entry._on_sigterm(signal.SIGTERM, None)
+            self.assertEqual(killed, [signal.SIGTERM])  # idle: now
+        signal.signal(signal.SIGTERM, before)
+
+    def test_main_ends_by_the_signal_once_a_stop_was_asked_and_restores_the_handler(self):
+        before = signal.getsignal(signal.SIGTERM)
+        seen, killed = [], []
 
         def fake_main(argv):
             seen.append(signal.getsignal(signal.SIGTERM))
+            gh.STOPPING.set()
             return 0
-
-        with mock.patch.object(entry, "_main", fake_main):
-            self.assertEqual(entry.main([]), 0)
-        self.assertEqual(seen, [entry._on_sigterm])
-        self.assertIs(signal.getsignal(signal.SIGTERM), before)
-        # The handler raises once, then leaves a second SIGTERM to end the process at once.
-        try:
-            with self.assertRaises(entry.Stopped):
-                entry._on_sigterm(signal.SIGTERM, None)
-            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
-        finally:
-            signal.signal(signal.SIGTERM, before)
-
-    def test_a_stop_ends_the_process_by_the_signal(self):
-        killed = []
-
-        def fake_main(argv):
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
-            raise entry.Stopped
 
         with (
             mock.patch.object(entry, "_main", fake_main),
             mock.patch.object(entry.os, "kill", lambda pid, sig: killed.append(sig)),
-            self.assertRaises(entry.Stopped),
         ):
             entry.main([])
-        self.assertEqual(killed, [signal.SIGTERM])
+        self.assertEqual((seen, killed), ([entry._on_sigterm], [signal.SIGTERM]))
+        signal.signal(signal.SIGTERM, before)
+
+    def test_the_service_loop_ends_after_a_stop(self):
+        class Listener:
+            def accept(self):
+                gh.STOPPING.set()
+                a, b = socket.socketpair()
+                b.close()
+                return a, None
+
+        server.serve(
+            Listener(), self.make(lambda: NOW.timestamp()), os.getuid(), log=lambda _: None
+        )
 
 
 if __name__ == "__main__":

@@ -41,7 +41,7 @@ from typing import Any
 from mission_control.tasks import READY_LABEL, InvalidInput, State, derive, parse
 
 from .config import FetcherConfig
-from .github import FetchError, GitHub
+from .github import STOPPING, FetchError, GitHub
 
 SNAPSHOT = "snapshot.json"
 STATUS = "status.json"
@@ -146,6 +146,10 @@ def _on_time(deadline: float | None) -> None:
     (Codex's review of 9dbb868: the limit was checked only before detail requests)."""
     if deadline is not None and time.monotonic() > deadline:
         raise FetchError("too-slow")
+    if STOPPING.is_set():
+        # A stop asked for mid-refresh: what was read since may be failures of its own making,
+        # so the refresh fails rather than write it (Codex's review of b7d0915).
+        raise FetchError("interrupted")
 
 
 # Failures that may mean the query was too heavy, not that GitHub is down: the batch is split
@@ -1686,13 +1690,10 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
         # The refresh failed, whatever the reason: revoke the token, and say too if it
         # outlived the refresh (Codex's review of bf76866).
         revoked = github.revoke(token)
-        if not revoked and isinstance(error, Exception):
+        if not revoked:
             # Whatever went wrong, say the token outlived it (Codex's review of ab64500).
             code = error.code if isinstance(error, FetchError) else "internal"
             raise FetchError(code + "+token-not-revoked") from None
-        if not revoked:
-            # A stop (SIGTERM) still stops: noted, never turned into an ordinary failure.
-            error.add_note("token-not-revoked")
         raise
     snapshot["token_revoked"] = github.revoke(token)
     return snapshot

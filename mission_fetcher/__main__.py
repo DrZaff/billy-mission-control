@@ -26,7 +26,8 @@ from mission_control.config import shown
 
 from .checks import fetcher_checks
 from .config import ConfigError, parse_fetcher
-from .github import FetchError
+from .github import STOPPING, FetchError
+from .server import ACTIVE
 from .snapshot import REFRESH_DEADLINE, open_regular
 
 MAX_CONFIG = 65536
@@ -71,26 +72,30 @@ def github_checks(cfg, github) -> list[Check]:
     return results
 
 
-class Stopped(BaseException):
-    """SIGTERM, raised where the process is, so a refresh revokes its token and records the
-    stop before the process ends (pre-review of e4a8096)."""
+def _end() -> None:
+    """End by SIGTERM itself, as systemd expects of a clean stop."""
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
-def _on_sigterm(signum, frame):
-    signal.signal(signal.SIGTERM, signal.SIG_DFL)  # a second SIGTERM ends it at once
-    raise Stopped
+def _on_sigterm(signum, frame) -> None:
+    # Mid-refresh, the refresh ends first as "interrupted", its token revoked and its status
+    # written; otherwise nothing is under way and the process ends now (Codex's review of
+    # b7d0915: raising here could cut off the revocation or the status write).
+    STOPPING.set()
+    if not ACTIVE.is_set():
+        _end()
 
 
 def main(argv: list[str] | None = None) -> int:
     before = signal.signal(signal.SIGTERM, _on_sigterm)
     try:
-        return _main(argv)
-    except Stopped:
-        # Ended by the signal itself, as systemd expects of a clean stop.
-        os.kill(os.getpid(), signal.SIGTERM)
-        raise
+        code = _main(argv)
     finally:
         signal.signal(signal.SIGTERM, before)
+    if STOPPING.is_set():
+        _end()
+    return code
 
 
 def _main(argv: list[str] | None = None) -> int:

@@ -190,6 +190,11 @@ def https_transport(method: str, path: str, headers: dict[str, str], body: bytes
         conn.close()
 
 
+# Set on SIGTERM: every request after it fails as "interrupted" except the token's revocation,
+# so a refresh under way ends as an ordinary failure, its token revoked and its status written,
+# never cut off part way (Codex's review of b7d0915).
+STOPPING = threading.Event()
+
 # What call() returns for GitHub's 204 No Content: distinct from any JSON body, null included.
 NO_CONTENT = object()
 # GitHub's own ISO shape for a time, with a zone.
@@ -257,6 +262,8 @@ class GitHub:
         own short limit."""
         if not path.startswith("/") or "//" in path or "\n" in path or "\r" in path:
             raise FetchError("bad-path")
+        if STOPPING.is_set() and not final:
+            raise FetchError("interrupted")
         limit = REVOKE_LIMIT if final else REQUEST_LIMIT
         if self.deadline is not None and not final:
             left = self.deadline - time.monotonic()
@@ -386,7 +393,9 @@ class GitHub:
             raise FetchError("bad-response")
         # Nor may the list say the App can write, or reach every repository (pre-review of
         # 6b7da87).
-        selection = answer.get("repository_selection")  # GitHub always says
+        # GitHub's documented answer may leave the selection out; the installation and the
+        # token have already said "selected" (Codex's review of b7d0915). Said, it must agree.
+        selection = answer.get("repository_selection", "selected")
         writes = any(_may_write(r) for r in rows)
         if selection != "selected" or writes:
             raise FetchError("not-read-only")

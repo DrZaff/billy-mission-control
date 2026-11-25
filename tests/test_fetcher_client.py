@@ -733,10 +733,26 @@ class GitHubClient(Base):
             github.repositories(TOKEN, [REPO_A, REPO_B])
         self.assertEqual(caught.exception.code, "not-read-only")
 
-    def test_the_list_must_say_its_selection_and_odd_permissions_may_write(self):
+    def test_the_list_left_out_selection_is_accepted(self):
+        # Codex's review of b7d0915: GitHub's documented answer may leave it out; the
+        # installation and the token have already said "selected".
         real = self.fake.__call__
+        answer = {"total_count": 2, "repositories": [{"full_name": REPO_A}, {"full_name": REPO_B}]}
+
+        def call(method, path, headers, body):
+            if path == "/installation/repositories?per_page=100":
+                return 200, {}, json.dumps(answer).encode()
+            return real(method, path, headers, body)
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        github.repositories(TOKEN, [REPO_A, REPO_B])
+
+    def test_a_selection_said_must_agree_and_odd_permissions_may_write(self):
+        real = self.fake.__call__
+        both = [{"full_name": REPO_A}, {"full_name": REPO_B}]
         for answer in (
-            {"total_count": 2, "repositories": [{"full_name": REPO_A}, {"full_name": REPO_B}]},
+            {"total_count": 2, "repository_selection": "all", "repositories": both},
+            {"total_count": 2, "repository_selection": None, "repositories": both},
             {
                 "total_count": 2,
                 "repository_selection": "selected",

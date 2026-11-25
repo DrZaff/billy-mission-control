@@ -14,6 +14,7 @@ import math
 import os
 import re
 import socket
+import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -22,7 +23,7 @@ from pathlib import Path
 from mission_control.stopper import TIMEOUT, LineLog, _read_request, log_line, peer_uid
 
 from .config import FetcherConfig
-from .github import FetchError, GitHub, load_key
+from .github import STOPPING, FetchError, GitHub, load_key
 from .snapshot import SNAPSHOT, STATUS, open_regular, read_json, refresh, write_json
 
 REQUEST = b"REFRESH\n"
@@ -30,6 +31,8 @@ OK = b"ok\n"
 TOO_SOON = b"too-soon\n"
 BUSY = b"busy\n"
 LOCK = ".refresh.lock"
+# Set while this process holds the lock: a SIGTERM then waits for the refresh to end.
+ACTIVE = threading.Event()
 REFUSED = b"refused\n"
 MIN_INTERVAL = 60.0
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
@@ -163,7 +166,11 @@ class Refresher:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 return BUSY
-            return self._locked(work)
+            ACTIVE.set()
+            try:
+                return self._locked(work)
+            finally:
+                ACTIVE.clear()
         finally:
             os.close(lock)  # releases the lock
 
@@ -284,9 +291,6 @@ class Refresher:
                     "failed",
                     "internal",
                 )
-            except BaseException:
-                _interrupted(self.cfg, status)
-                raise
             try:
                 write_json(self.cfg.snapshot_dir, STATUS, status)
             except OSError:
@@ -314,12 +318,6 @@ class Refresher:
         except Exception:  # noqa: BLE001 - a surprise fails this refresh, never the service
             # (Codex's review of 23bfb61: one escaped and stopped the fetcher).
             reply, status["result"], status["reason"] = b"failed:internal\n", "failed", "internal"
-        except BaseException as error:
-            # Stopped mid-refresh (SIGTERM): on record, never left "running" (pre-review of
-            # e4a8096).
-            notes = error.__notes__ if hasattr(error, "__notes__") else []
-            _interrupted(self.cfg, status, "token-not-revoked" in notes)
-            raise
         else:
             reply, status["result"], status["reason"] = OK, "ok", None
             if snapshot.get("token_revoked") is not True:
@@ -338,17 +336,6 @@ class Refresher:
         except OSError:
             pass  # the reply still says what happened
         return reply
-
-
-def _interrupted(cfg, status: dict, not_revoked: bool = False) -> None:
-    """Record a refresh or selfcheck that was stopped part way, as a failure."""
-    reason = "interrupted" + ("+token-not-revoked" if not_revoked else "")
-    status["result"], status["reason"] = "failed", reason
-    status["last_refresh"] = {"result": "failed", "reason": reason, "at": status["attempt_at"]}
-    try:
-        write_json(cfg.snapshot_dir, STATUS, status)
-    except OSError:
-        pass
 
 
 def handle(conn: socket.socket, refresher: Refresher, client_uid: int) -> str:
@@ -392,5 +379,5 @@ def serve(
         with conn:
             result = handle(conn, refresher, client_uid)
         log("fetcher: " + result)
-        if once:
+        if once or STOPPING.is_set():
             return
