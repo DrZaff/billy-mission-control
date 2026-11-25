@@ -284,6 +284,9 @@ class Refresher:
                     "failed",
                     "internal",
                 )
+            except BaseException:
+                _interrupted(self.cfg, status)
+                raise
             try:
                 write_json(self.cfg.snapshot_dir, STATUS, status)
             except OSError:
@@ -311,6 +314,12 @@ class Refresher:
         except Exception:  # noqa: BLE001 - a surprise fails this refresh, never the service
             # (Codex's review of 23bfb61: one escaped and stopped the fetcher).
             reply, status["result"], status["reason"] = b"failed:internal\n", "failed", "internal"
+        except BaseException as error:
+            # Stopped mid-refresh (SIGTERM): on record, never left "running" (pre-review of
+            # e4a8096).
+            notes = error.__notes__ if hasattr(error, "__notes__") else []
+            _interrupted(self.cfg, status, "token-not-revoked" in notes)
+            raise
         else:
             reply, status["result"], status["reason"] = OK, "ok", None
             if snapshot.get("token_revoked") is not True:
@@ -329,6 +338,17 @@ class Refresher:
         except OSError:
             pass  # the reply still says what happened
         return reply
+
+
+def _interrupted(cfg, status: dict, not_revoked: bool = False) -> None:
+    """Record a refresh or selfcheck that was stopped part way, as a failure."""
+    reason = "interrupted" + ("+token-not-revoked" if not_revoked else "")
+    status["result"], status["reason"] = "failed", reason
+    status["last_refresh"] = {"result": "failed", "reason": reason, "at": status["attempt_at"]}
+    try:
+        write_json(cfg.snapshot_dir, STATUS, status)
+    except OSError:
+        pass
 
 
 def handle(conn: socket.socket, refresher: Refresher, client_uid: int) -> str:

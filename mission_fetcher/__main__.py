@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import os
 import pwd
+import signal
 import sys
 import time
 from datetime import UTC, datetime
@@ -70,7 +71,29 @@ def github_checks(cfg, github) -> list[Check]:
     return results
 
 
+class Stopped(BaseException):
+    """SIGTERM, raised where the process is, so a refresh revokes its token and records the
+    stop before the process ends (pre-review of e4a8096)."""
+
+
+def _on_sigterm(signum, frame):
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)  # a second SIGTERM ends it at once
+    raise Stopped
+
+
 def main(argv: list[str] | None = None) -> int:
+    before = signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        return _main(argv)
+    except Stopped:
+        # Ended by the signal itself, as systemd expects of a clean stop.
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise
+    finally:
+        signal.signal(signal.SIGTERM, before)
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python3 -m mission_fetcher")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("serve").add_argument("--config", required=True)

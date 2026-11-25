@@ -1686,10 +1686,13 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
         # The refresh failed, whatever the reason: revoke the token, and say too if it
         # outlived the refresh (Codex's review of bf76866).
         revoked = github.revoke(token)
-        if not revoked:
+        if not revoked and isinstance(error, Exception):
             # Whatever went wrong, say the token outlived it (Codex's review of ab64500).
             code = error.code if isinstance(error, FetchError) else "internal"
             raise FetchError(code + "+token-not-revoked") from None
+        if not revoked:
+            # A stop (SIGTERM) still stops: noted, never turned into an ordinary failure.
+            error.add_note("token-not-revoked")
         raise
     snapshot["token_revoked"] = github.revoke(token)
     return snapshot

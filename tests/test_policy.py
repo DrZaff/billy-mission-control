@@ -76,6 +76,7 @@ FETCHER_ALLOWED_TOP = {
     "pathlib",
     "pwd",
     "re",
+    "signal",  # SIGTERM unwinds a refresh (pre-review of e4a8096); no network
     "socket",
     "stat",
     "string",

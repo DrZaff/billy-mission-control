@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import socket
 import stat
 import threading
@@ -17,6 +18,7 @@ from unittest import mock
 from cryptography.hazmat.primitives import serialization
 
 from mission_control import tasks, views
+from mission_fetcher import __main__ as entry
 from mission_fetcher import config as fconfig
 from mission_fetcher import github as gh
 from mission_fetcher import server, snapshot
@@ -4409,21 +4411,25 @@ class PreReviewOfB8b1ca7(PreReviewOf07c3480):
                 self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
 
     def test_an_empty_name_in_another_suite_is_never_harmless(self):
-        node = pr_node(1, issue=issue_node(10))
-        suites = node["commits"]["nodes"][0]["commit"]["checkSuites"]
-        suites["nodes"].append(
-            {
-                "app": {"slug": "other-ci"},
-                "workflowRun": None,
-                "checkRuns": {
-                    "totalCount": 1,
-                    "nodes": [{"name": "", "status": "COMPLETED", "conclusion": "FAILURE"}],
-                },
-            }
-        )
-        suites["totalCount"] = 2
-        pull = self.item_for(node)["task"]["pull_request"]
-        self.assertFalse(pull.get("checks_complete", True))
+        # Both guards: another app's suite, and an Actions suite with no workflow run
+        # (pre-review of e4a8096: the second had no test).
+        for app in ("other-ci", "github-actions"):
+            with self.subTest(app=app):
+                node = pr_node(1, issue=issue_node(10))
+                suites = node["commits"]["nodes"][0]["commit"]["checkSuites"]
+                suites["nodes"].append(
+                    {
+                        "app": {"slug": app},
+                        "workflowRun": None,
+                        "checkRuns": {
+                            "totalCount": 1,
+                            "nodes": [{"name": "", "status": "COMPLETED", "conclusion": "FAILURE"}],
+                        },
+                    }
+                )
+                suites["totalCount"] = 2
+                pull = self.item_for(node)["task"]["pull_request"]
+                self.assertFalse(pull.get("checks_complete", True))
 
 
 class NoFifoAnywhere(Base):
@@ -4589,6 +4595,88 @@ class AuditOf8c62413(unittest.TestCase):
         with mock.patch.object(server.time, "clock_gettime", clock_gettime):
             self.assertEqual(server.boot_clock()[1], 42.0)
         self.assertEqual(asked, [time.CLOCK_BOOTTIME])
+
+
+class PreReviewOfE4a8096(Base):
+    """Fable's pre-review of e4a8096 (should fix): a SIGTERM mid-refresh ended the process with
+    the token unrevoked and the status left "running". The stop now unwinds: the token is
+    revoked, the attempt is recorded as interrupted, and the process still ends."""
+
+    make = RefresherFiles.make
+
+    def stopping(self, revoke_fails=False):
+        fake = self.fake
+
+        def transport(method, path, headers, body):
+            if path == "/graphql":
+                fake.calls.append((method, path))
+                raise entry.Stopped
+            return fake(method, path, headers, body)
+
+        self.fake = transport
+        if revoke_fails:
+            fake.fail["/installation/token"] = (500, {}, b"")
+        refresher = self.make(lambda: NOW.timestamp())
+        with self.assertRaises(entry.Stopped):
+            refresher.run()
+        self.fake = fake
+        return snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+
+    def test_a_stopped_refresh_revokes_its_token_and_says_so(self):
+        status = self.stopping()
+        self.assertIn(("DELETE", "/installation/token"), self.fake.calls)
+        self.assertEqual((status["result"], status["reason"]), ("failed", "interrupted"))
+        self.assertEqual(status["last_refresh"]["reason"], "interrupted")
+
+    def test_a_stopped_refresh_says_when_the_token_outlived_it(self):
+        status = self.stopping(revoke_fails=True)
+        self.assertEqual(status["reason"], "interrupted+token-not-revoked")
+
+    def test_a_stopped_selfcheck_is_recorded_too(self):
+        refresher = self.make(lambda: NOW.timestamp())
+
+        def work():
+            raise entry.Stopped
+
+        with self.assertRaises(entry.Stopped):
+            refresher.run(work)
+        status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+        self.assertEqual((status["result"], status["reason"]), ("failed", "interrupted"))
+
+    def test_sigterm_is_caught_only_while_the_fetcher_runs(self):
+        before = signal.getsignal(signal.SIGTERM)
+        seen = []
+
+        def fake_main(argv):
+            seen.append(signal.getsignal(signal.SIGTERM))
+            return 0
+
+        with mock.patch.object(entry, "_main", fake_main):
+            self.assertEqual(entry.main([]), 0)
+        self.assertEqual(seen, [entry._on_sigterm])
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+        # The handler raises once, then leaves a second SIGTERM to end the process at once.
+        try:
+            with self.assertRaises(entry.Stopped):
+                entry._on_sigterm(signal.SIGTERM, None)
+            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+        finally:
+            signal.signal(signal.SIGTERM, before)
+
+    def test_a_stop_ends_the_process_by_the_signal(self):
+        killed = []
+
+        def fake_main(argv):
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            raise entry.Stopped
+
+        with (
+            mock.patch.object(entry, "_main", fake_main),
+            mock.patch.object(entry.os, "kill", lambda pid, sig: killed.append(sig)),
+            self.assertRaises(entry.Stopped),
+        ):
+            entry.main([])
+        self.assertEqual(killed, [signal.SIGTERM])
 
 
 if __name__ == "__main__":
