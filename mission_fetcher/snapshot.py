@@ -741,9 +741,12 @@ def _checks(
                 conclusion = "SUCCESS"  # GitHub counts both as satisfying a required check
             if status == "completed" and conclusion == "SUCCESS":
                 # A success counts only while fresh: GitHub needs one within the past seven
-                # days, so an old one (or one with no time) is no result here (5d06878).
+                # days (5d06878). An old one, or one with no time, is no pass, and leaves the
+                # list not known, so a fresh one of the same name can never mask it (Codex's
+                # review of 2736aee).
                 done = run.get("completedAt")
                 if done is None or now is None:
+                    complete = False
                     continue
                 try:
                     finished = datetime.fromisoformat(_time(done))
@@ -753,6 +756,7 @@ def _checks(
                     complete = False
                     continue
                 if finished < now - FRESH_UNTIL:
+                    complete = False
                     continue
                 if key != name:
                     continue  # a pass under another case of the name: never counted
@@ -822,6 +826,8 @@ def _status_cautions(
     one adds nothing, because a status can't be tied to an app the way a check run can, but
     only while fresh, as for a check run: an old one, or one with no time, leaves the list not
     known, never passed (Codex's review of 099ef9b)."""
+    if "status" not in commit:
+        return [], False  # left out: not known, never "no statuses" (Codex's review of 2736aee)
     raw = commit.get("status")
     if raw is None:
         return [], True

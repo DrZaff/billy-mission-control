@@ -4292,6 +4292,40 @@ class PreReviewOfE995f6a(CodexReviewOf099ef9b):
         self.assertIsNone(self.run_refresh()["items"][0]["task"]["issue"])
 
 
+class CodexReviewOf2736aee(CodexReviewOf099ef9b):
+    def flags_for(self, node):
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        return item, tasks.derive(self.reviewed(item)).flags
+
+    def test_a_status_left_out_is_not_known(self):
+        node = pr_node(1, issue=issue_node(10))
+        del node["commits"]["nodes"][0]["commit"]["status"]
+        item, flags = self.flags_for(node)
+        self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+        self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
+
+    def test_an_old_or_untimed_success_is_never_masked_by_a_fresh_one(self):
+        for done in ("2020-01-01T00:00:00Z", None):
+            with self.subTest(done=done):
+                node = pr_node(1, issue=issue_node(10))
+                commit = node["commits"]["nodes"][0]["commit"]
+                old = {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                if done is not None:
+                    old["completedAt"] = done
+                commit["checkSuites"]["nodes"].append(
+                    {
+                        "app": {"slug": "github-actions"},
+                        "workflowRun": {"event": "pull_request"},
+                        "checkRuns": {"totalCount": 1, "nodes": [old]},
+                    }
+                )
+                commit["checkSuites"]["totalCount"] = 2
+                item, flags = self.flags_for(node)
+                self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
+
+
 class NoFifoAnywhere(Base):
     """Codex's review of b1fef32 (should fix): the config was opened and read before it was
     checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now
