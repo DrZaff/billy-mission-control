@@ -2598,7 +2598,18 @@
     ],
     "max_fix_rounds": 1,
     "paused": false,
-    "issue": null,
+    "issue": {
+     "number": 67,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      }
+     ]
+    },
     "branch": {
      "name": "claude/about-typo",
      "head": "d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0d7e8f9a0"

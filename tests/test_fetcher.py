@@ -3538,7 +3538,19 @@ class AuditOf24973b8(Base):
         from mission_fetcher.checks import Check
 
         github = gh.GitHub(APP_ID, KEY, transport=transport, clock=lambda: NOW.timestamp())
+
+        class Steady(server.Refresher):
+            """The real Refresher on a fixed time since boot: the default is bound at class
+            definition, and a fresh machine's uptime would trip the floor (audit of b69faa7)."""
+
+            def __init__(self, cfg):
+                super().__init__(cfg, boot=lambda: (None, 10_000.0 + len(boots)))
+                boots.append(1)
+
+        boots = getattr(self, "_boots", [])
+        self._boots = boots
         with (
+            mock.patch.object(server, "Refresher", Steady),
             mock.patch.object(entry, "read_config", return_value="{}"),
             mock.patch.object(entry, "parse_fetcher", return_value=self.cfg),
             mock.patch.object(entry, "fetcher_checks", return_value=[Check("all", True, "yes")]),
@@ -3581,10 +3593,68 @@ class AuditOf24973b8(Base):
             "last_refresh": {"result": "failed", "reason": "not-read-only", "at": NOW.isoformat()},
         }
         snapshot.write_json(self.cfg.snapshot_dir, snapshot.STATUS, previous)
-        with mock.patch.object(server, "boot_clock", return_value=(None, 10_000.0)):
-            code, out = self.selfcheck(fake)
+        code, out = self.selfcheck(fake)
         self.assertEqual(code, 1, out)
         status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
         self.assertEqual(status["result"], "failed")
         self.assertTrue(status["reason"].startswith("selfcheck-failed"))
         self.assertEqual(status["last_refresh"]["reason"], "not-read-only")  # never erased
+
+
+class AuditOfB69faa7(Base):
+    def refresher(self, minute=0, fake=None):
+        return server.Refresher(
+            self.cfg,
+            github=lambda cfg: client(fake or FakeGitHub()),
+            clock=lambda: NOW.timestamp() + 60 * minute,
+            boot=lambda: ("boot-1", 1000.0 + 60 * minute),
+        )
+
+    def status(self):
+        return snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+
+    def test_every_refresh_writes_its_outcome_and_selfchecks_keep_it(self):
+        self.assertEqual(self.refresher(0).run(), server.OK)
+        self.assertEqual(self.status()["last_refresh"]["result"], "ok")
+        fake = FakeGitHub()
+        fake.fail["/graphql"] = (502, {}, b"")
+        self.assertNotEqual(self.refresher(2, fake).run(), server.OK)
+        kept = self.status()["last_refresh"]
+        self.assertEqual((kept["result"], kept["reason"]), ("failed", "http-502"))
+        for minute in (4, 6):  # two selfchecks after it
+            self.refresher(minute).run(lambda: [])
+            self.assertEqual(self.status()["last_refresh"], kept)
+
+    def test_a_wrongly_shaped_last_refresh_is_never_carried_over(self):
+        good = {"result": "failed", "reason": "http-502", "at": NOW.isoformat()}
+        self.assertEqual(server._last_refresh({"last_refresh": good}), good)
+        for bad in (
+            dict(good, extra=1),
+            dict(good, reason=7),
+            dict(good, reason="x" * 65),
+            dict(good, reason="<script>\u202e"),
+            dict(good, at="not a time \u001b[31m"),
+            dict(good, result="maybe"),
+            dict(good, result="ok"),  # ok with a failure reason
+            dict(good, reason=None),  # failed with no reason
+            "text",
+        ):
+            with self.subTest(bad=bad):
+                self.assertIsNone(server._last_refresh({"last_refresh": bad}))
+
+    def test_a_malformed_status_says_the_last_refresh_is_not_known(self):
+        (self.cfg.snapshot_dir / snapshot.STATUS).write_text("[]")
+        self.assertEqual(self.refresher(0).run(), b"failed:status\n")
+        self.assertIn("last_refresh", self.status())
+        self.assertIsNone(self.status()["last_refresh"])
+
+    def test_a_refused_token_whose_revoke_failed_is_on_record(self):
+        from mission_fetcher.__main__ import github_checks
+
+        fake = FakeGitHub()
+        fake.token_permissions = dict(gh.EXPECTED_PERMISSIONS, contents="write")
+        fake.fail["/installation/token"] = (500, {}, b"")
+        refresher = self.refresher(0)
+        reply = refresher.run(lambda: github_checks(self.cfg, client(fake)))
+        self.assertEqual(reply, b"failed:selfcheck-failed+token-not-revoked\n")
+        self.assertEqual(self.status()["reason"], "selfcheck-failed+token-not-revoked")

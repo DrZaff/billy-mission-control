@@ -12,6 +12,7 @@ from __future__ import annotations
 import fcntl
 import math
 import os
+import re
 import socket
 import time
 from collections.abc import Callable
@@ -99,18 +100,29 @@ def _snapshot_at(value) -> str | None:
     return value if parsed.tzinfo is not None else None
 
 
+REASON = re.compile(r"[a-z0-9][a-z0-9+:-]{0,63}")
+
+
 def _last_refresh(previous: dict) -> dict | None:
     """The last refresh's outcome from the previous status, carried over only in its own shape:
     short text, never anything else (the file is trusted only as far as it is checked)."""
     value = previous.get("last_refresh")
     if not isinstance(value, dict) or set(value) != {"result", "reason", "at"}:
         return None
-    if value["result"] not in ("ok", "failed"):
+    result, reason, at = value["result"], value["reason"], value["at"]
+    # Held to what a refresh writes (audit of b69faa7): a real time, a reason code from the
+    # fetcher's own alphabet, and a reason exactly when it failed (or a token outlived it).
+    if _snapshot_at(at) is None:
         return None
-    for key in ("reason", "at"):
-        if value[key] is not None and not (isinstance(value[key], str) and len(value[key]) <= 64):
-            return None
-    return dict(value)
+    if reason is not None and not (isinstance(reason, str) and REASON.fullmatch(reason)):
+        return None
+    if result == "failed" and reason is None:
+        return None
+    if result == "ok" and reason not in (None, "token-not-revoked"):
+        return None
+    if result not in ("ok", "failed"):
+        return None
+    return {"result": result, "reason": reason, "at": at}
 
 
 class Refresher:
@@ -212,6 +224,7 @@ class Refresher:
                         "attempt_epoch": now,
                         "attempt_at": datetime.fromtimestamp(now, UTC).isoformat(),
                         "snapshot_at": None,
+                        "last_refresh": None,  # not known: said, never left out (b69faa7)
                         "result": "failed",
                         "reason": "status",
                     },
@@ -248,7 +261,12 @@ class Refresher:
                     # A failing selfcheck is a failure on record, never a neutral "selfcheck"
                     # (audit of 24973b8: it overwrote "not-read-only").
                     reason = "selfcheck-failed"
-                    if any(c.name == "token revoked" for c in failed):
+                    # However it was found: the revoke check, or a refused token whose own
+                    # revoke failed (audit of b69faa7).
+                    if any(
+                        c.name == "token revoked" or "token-not-revoked" in str(c.detail)
+                        for c in failed
+                    ):
                         reason += "+token-not-revoked"
                     reply = f"failed:{reason}\n".encode()
                     status["result"], status["reason"] = "failed", reason

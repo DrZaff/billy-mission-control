@@ -169,6 +169,30 @@ class App(unittest.TestCase):
                     bases = " ".join(ast.unparse(b) for b in node.bases)
                     if "HTTPSConnection" in bases or "HTTPConnection" in bases:
                         self.assertEqual((path.name, node.name), ("github.py", "_Connection"))
+                    # Nor a subclass of _Connection (audit of b69faa7).
+                    self.assertNotIn("_Connection", bases, (path.name, node.name))
+            # The connection classes' names appear only as _Connection's base and in its one
+            # TCP connect: never aliased or called anywhere else (audit of b69faa7).
+            allowed = {
+                "http.client.HTTPSConnection",  # _Connection's base
+                "http.client.HTTPConnection.connect",  # its TCP-only connect
+            }
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and node.attr in (
+                    "HTTPSConnection",
+                    "HTTPConnection",
+                ):
+                    parents = [
+                        p
+                        for p in ast.walk(tree)
+                        for child in ast.iter_child_nodes(p)
+                        if child is node
+                    ]
+                    text = ast.unparse(parents[0]) if parents else ""
+                    use = ast.unparse(node)
+                    if use + ".connect" in text:
+                        use += ".connect"
+                    self.assertIn(use, allowed, (path.name, node.lineno))
 
     def test_the_fetcher_talks_to_api_github_com_only(self):
         tree = ast.parse((ROOT / "mission_fetcher" / "github.py").read_text(encoding="utf-8"))
