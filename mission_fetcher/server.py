@@ -23,7 +23,7 @@ from mission_control.stopper import TIMEOUT, LineLog, _read_request, log_line, p
 
 from .config import FetcherConfig
 from .github import FetchError, GitHub, load_key
-from .snapshot import SNAPSHOT, STATUS, read_json, refresh, write_json
+from .snapshot import SNAPSHOT, STATUS, open_regular, read_json, refresh, write_json
 
 REQUEST = b"REFRESH\n"
 OK = b"ok\n"
@@ -53,7 +53,7 @@ def read_key(path: Path) -> bytes:
     """The App's key, read without following a symlink; never logged or returned anywhere
     else."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = open_regular(path)
     except OSError:
         raise FetchError("key-unreadable") from None
     with os.fdopen(fd, "rb") as f:

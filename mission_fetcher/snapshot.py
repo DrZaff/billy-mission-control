@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import time
 import unicodedata
 from collections.abc import Callable
@@ -76,6 +77,20 @@ CHECK_EVENTS = (
     "deployment_status",
 )
 CHECK_STATUS = {"QUEUED": "queued", "IN_PROGRESS": "in_progress", "COMPLETED": "completed"}
+# GitHub's CheckConclusionState values, exactly as it writes them.
+CHECK_CONCLUSIONS = frozenset(
+    {
+        "ACTION_REQUIRED",
+        "CANCELLED",
+        "FAILURE",
+        "NEUTRAL",
+        "SKIPPED",
+        "STALE",
+        "STARTUP_FAILURE",
+        "SUCCESS",
+        "TIMED_OUT",
+    }
+)
 
 # One small request lists each repository's pull requests; their details come in batches, so no
 # answer, however large the pull requests, can exceed the transport's limit and stop every
@@ -205,9 +220,14 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
         return None
     marks: dict[str, set | None] = {}
     deep_commits: set[str] = set()
+    # The parts with an error deep inside them, by pull request: if GitHub nulled the whole
+    # pull request for it, a retry without them may still read it (Codex's review of b1fef32).
+    deep: dict[str, set[str]] = {}
     for path in error.paths:
         alias = path[1]
         field = path[2] if len(path) > 2 else None
+        if field in ("files", "commits") and len(path) > 3:
+            deep.setdefault(alias, set()).add(field)
         if field == "files" and len(path) > 3:
             # An error inside one file's entry: GitHub nulled that entry, and the paths it did
             # give are kept, so a clinical one among them is still found (clinical_known) before
@@ -229,8 +249,8 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
         alias = f"p{i}"
         node = repository.get(alias)
         fields = marks.get(alias, set())
-        if not isinstance(node, dict) and fields:
-            node = Retry(frozenset(_piece(f) for f in fields))
+        if not isinstance(node, dict) and fields is not None and (fields or alias in deep):
+            node = Retry(frozenset(_piece(f) for f in fields | deep.get(alias, set())))
         elif not isinstance(node, dict) or fields is None:
             node = UNREADABLE
         else:
@@ -700,6 +720,11 @@ def _checks(
                 conclusion is None or isinstance(conclusion, str)
             ):
                 complete = False  # Codex's review of 23bfb61: an odd one raised TypeError
+                continue
+            if conclusion is not None and conclusion not in CHECK_CONCLUSIONS:
+                # Only GitHub's own values, exactly: a "success" in another case would skip the
+                # freshness check below and still read as passed (Codex's review of b1fef32).
+                complete = False
                 continue
             status = CHECK_STATUS.get(raw_status, "queued")  # waiting, pending: not done
             if status == "completed" and conclusion in ("SKIPPED", "NEUTRAL"):
@@ -1511,6 +1536,20 @@ def write_json(folder: Path, name: str, data: dict, durable: bool = False) -> No
         os.close(folder_fd)
 
 
+def open_regular(path: Path | str) -> int:
+    """A read-only descriptor for a regular file, never through a symlink. Opened without
+    blocking, so a FIFO or device in its place can't hang the read, and refused unless regular
+    (Codex's review of b1fef32: the config was read before it was checked)."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{os.fspath(path)!r} is not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def read_json(
     folder: Path, name: str, limit: int = MAX_SNAPSHOT, strict: bool = False
 ) -> dict | None:
@@ -1518,9 +1557,8 @@ def read_json(
     missing file gives None: a failure to open it raises OSError (pre-review of 9537b08: an
     unreadable status file was taken for "no earlier refresh"), and a malformed, oversized or
     non-object file raises ValueError (Codex's review of 9aeff19)."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
-        fd = os.open(folder / name, flags)
+        fd = open_regular(folder / name)
     except FileNotFoundError:
         return None
     except OSError:

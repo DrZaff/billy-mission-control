@@ -3889,6 +3889,104 @@ class AuditOf80e8fb3(Base):
         self.assertEqual(caught.exception.code, "several-installations")
 
 
+class CodexReviewOfB1fef32(Base):
+    def run_refresh(self, github=None):
+        return snapshot.refresh(self.cfg, github or client(self.fake), NOW)
+
+    def task_of(self, item):
+        return dict(item["task"], paused=False)
+
+    def reviewed(self, item):
+        return Refresh.reviewed(self, item)
+
+    def test_a_success_in_another_case_never_passes(self):
+        # Blocking: "success" skipped the freshness check and still read as passed.
+        for odd in ("success", "Success", "SUCCEEDED", ""):
+            with self.subTest(odd=odd):
+                node = pr_node(1, issue=issue_node(10))
+                runs = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+                for r in runs["checkRuns"]["nodes"]:
+                    r["conclusion"] = odd
+                    r["completedAt"] = "2020-01-01T00:00:00Z"  # stale too
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                pull = item["task"]["pull_request"]
+                self.assertFalse(pull["checks_complete"])
+                flags = tasks.derive(self.reviewed(item)).flags
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
+                self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, flags)
+
+    def test_a_deep_error_that_nulls_the_pr_is_retried_not_given_up(self):
+        # Blocking: GitHub nulled the whole PR for an error deep in its commits, and the
+        # fetcher marked it unreadable, losing a known unsafe merge a retry could read.
+        merged_at = (NOW - timedelta(days=1)).isoformat()
+        node = pr_node(1, state="MERGED", merged=True, closed_at=merged_at, issue=issue_node(10))
+        node["mergedBy"] = {"login": "someone-else"}
+        self.fake.prs[REPO_A]["open"] = []
+        self.fake.prs[REPO_A]["closed"] = [node]
+        real = self.fake.__call__
+        for field, path in (
+            ("commits(", ["repository", "p0", "commits", "nodes", 0, "commit", "status"]),
+            ("files(", ["repository", "p0", "files", "nodes", 0, "path"]),
+        ):
+            with self.subTest(field=field):
+
+                def call(method, url, headers, body, field=field, path=path):
+                    status, h, data = real(method, url, headers, body)
+                    if url == "/graphql" and b"p0:" in body and field.encode() in body:
+                        answer = json.loads(data)
+                        answer["data"]["repository"]["p0"] = None
+                        answer["errors"] = [{"type": "X", "path": path}]
+                        data = json.dumps(answer).encode()
+                    return status, h, data
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                item = self.run_refresh(github)["items"][0]
+                self.assertIsNotNone(item["task"])
+                s = tasks.derive(self.task_of(item))
+                self.assertEqual(s.state, tasks.State.UNSAFE)
+                self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, s.flags)
+
+
+class NoFifoAnywhere(Base):
+    """Codex's review of b1fef32 (should fix): the config was opened and read before it was
+    checked, so a FIFO in its place could hang start-up. Every file the fetcher reads is now
+    opened without blocking and refused unless it is a regular file."""
+
+    def refused_promptly(self, read):
+        outcome = []
+
+        def go():
+            try:
+                read()
+                outcome.append("read")
+            except (OSError, ValueError, gh.FetchError) as error:
+                outcome.append(type(error).__name__)
+
+        worker = threading.Thread(target=go, daemon=True)
+        worker.start()
+        worker.join(5)
+        self.assertFalse(worker.is_alive(), "the read hung")
+        self.assertNotIn("read", outcome)
+        return outcome
+
+    def test_a_fifo_is_never_read(self):
+        from mission_fetcher.__main__ import read_config
+
+        fifo = self.base / "fifo"
+        os.mkfifo(fifo)
+        self.refused_promptly(lambda: read_config(str(fifo)))
+        self.assertEqual(self.refused_promptly(lambda: server.read_key(fifo)), ["FetchError"])
+        self.refused_promptly(lambda: snapshot.read_json(self.base, "fifo", strict=True))
+        self.assertIsNone(snapshot.read_json(self.base, "fifo"))
+
+    def test_a_folder_is_never_read_as_a_file(self):
+        folder = self.base / "folder"
+        folder.mkdir()
+        with self.assertRaises(OSError):
+            os.close(snapshot.open_regular(folder))
+
+
 class ClosingsAndReopenings(Base):
     """Part 1's rule (audit of ca7faa9): closing the issue withdraws the authorisation, and
     reopening restores nothing, so the fetcher reads closings and reopenings too."""

@@ -24,12 +24,13 @@ from mission_control.checks import Check, failures, report
 from .checks import fetcher_checks
 from .config import ConfigError, parse_fetcher
 from .github import FetchError
+from .snapshot import open_regular
 
 MAX_CONFIG = 65536
 
 
 def read_config(path: str) -> str:
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    fd = open_regular(path)  # never a FIFO that could hang start-up (Codex, b1fef32)
     with os.fdopen(fd, "rb") as f:
         data = f.read(MAX_CONFIG + 1)
     if len(data) > MAX_CONFIG:
