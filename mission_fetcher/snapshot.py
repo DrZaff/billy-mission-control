@@ -40,7 +40,7 @@ from typing import Any
 
 from mission_control.tasks import READY_LABEL, InvalidInput, State, derive, parse
 
-from .config import FetcherConfig
+from .config import APP_SLUG, FetcherConfig
 from .github import STOPPING, FetchError, GitHub
 
 SNAPSHOT = "snapshot.json"
@@ -838,10 +838,10 @@ def _checks(
         suite_app = suite.get("app")
         slug = suite_app.get("slug") if isinstance(suite_app, dict) else None
         unknown = "app" not in suite or (
-            suite_app is not None and not (isinstance(slug, str) and slug)
+            suite_app is not None and not (isinstance(slug, str) and APP_SLUG.fullmatch(slug))
         )
         if unknown or (suite_app is None and not _provably_no_required(suite, required)):
-            # Left out, wrongly shaped or empty (28009de, 42a3721, 9044492), or null (as a
+            # Left out, wrongly shaped or not a slug (28009de, 42a3721, 9044492), or null (as a
             # GraphQL error leaves it) with runs that may be required ones (d99b49a): not
             # known, yet read as the configured app's, so a failure in it still fails (0f323f6).
             complete = False
@@ -856,7 +856,10 @@ def _checks(
         if suite_app is None or slug != app:
             # Not the configured app: its successes never count, but a failing or unfinished
             # run with a required name keeps the checks from passing (pre-review of e995f6a).
-            if not _provably_harmless_runs(suite, required):
+            # An Actions suite's own workflow run must still read as one (Fable, ba87dc7).
+            if not _provably_harmless_runs(suite, required) or (
+                slug == "github-actions" and _run_event(suite.get("workflowRun", 0)) is False
+            ):
                 complete = False
             continue
         # Only runs started by a pull request, a push, the merge queue, or a review or
@@ -871,7 +874,7 @@ def _checks(
             # runs are still read, so a failure in them still fails (pre-review of b8b1ca7);
             # being partial, the list never passes on them.
             unknown_event = "workflowRun" not in suite or (
-                workflow_run is not None and not (isinstance(event, str) and event)
+                workflow_run is not None and not _run_event(workflow_run)
             )
             if (
                 workflow_run is None
@@ -1008,6 +1011,18 @@ def _provably_harmless_runs(suite: dict, required: tuple[str, ...]) -> bool:
         ):
             return False
     return True
+
+
+def _run_event(run: Any) -> bool | None:
+    """Whether a workflow run's event reads as one (lowercase, as GitHub names them); None for
+    no run."""
+    if run is None:
+        return None
+    event = run.get("event") if isinstance(run, dict) else None
+    return isinstance(event, str) and EVENT.fullmatch(event) is not None
+
+
+EVENT = re.compile(r"[a-z_]+")
 
 
 def _provably_no_required(suite: dict, required: tuple[str, ...]) -> bool:

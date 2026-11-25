@@ -904,15 +904,12 @@ class Refresh(Base):
         self.assertEqual([i["task"] is None for i in items], [True, False, False])
 
     def test_core_errors_on_every_pr_never_replace_the_snapshot(self):
-        # Codex's review of c3ee86b: the same guard, when every pull request is unreadable
-        # because of GitHub's errors on fields it can't be judged without.
         github = self.with_field_errors({1: ["state"], 2: ["merged"]})
         with self.assertRaises(gh.FetchError) as caught:
             snapshot.refresh(self.cfg, github, NOW)
         self.assertEqual(caught.exception.code, "bad-response")
 
     def test_a_bad_issue_never_hides_a_known_unsafe_merge(self):
-        # Codex's review of 7faf35a (blocking).
         recent = (NOW - timedelta(days=1)).isoformat()
         issue = issue_node(10)
         issue["state"] = ["OPEN"]  # wrongly shaped
@@ -926,8 +923,6 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, state.flags)
 
     def test_another_apps_checks_need_no_workflow_run(self):
-        # Codex's review of de9a6fb: suites of an app other than GitHub Actions have no
-        # workflow run, so their required checks showed as missing.
         data = config_data(self.base)
         data["repos"][REPO_A]["checks_app"] = "other-ci"
         self.cfg = fconfig.parse_fetcher(json.dumps(data))
@@ -938,6 +933,15 @@ class Refresh(Base):
         names = sorted(c["name"] for c in item["task"]["pull_request"]["checks"])
         self.assertEqual(names, ["lint", "test"])
         self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
+        # Beside it, an Actions suite whose workflow run can't be read: not known (Fable, ba87dc7).
+        suites = node["commits"]["nodes"][0]["commit"]["checkSuites"]
+        suites["nodes"].append({"app": {"slug": "github-actions"}, "workflowRun": {"event": 7}})
+        suites["nodes"][1]["checkRuns"] = {"totalCount": 0, "nodes": []}
+        suites["totalCount"] = 2
+        item = self.run_refresh()["items"][0]
+        self.assertFalse(item["task"]["pull_request"]["checks_complete"])
+        suites["nodes"].pop()
+        suites["totalCount"] = 1
         # Left out, the workflow run is not known, never taken as null (Codex's review of
         # d99b49a): the suite never passes on it.
         del node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["workflowRun"]
@@ -946,7 +950,6 @@ class Refresh(Base):
         self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
     def test_too_large_also_says_when_the_token_outlived_it(self):
-        # Codex's review of 23bfb61: the size error dropped the failed-revoke warning.
         self.fake.fail["/installation/token"] = (500, {}, b"")
         saved = snapshot.MAX_SNAPSHOT
         snapshot.MAX_SNAPSHOT = 100
@@ -971,16 +974,11 @@ class Refresh(Base):
             with self.subTest(id=item["id"]):
                 self.assertIsNone(item["task"]["pull_request"]["checks"])  # "not known"
                 self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.task_of(item)).flags)
-        # Codex's review of b24ac2d (blocking): leaving the checks out made the whole PR
-        # unreadable. With "not known", the model still judges everything else.
         state = tasks.derive(self.task_of(merged))
         self.assertNotIn(tasks.Flag.CHECKS_PASSED, state.flags)  # never judged after a merge
         self.assertEqual(tasks.derive(self.task_of(closed)).state, tasks.State.CLOSED)
 
     def test_an_owner_merge_is_never_called_unreviewed_for_lack_of_run_records(self):
-        # Codex's review of 9537b08 (blocking): the snapshot sent an empty run list, which the
-        # model read as proof that no review happened, so every merged PR showed as unsafe.
-        # Run records are not read in A5a: null, and no claim either way.
         recent = (NOW - timedelta(days=1)).isoformat()
         self.fake.prs[REPO_A]["open"] = []
         self.fake.prs[REPO_A]["closed"] = [
@@ -1030,7 +1028,6 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.UNAUTHORIZED_MERGE, state.flags)
 
     def test_review_and_deployment_runs_count(self):
-        # Codex's review of a1e05e5: GitHub documents these as sources of required checks.
         for event in ("pull_request_review", "deployment", "deployment_status"):
             with self.subTest(event=event):
                 self.fake.prs[REPO_A]["open"] = [
@@ -1040,8 +1037,6 @@ class Refresh(Base):
                 self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
     def test_an_open_pr_is_never_closed_by_its_issue(self):
-        # Pre-review of 9537b08: a PR that "fixes" an already closed issue showed as closed,
-        # calmly, though it was open and mergeable.
         issue = issue_node(10)
         issue["state"] = "CLOSED"
         self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue)
@@ -1051,8 +1046,6 @@ class Refresh(Base):
         self.assertTrue(state.needs_attention)
 
     def test_long_paths_in_one_pr_never_stop_the_refresh(self):
-        # Pre-review of 9537b08: six PRs of 100 files on ~4000-character paths pushed every
-        # snapshot over its limit, freezing it for all repositories.
         long_files = tuple("d/" + "x" * 3990 + f"{i:03d}" for i in range(100))
         self.fake.prs[REPO_A]["open"] = [
             pr_node(n, issue=issue_node(10), files=long_files) for n in range(1, 7)
@@ -1063,15 +1056,11 @@ class Refresh(Base):
             self.assertIn(tasks.Flag.FILES_UNVERIFIED, tasks.derive(self.task_of(item)).flags)
 
     def test_the_path_cap_counts_escaped_bytes(self):
-        # Codex's review of 72607b3 (blocking): raw UTF-8 was counted, but each "é" is written
-        # as a six-byte escape.
         paths = tuple(f"d/{i:02d}" + "é" * 200 for i in range(30))  # 12 KB raw, 36 KB written
         self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10), files=paths)
         self.assertIsNone(self.run_refresh()["items"][0]["task"]["pull_request"]["files"])
 
     def test_a_snapshot_over_its_limit_drops_file_lists_rather_than_failing(self):
-        # Codex's review of 72607b3 (blocking): PRs each within the per-PR cap could together
-        # push the snapshot over its limit, and every refresh failed.
         paths = tuple(f"d/{i:02d}" + "x" * 100 for i in range(100))  # ~11 KB each
         self.fake.prs[REPO_A]["open"] = [
             pr_node(n, issue=issue_node(10), files=paths) for n in range(1, 5)
@@ -1092,8 +1081,6 @@ class Refresh(Base):
                 self.assertIn(tasks.Flag.FILES_UNVERIFIED, tasks.derive(self.task_of(item)).flags)
 
     def test_a_cut_list_keeps_a_known_clinical_path(self):
-        # Codex's review of 69ed8e3 (blocking): cutting a list erased a path that already made
-        # the change clinical, and so the warning that no clinician approved it.
         recent = (NOW - timedelta(days=1)).isoformat()
         long_files = tuple("d/" + "x" * 3990 + f"{i:03d}" for i in range(10))
         files = (*long_files, "evidence/table.json")
@@ -1131,8 +1118,6 @@ class Refresh(Base):
             self.assertIn(tasks.Flag.CLINICAL, tasks.derive(self.task_of(item)).flags)
 
     def test_an_open_pr_still_shows_failing_checks_and_missing_approval(self):
-        # Codex's review of 69ed8e3: with run records not read, an open PR returned before its
-        # checks and clinician approval were judged.
         node = pr_node(1, issue=issue_node(10), files=("evidence/a.json",))
         suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
         suite["checkRuns"]["nodes"][0]["conclusion"] = "FAILURE"
@@ -1144,8 +1129,6 @@ class Refresh(Base):
         self.assertTrue(state.needs_attention)
 
     def test_only_clinicians_reviews_are_kept(self):
-        # Codex's review of 9fb21c8 (blocking): anyone can review a public PR, and every review
-        # was kept, so ordinary review volume could push the snapshot over its limit.
         crowd = [review_node(f"user{i}", "COMMENTED") for i in range(90)]
         crowd += [review_node("helper[bot]", "APPROVED", bot=True), review_node()]
         self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10), reviews=crowd)
@@ -1153,9 +1136,6 @@ class Refresh(Base):
         self.assertEqual([r["user"] for r in reviews], [OWNER])  # OWNER is the clinician here
 
     def test_fitting_cuts_reviews_and_checks_to_what_the_verdict_reads(self):
-        # Codex's review of d75f891 (blocking): nulling a complete review list turned a known
-        # clinical merge without a clinician into "reviews not verified" (MERGED). Reviews and
-        # checks are now cut to what the verdict reads, and every verdict stays the same.
         recent = (NOW - timedelta(days=1)).isoformat()
         many = [review_node(state="COMMENTED", at=f"2026-11-22T00:{i:02d}:00Z") for i in range(50)]
         approved = many + [review_node(at="2026-11-22T01:00:00Z")]
@@ -1264,8 +1244,6 @@ class Refresh(Base):
             self.assertEqual((cut.state, cut.flags), (full.state, full.flags), trial)
 
     def test_a_review_dismissed_after_the_merge_keeps_the_evidence(self):
-        # Codex's review of 84df535 (blocking): a dismissed review submitted after the merge
-        # discarded every clinician review, hiding the missing-approval warning.
         merged_at = (NOW - timedelta(days=1)).isoformat()
         later = (NOW - timedelta(hours=1)).isoformat()
         reviews = [review_node(state="DISMISSED", at=later)]  # no approval before the merge
@@ -1532,8 +1510,6 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
 
     def test_a_second_piece_in_error_goes_straight_to_the_core(self):
-        # Codex's review of 0e2139f (blocking): retries alternated between two pieces. And of
-        # 0f79663 (blocking): one retry per piece could spend the budget before the core read.
         real = self.fake.__call__
         calls = []
 
@@ -1558,7 +1534,6 @@ class Refresh(Base):
         self.assertEqual(len(calls), 3)  # the full read, one retry, the core
 
     def test_an_odd_check_time_never_discards_a_known_failure(self):
-        # Codex's review of 0e2139f (blocking).
         node, commit = self.failing_lint()
         runs = commit["checkSuites"]["nodes"][0]["checkRuns"]["nodes"]
         runs[1]["completedAt"] = "not a time"  # "test" succeeded, at an odd time
@@ -1747,7 +1722,6 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
     def test_a_time_at_the_edge_of_the_calendar_never_discards_a_known_failure(self):
-        # Audit of ea9b32a: astimezone raised OverflowError, which nulled every check.
         for edge in ("0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"):
             with self.subTest(edge):
                 node, commit = self.failing_lint()
@@ -1767,8 +1741,6 @@ class Refresh(Base):
         self.assertEqual(state.state, tasks.State.UNSAFE)
 
     def test_a_dismissed_review_on_a_merged_pr_is_not_known(self):
-        # Codex's review of 9fb21c8 (blocking): GitHub gives a review's current state with its
-        # submission time, so a dismissal after the merge looked like one before it.
         recent = (NOW - timedelta(days=1)).isoformat()
         reviews = [review_node("someone"), review_node(state="DISMISSED")]
         self.fake.prs[REPO_A]["open"] = []
@@ -1799,7 +1771,6 @@ class Refresh(Base):
         self.assertEqual([r["state"] for r in kept], ["DISMISSED"])
 
     def test_unlinked_and_unauthorised_open_prs_still_show_their_gates(self):
-        # Codex's review of 9fb21c8: early returns skipped checks and clinician approval.
         unlinked = pr_node(1, files=("evidence/a.json",))  # no linked issue
         suite = unlinked["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
         suite["checkRuns"]["nodes"][0]["conclusion"] = "FAILURE"
@@ -1818,8 +1789,6 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.CLINICAL_APPROVAL_MISSING, s2.flags)
 
     def test_valid_data_never_freezes_the_snapshot(self):
-        # Codex's review of dc1eb14 (blocking): long issue timelines repeated in every item, and
-        # many check runs, could push valid data over the limit, failing every refresh.
         issue = issue_node(10)
         noise = [
             {
@@ -1856,8 +1825,6 @@ class Refresh(Base):
         self.assertTrue(cut["items"])
 
     def test_a_known_missing_approval_waits_for_you(self):
-        # Codex's review of dc1eb14: with Billy's records unread, an open clinical PR with no
-        # clinician approval sat under "Running / queued", its card silent.
         self.fake.prs[REPO_A]["open"][0] = pr_node(
             1, issue=issue_node(10), files=("evidence/a.json",)
         )
@@ -1866,9 +1833,6 @@ class Refresh(Base):
         self.assertTrue(state.needs_attention)
 
     def test_details_too_large_for_one_answer_are_read_in_smaller_batches(self):
-        # Codex's review of 877fd21 (blocking): one answer held every pull request's details,
-        # and a large but valid one exceeded the transport's limit before anything could be
-        # cut, failing every refresh.
         self.fake.prs[REPO_A]["open"] = [pr_node(n, issue=issue_node(10)) for n in range(1, 8)]
         self.fake.max_batch_ok[REPO_A] = 2
         snap = self.run_refresh()
@@ -4356,7 +4320,7 @@ class PreReviewOfB8b1ca7(PreReviewOf07c3480):
         self.assertEqual((len(numbers), cut_off), (snapshot.MAX_CLOSED, True))
 
     def test_an_actions_suites_failure_is_read_whatever_its_workflow_run(self):
-        for workflow_run in ("left out", None, {"event": 7}, {"event": ""}):
+        for workflow_run in ("left out", None, {"event": 7}, {"event": ""}, {"event": "Push"}):
             with self.subTest(workflow_run=workflow_run):
                 node = pr_node(1, issue=issue_node(10))
                 suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
@@ -4370,7 +4334,8 @@ class PreReviewOfB8b1ca7(PreReviewOf07c3480):
                 self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
 
     def test_a_failure_in_a_suite_of_unknown_app_still_fails(self):
-        for suite_app in ("left out", 7, {"slug": 7}, {"slug": ""}):
+        odd = ({"slug": ""}, {"slug": "GitHub-Actions"}, {"slug": " github-actions"})
+        for suite_app in ("left out", 7, {"slug": 7}, *odd):
             for conclusion in ("FAILURE", "SUCCESS"):
                 with self.subTest(app=suite_app, conclusion=conclusion):
                     node = pr_node(1, issue=issue_node(10))
