@@ -1863,9 +1863,10 @@ class Refresh(Base):
                 "__typename": "LabeledEvent",
                 "createdAt": "2026-11-20T08:00:00Z",
                 "actor": {"__typename": "User", "login": OWNER},
-                "label": {"name": "x" * 200},
+                "label": {"name": f"{i:03}" + "x" * 197},  # each its own: no repeat
             }
-        ] * 90
+            for i in range(90)
+        ]
         issue["timelineItems"]["nodes"] = noise + issue["timelineItems"]["nodes"]
         issue["timelineItems"]["totalCount"] = len(issue["timelineItems"]["nodes"])
         checks = tuple(f"job-{i}-" + "y" * 100 for i in range(25)) + ("lint", "test")
@@ -3754,6 +3755,42 @@ class CodexReviewOf96cb8a9(Base):
             }
         }
         self.assertEqual(snapshot._listing(REPO_A, data, NOW), ([], True))
+
+
+class CodexReviewOfCaf31c9(CodexReviewOf099ef9b):
+    """A repeated row may stand where GitHub omitted one, so a counted list with a repeat is
+    never whole: reviews, issue events, check suites and check runs."""
+
+    def test_a_repeated_review_never_hides_an_omitted_one(self):
+        approved = review_node(OWNER, "APPROVED")
+        node = pr_node(
+            1, issue=issue_node(10), files=("evidence/a.json",), reviews=(approved, approved)
+        )
+        self.fake.prs[REPO_A]["open"][0] = node
+        item = self.run_refresh()["items"][0]
+        self.assertIsNone(item["task"]["pull_request"]["reviews"])
+
+    def test_a_repeated_issue_event_never_hides_an_omitted_one(self):
+        issue = issue_node(10)
+        events = issue["timelineItems"]
+        events["nodes"] = events["nodes"] * 2
+        events["totalCount"] = 2
+        self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue)
+        self.assertIsNone(self.run_refresh()["items"][0]["task"]["issue"])
+
+    def test_a_repeated_check_never_hides_an_omitted_one(self):
+        for level in ("suites", "runs"):
+            with self.subTest(level=level):
+                node = pr_node(1, issue=issue_node(10))
+                suites = node["commits"]["nodes"][0]["commit"]["checkSuites"]
+                conn = suites if level == "suites" else suites["nodes"][0]["checkRuns"]
+                conn["nodes"] = conn["nodes"] + conn["nodes"][-1:]
+                conn["totalCount"] = len(conn["nodes"])
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+                flags = tasks.derive(self.reviewed(item)).flags
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
 
 
 class NoFifoAnywhere(Base):

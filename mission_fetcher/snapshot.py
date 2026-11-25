@@ -419,13 +419,21 @@ def _fresh(stale_at: datetime, now: datetime) -> bool:
     return now <= stale_at <= now + CHECK_FRESH + FUTURE_SKEW
 
 
+def _distinct(nodes: list) -> bool:
+    """Whether no row repeats another exactly. A repeated row may stand where GitHub omitted one
+    (a changes request, a label's removal, a failing check), so a counted list with a repeat
+    is never whole (Codex's review of caf31c9)."""
+    seen = {json.dumps(n, sort_keys=True) for n in nodes}
+    return len(seen) == len(nodes)
+
+
 def _whole(conn: dict, nodes: list, cap: int) -> bool:
     """Whether a connection's nodes are all there is: its count readable, no more than the
-    nodes given, and within the cap."""
+    nodes given, within the cap, and no row repeated."""
     total = conn.get("totalCount")
     good = isinstance(total, int) and not isinstance(total, bool) and total >= 0
     # Exactly as many: fewer is cut off, more is a contradiction (Codex's review of b1f5a1a).
-    return good and total == len(nodes) and len(nodes) <= cap
+    return good and total == len(nodes) and len(nodes) <= cap and _distinct(nodes)
 
 
 def _int(value: Any) -> int:
@@ -504,8 +512,8 @@ def _connection(value: Any, limit: int, counted: bool = True) -> list:
     nodes = _list(conn.get("nodes"))
     if counted:
         total = _int(conn.get("totalCount"))
-        if total != len(nodes) or total > limit:
-            raise _Incomplete()  # cut off, or a count that contradicts the nodes
+        if total != len(nodes) or total > limit or not _distinct(nodes):
+            raise _Incomplete()  # cut off, a count that contradicts the nodes, or a repeat
     return nodes
 
 
