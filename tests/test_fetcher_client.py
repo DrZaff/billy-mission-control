@@ -327,6 +327,15 @@ class StartupChecks(Base):
         self.assertFalse(check.ok)
         self.assertIn("intruder", check.detail)
 
+    def test_a_snapshot_folder_the_fetcher_cannot_write_fails(self):
+        # Codex's review of df5912d (should fix): every refresh would fail after start-up.
+        folder = self.base / "snapshot"
+        os.chmod(folder, 0o550)
+        self.addCleanup(os.chmod, folder, 0o750)
+        self.assertFalse(self.checks()["fetcher can write the snapshot folder"].ok)
+        os.chmod(folder, 0o750)
+        self.assertTrue(self.checks()["fetcher can write the snapshot folder"].ok)
+
     def test_every_start_up_check_is_run(self):
         startup = self._startup()
         names = list(StartupChecks.checks(startup))
@@ -340,6 +349,7 @@ class StartupChecks(Base):
             "reader key",
             "folders above key.pem",
             "snapshot folder",
+            "fetcher can write the snapshot folder",
             "snapshot folder's files",
             "snapshot folder shared with the web app only",
             "no ACLs on the snapshot folder or its files",
@@ -575,7 +585,9 @@ class GitHubClient(Base):
                 conn.connect()
         conn.close()
 
-    def test_the_transport_reads_no_more_than_its_cap(self):
+    def transport_with(self, body: bytes, length: str | None):
+        """https_transport against a connection whose response is `body`, announced as
+        `length` bytes (no Content-Length when None)."""
         asked = []
 
         class Response:
@@ -583,10 +595,13 @@ class GitHubClient(Base):
 
             def read(self, n=None):
                 asked.append(n)
-                return b"x" * (n if n is not None else gh.MAX_RESPONSE * 2)
+                return body[:n]
+
+            def getheader(self, name):
+                return length if name == "Content-Length" else None
 
             def getheaders(self):
-                return []
+                return [] if length is None else [("Content-Length", length)]
 
         class Connection:
             def __init__(self, held, expired, *a, **k):
@@ -606,7 +621,43 @@ class GitHubClient(Base):
 
         with mock.patch.object(gh, "_Connection", Connection):
             gh.https_transport("GET", "/x", {}, None)
+        return asked
+
+    def test_the_transport_reads_no_more_than_its_cap(self):
+        asked = self.transport_with(b"x" * (gh.MAX_RESPONSE * 2), None)
         self.assertEqual(asked, [gh.MAX_RESPONSE + 1])
+
+    def test_an_answer_cut_short_is_never_whole(self):
+        # Codex's review of df5912d (blocking): an early end gave fewer bytes with no error.
+        for length in ("100", "not a number", "-1"):
+            with self.subTest(length=length), self.assertRaises(gh.FetchError) as caught:
+                self.transport_with(b'{"a": 1}', length)
+            self.assertEqual(caught.exception.code, "network")
+        self.transport_with(b'{"a": 1}', "8")  # whole: fine
+        self.transport_with(b'{"a": 1}', None)  # read to the end: fine
+
+    def test_an_odd_or_repeated_repository_row_is_never_skipped(self):
+        # Codex's review of df5912d (should fix).
+        real = self.fake.__call__
+        good = [{"full_name": REPO_A}, {"full_name": REPO_B}]
+        for rows, total, code in (
+            ([*good, "junk"], 2, "bad-response"),
+            ([{"full_name": REPO_A}, {"full_name": {"x": 1}}], 2, "bad-response"),
+            ([*good, {"full_name": REPO_A}], 2, "wrong-repositories"),
+            ([{"full_name": REPO_A}, {"full_name": REPO_A}], 2, "wrong-repositories"),
+        ):
+            with self.subTest(rows=rows):
+
+                def call(method, path, headers, body, rows=rows, total=total):
+                    if path == "/installation/repositories?per_page=100":
+                        answer = {"total_count": total, "repositories": rows}
+                        return 200, {}, json.dumps(answer).encode()
+                    return real(method, path, headers, body)
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.repositories(TOKEN, [REPO_A, REPO_B])
+                self.assertEqual(caught.exception.code, code)
 
     def test_two_installations_are_refused(self):
         real = self.fake.__call__

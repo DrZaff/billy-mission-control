@@ -160,6 +160,17 @@ def shared_with_web_app(
     return Check(name, True, "yes")
 
 
+def writable_by_owner(path: Path) -> Check:
+    """The fetcher can write and enter its snapshot folder: otherwise every refresh fails, after
+    the start-up checks passed (Codex's review of df5912d)."""
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return Check("fetcher can write the snapshot folder", False, "missing or unreadable")
+    ok = stat.S_ISDIR(mode) and mode & 0o300 == 0o300
+    return Check("fetcher can write the snapshot folder", ok, "yes" if ok else "no")
+
+
 def folder_files(path: Path, uid: int) -> Check:
     """Every file already in the snapshot folder is the fetcher's own: a plain file it owns,
     not writable by its group or anyone else. The fetcher reads its status file before it
@@ -210,6 +221,7 @@ def fetcher_checks(
         key_file(cfg.key, uid),
         protected_above(cfg.key, trusted),
         own_folder(cfg.snapshot_dir, uid, "snapshot folder"),
+        writable_by_owner(cfg.snapshot_dir),
         folder_files(cfg.snapshot_dir, uid),
         shared_with_web_app(cfg.snapshot_dir, cfg.client_account, gid_of, members_of),
         no_acls(cfg.snapshot_dir),
