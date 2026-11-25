@@ -1474,7 +1474,6 @@ class Refresh(Base):
         # unreadable. With "not known", the model still judges everything else.
         state = tasks.derive(self.task_of(merged))
         self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, state.flags)
-        self.assertNotIn(tasks.Flag.MERGED_WITH_CHECKS_NOT_PASSED, state.flags)
         self.assertEqual(tasks.derive(self.task_of(closed)).state, tasks.State.CLOSED)
 
     def test_an_owner_merge_is_never_called_unreviewed_for_lack_of_run_records(self):

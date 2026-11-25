@@ -159,10 +159,11 @@ class Flag(StrEnum):
     # Opened from a fork: Billy never publishes from one, whatever the PR's issue link says
     # (Fable's pre-review of 8152df0: a stranger's "Fixes #N" PR looked like Billy's work).
     FROM_FORK = "from_fork"
+    # The owner authorised the task, then removed agent:ready (with UNAUTHORIZED_WORK).
+    AUTHORIZATION_WITHDRAWN = "authorization_withdrawn"
     UNAUTHORIZED_MERGE = "unauthorized_merge"  # merged by someone other than the owner
     MERGED_UNREVIEWED = "merged_unreviewed"  # the merged commit never passed review
     MERGED_WITHOUT_CLINICIAN = "merged_without_clinician"
-    MERGED_WITH_CHECKS_NOT_PASSED = "merged_with_checks_not_passed"
     # The checks' results aren't known here (pull_request.checks is null): no verdict either way.
     CHECKS_UNVERIFIED = "checks_unverified"
     RUNS_UNVERIFIED = "runs_unverified"  # Billy's run records not read: no review claim
@@ -197,7 +198,6 @@ ATTENTION_FLAGS = frozenset(
         Flag.RECORD_BEFORE_AUTHORIZATION,
         Flag.PR_BEFORE_REVIEW,
         Flag.CHECKS_FAILING,
-        Flag.MERGED_WITH_CHECKS_NOT_PASSED,
         Flag.ISSUE_NOT_LINKED,
         Flag.ISSUE_CLOSED_PR_OPEN,
         Flag.FROM_FORK,
@@ -223,10 +223,19 @@ class TaskStatus:
     head_sha: str | None = None  # the commit the task is at now
     reviewed_sha: str | None = None  # the commit whose review applies, if any
     pr: int | None = None
+    # PAUSED only: the state it would be in. The stop switch stops new steps; it never hides
+    # a failure, a question or a decision that needs the owner (Fable's review of 0cf099c).
+    would_be: State | None = None
+    merged: bool = False  # the PR is merged (whatever the state says about it)
+
+    @property
+    def underlying(self) -> State:
+        """The state the task is in, the stop switch aside."""
+        return self.would_be or self.state
 
     @property
     def needs_attention(self) -> bool:
-        return self.state in ATTENTION_STATES or bool(
+        return self.underlying in ATTENTION_STATES or bool(
             self.flags & (ATTENTION_FLAGS | WAITING_FLAGS)
         )
 
@@ -339,7 +348,8 @@ class _Check:
 class _PR:
     number: int
     open: bool
-    draft: bool
+    draft: bool  # read, never judged: Billy opens draft PRs by design; marking one ready is
+    # part of the owner's merge decision (mission-control.md: "draft PR, head = reviewed SHA")
     merged: bool
     merged_by: str | None
     merged_at: datetime | None  # None only when not merged
@@ -616,7 +626,7 @@ def _parse_runs(value: Any) -> tuple[_Run, ...] | None:
 
 def _authorization(
     task: _Task, flags: set[Flag], until: datetime | None = None
-) -> tuple[datetime | None, datetime | None]:
+) -> tuple[datetime | None, datetime | None, bool]:
     """(since, last): when the owner's current authorisation began, and the owner's latest
     authorising action, or (None, None) if the work is not authorised now.
 
@@ -627,6 +637,7 @@ def _authorization(
     (a merge), later events are ignored: they can't authorise or withdraw what is done."""
     since: datetime | None = None
     last: datetime | None = None
+    withdrawn = False  # an authorisation existed and was removed
     # At the same instant a removal sorts last, so it wins over an add or an authorisation.
     for e in sorted(task.timeline, key=lambda e: (e.at, e.kind == "unlabeled")):
         if until is not None and e.at > until:
@@ -638,8 +649,9 @@ def _authorization(
             since = e.at if since is None else since
             last = e.at
         elif e.kind == "unlabeled" and ready:
+            withdrawn = withdrawn or since is not None
             since = last = None
-    return since, last
+    return since, last, withdrawn and since is None
 
 
 def _checks(task: _Task, head: str, flags: set[Flag]) -> bool:
@@ -667,6 +679,9 @@ def _checks(task: _Task, head: str, flags: set[Flag]) -> bool:
     return ok
 
 
+DECISIVE = ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")
+
+
 def _clinician_approved(task: _Task, head: str, until: datetime | None = None) -> bool:
     """A clinician's own GitHub approval of exactly this commit, not later withdrawn, with no
     clinician asking for changes to it. Bots never count, and neither does any review report
@@ -676,6 +691,19 @@ def _clinician_approved(task: _Task, head: str, until: datetime | None = None) -
     can't make it compliant (Codex's review of 69ed8e3)."""
     if task.pr.reviews is None:
         return False  # not known: no approval (A5a)
+    # A clinician whose latest decisive review, on any commit, asks for changes blocks until
+    # they approve again or it is dismissed, as GitHub shows it (Fable's review of 0cf099c).
+    latest: dict[str, list[_Review]] = {}
+    for rv in task.pr.reviews:
+        if rv.is_bot or rv.user not in task.clinicians or rv.state not in DECISIVE:
+            continue
+        if until is not None and rv.at > until:
+            continue
+        latest.setdefault(rv.user, []).append(rv)
+    for reviews in latest.values():
+        at = max(rv.at for rv in reviews)
+        if any(rv.state == "CHANGES_REQUESTED" for rv in reviews if rv.at == at):
+            return False
     by_user: dict[str, list[_Review]] = {}
     for rv in task.pr.reviews:
         if rv.is_bot or rv.user not in task.clinicians or rv.commit != head:
@@ -710,9 +738,9 @@ def derive(raw: Any) -> TaskStatus:
     pr = task.pr
 
     def status(state: State, reason: str, head=None, reviewed=None) -> TaskStatus:
-        out_state = state
+        out_state, would_be = state, None
         if task.paused and state not in (State.MERGED, State.CLOSED, State.UNSAFE, State.UNKNOWN):
-            out_state = State.PAUSED
+            out_state, would_be = State.PAUSED, state
             reasons.append(f"Stop switch is on (would be {state.value}).")
         return TaskStatus(
             out_state,
@@ -721,6 +749,8 @@ def derive(raw: Any) -> TaskStatus:
             head,
             reviewed,
             pr.number if pr else None,
+            would_be,
+            bool(pr and pr.merged),
         )
 
     # Records for another repository or branch never count, and are reported. A build or review
@@ -729,8 +759,13 @@ def derive(raw: Any) -> TaskStatus:
     runs_known = task.runs is not None
     if not runs_known:
         flags.add(Flag.RUNS_UNVERIFIED)
+    merged_at = pr.merged_at if pr and pr.merged else None
     runs = []
     for r in task.runs or ():
+        if merged_at is not None and r.at > merged_at:
+            # Later work: it never counts for, or raises an alert on, the finished merge
+            # (Fable's review of 0cf099c).
+            continue
         if r.repo != task.repo:
             flags.add(Flag.WRONG_REPO_RECORD)
         elif r.step in ("build", "review") and (task.branch is None or r.branch != task.branch):
@@ -745,8 +780,7 @@ def derive(raw: Any) -> TaskStatus:
         # fork PR reached AWAITING_OWNER on Billy's records).
         runs = []
 
-    merged_at = pr.merged_at if pr and pr.merged else None
-    since, last_owner_action = _authorization(task, flags, merged_at)
+    since, last_owner_action, withdrawn = _authorization(task, flags, merged_at)
     if pr and pr.from_fork:
         flags.add(Flag.FROM_FORK)
     if not task.issue_known:
@@ -777,13 +811,14 @@ def derive(raw: Any) -> TaskStatus:
         if r.step == "review" and r.status == "finished":
             passed = r.verdict == "no_blocking_findings" and not r.blocking
             verdicts.setdefault(r.sha, set()).add("pass" if passed else "fail")
-    if any(len(v) > 1 for v in verdicts.values()):
-        flags.add(Flag.CONFLICTING_RECORDS)
-        return TaskStatus(
-            State.UNKNOWN,
-            frozenset(flags),
-            ("Two reviews of the same commit disagree; check the run records.",),
-        )
+    # Two finished reviews of one commit that disagree: that commit counts as neither passed
+    # nor failed, and is flagged. Everything else is still judged, so a conflict never hides a
+    # known unsafe merge (Fable's review of 0cf099c: an early UNKNOWN dropped the merger, the
+    # head and the PR).
+    for sha, verdict in verdicts.items():
+        if len(verdict) > 1:
+            flags.add(Flag.CONFLICTING_RECORDS)
+            verdicts[sha] = {"conflict"}
 
     head = pr.head if pr else task.branch_head
     # Clinical gating looks at every file any record touched, authorised or not: when in
@@ -833,12 +868,12 @@ def derive(raw: Any) -> TaskStatus:
         if since is None and task.issue_known:
             flags.add(Flag.UNAUTHORIZED_WORK)
             problems.append("the work was never authorised by the owner")
-        checks_ok = _checks(task, pr.head, flags)
+        # Checks are never judged after a merge: results carry no time, so a later run could
+        # rewrite the verdict either way (Fable's review of 0cf099c), and GitHub's merge box
+        # enforced them at the time (owner's decision, 2026-11-25).
+        flags.add(Flag.CHECKS_UNVERIFIED)
         if problems:
             return status(State.UNSAFE, "Merged, but " + "; ".join(problems) + ".", pr.head)
-        # Unknown checks give CHECKS_UNVERIFIED (from _checks), not a claim either way.
-        if not checks_ok and pr.checks is not None:
-            flags.add(Flag.MERGED_WITH_CHECKS_NOT_PASSED)
         if not runs_known:
             return status(
                 State.MERGED,
@@ -861,6 +896,10 @@ def derive(raw: Any) -> TaskStatus:
     if issue_closed:
         flags.add(Flag.ISSUE_CLOSED_PR_OPEN)
     elif (pr and not pr.open) or not task.issue_open:
+        # Nothing to decide: a closed stranger's or unlinked PR is history, not an alert
+        # (Fable's review of 0cf099c).
+        flags.discard(Flag.ISSUE_NOT_LINKED)
+        flags.discard(Flag.FROM_FORK)
         return status(State.CLOSED, "Closed without merging.", head)
 
     def github_gates() -> None:
@@ -878,8 +917,11 @@ def derive(raw: Any) -> TaskStatus:
                 else:
                     flags.add(Flag.CLINICAL_APPROVAL_MISSING)
 
+    # Judged once, before any early return, for every open PR: no path hides a failing check
+    # or a missing clinician approval (Fable's review of 0cf099c).
+    github_gates()
+
     if issue_closed:
-        github_gates()
         return status(
             State.NOT_LINKED,
             "Its linked issue is closed, which ends your authorisation: reopen the issue to go "
@@ -889,7 +931,6 @@ def derive(raw: Any) -> TaskStatus:
     if pr and pr.open and pr.from_fork:
         # Never on the way to a merge: GitHub's own results are shown, and the owner decides
         # on GitHub (Codex's review of 9dbb868).
-        github_gates()
         return status(
             State.NOT_LINKED,
             "Opened from a fork: not Billy's work, whatever its issue link says. Review it on "
@@ -897,7 +938,6 @@ def derive(raw: Any) -> TaskStatus:
             head,
         )
     if since is None and not task.issue_known:
-        github_gates()
         return status(
             State.NOT_LINKED,
             "Not linked to an authorised issue: none is linked, several are, or the one "
@@ -907,8 +947,16 @@ def derive(raw: Any) -> TaskStatus:
     if since is None:
         # Any sign of work counts: run records, a PR, or a commit on the source branch.
         if runs or pr or head is not None:
-            github_gates()
             flags.add(Flag.UNAUTHORIZED_WORK)
+            if withdrawn:
+                # The owner did authorise it, then removed the label (Fable's review of
+                # 0cf099c: this read as "never authorised").
+                flags.add(Flag.AUTHORIZATION_WITHDRAWN)
+                return status(
+                    State.UNSAFE,
+                    "Work exists, but your authorisation was withdrawn (agent:ready removed).",
+                    head,
+                )
             return status(
                 State.UNSAFE, "Work exists, but the owner never authorised this task.", head
             )
@@ -976,7 +1024,6 @@ def derive(raw: Any) -> TaskStatus:
         # missing or that the PR came before it, and never a passed review. Everything
         # GitHub does show is still judged and flagged (Codex's review of 69ed8e3): the
         # required checks, and for a possibly clinical change, the clinician's approval.
-        github_gates()
         return status(
             State.BUILT,
             f"{head[:12]}: Billy's review records aren't read here, so its review isn't shown.",
@@ -984,6 +1031,12 @@ def derive(raw: Any) -> TaskStatus:
         )
 
     head_verdict = verdicts.get(head)
+    if head_verdict == {"conflict"}:
+        return status(
+            State.UNKNOWN,
+            f"Two reviews of {head[:12]} disagree; check the run records.",
+            head,
+        )
     if verdicts and head_verdict is None:
         flags.add(Flag.STALE_REVIEW)
     reported = any(r.step == "build" and r.sha == head for r in current)
@@ -1005,26 +1058,25 @@ def derive(raw: Any) -> TaskStatus:
     # The head commit passed review.
     if not pr:
         return status(State.REVIEWED, f"{head[:12]} passed review; not published yet.", head, head)
-    # Clinician approval is judged before the checks gate, so a PR waiting on its checks
-    # never shows approval as needed when it is given (Codex's review of 28546f5).
-    approved = maybe_clinical and _clinician_approved(task, head)
-    if approved:
-        flags.add(Flag.CLINICIAN_APPROVED)
-    elif maybe_clinical and pr.reviews is None:
-        flags.add(Flag.REVIEWS_UNVERIFIED)
-    elif maybe_clinical:
-        flags.add(Flag.CLINICAL_APPROVAL_MISSING)
-    if not _checks(task, head, flags):
+    # Clinician approval and the checks were judged by github_gates, before any early return
+    # (Codex's review of 28546f5; Fable's review of 0cf099c). Unknown ones are said so, never
+    # put as a negative (Fable's review of 0cf099c).
+    approved = Flag.CLINICIAN_APPROVED in flags
+    if Flag.CHECKS_PASSED not in flags:
+        unknown = Flag.CHECKS_UNVERIFIED in flags
         return status(
             State.PUBLISHED,
-            f"PR #{pr.number} is the reviewed commit; required checks have not all passed.",
+            f"PR #{pr.number} is the reviewed commit; required checks "
+            + ("aren't verified here." if unknown else "have not all passed."),
             head,
             head,
         )
     if maybe_clinical and not approved:
+        unknown = Flag.REVIEWS_UNVERIFIED in flags
         return status(
             State.CLINICAL_REVIEW,
-            f"Clinical files: waiting for a clinician's approval of {head[:12]}.",
+            f"Clinical files: a clinician's approval of {head[:12]} "
+            + ("isn't shown: the reviews couldn't be read." if unknown else "is needed."),
             head,
             head,
         )

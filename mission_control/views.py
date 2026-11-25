@@ -56,11 +56,11 @@ FLAG_WORDS = {
     Flag.CLINICAL_APPROVAL_MISSING: "No clinician has approved this commit",
     Flag.CLINICIAN_APPROVED: "A clinician approved this commit",
     Flag.FROM_FORK: "Opened from a fork: not Billy's work, whatever its issue link says",
+    Flag.AUTHORIZATION_WITHDRAWN: "You authorised this task, then removed agent:ready",
     Flag.AUTHORIZATION_UNVERIFIED: "Your authorisation of this merge can't be verified here",
     Flag.UNAUTHORIZED_MERGE: "Merged by someone other than you",
     Flag.MERGED_UNREVIEWED: "The merged commit never passed review",
     Flag.MERGED_WITHOUT_CLINICIAN: "Clinical files merged without a clinician's approval",
-    Flag.MERGED_WITH_CHECKS_NOT_PASSED: "Merged before the required checks passed",
     Flag.RUNS_UNVERIFIED: "Billy's run records not read here (its review isn't shown)",
     Flag.CHECKS_UNVERIFIED: "Required checks not verified here (GitHub's merge box shows them)",
     Flag.FILES_UNVERIFIED: "Changed files not verified here (they may include clinical files)",
@@ -104,13 +104,14 @@ AUTHORISED_STATES = frozenset(
 def section(status: TaskStatus) -> str:
     """Where a task belongs on Home. UNSAFE, UNKNOWN and FAILED tasks, and any attention flag,
     are always alerts; every other task that needs the owner is under "Waiting for you"."""
-    if status.state in (State.UNSAFE, State.UNKNOWN, State.FAILED) or (
-        status.flags & ATTENTION_FLAGS
-    ):
+    # The state the stop switch paused, not "paused": a failure or a decision still needs you
+    # (Fable's review of 0cf099c).
+    state = status.underlying
+    if state in (State.UNSAFE, State.UNKNOWN, State.FAILED) or (status.flags & ATTENTION_FLAGS):
         return "alerts"
     if status.needs_attention or Flag.STALE_REVIEW in status.flags:
         return "waiting"
-    if status.state in (State.MERGED, State.CLOSED):
+    if state in (State.MERGED, State.CLOSED):
         return "done"
     return "active"
 
@@ -185,9 +186,26 @@ def page(title: str, current: str, demo: Demo | None, body: str) -> str:
     )
 
 
+# A state's words when what it rests on isn't known: never put as a negative (Fable's review of
+# 0cf099c: "checks not all passed" beside "checks not verified here").
+UNVERIFIED_WORDS = (
+    (State.PUBLISHED, Flag.CHECKS_UNVERIFIED, "Published: checks not verified here"),
+    (State.CLINICAL_REVIEW, Flag.REVIEWS_UNVERIFIED, "Clinician's approval not shown"),
+    (State.BUILT, Flag.RUNS_UNVERIFIED, "Built: its review isn't shown here"),
+    (State.AWAITING_OWNER, Flag.FIX_ROUNDS_EXHAUSTED, "Fix rounds used up: your decision"),
+)
+
+
+def state_words(status: TaskStatus) -> str:
+    for state, flag, words in UNVERIFIED_WORDS:
+        if status.state is state and flag in status.flags:
+            return words
+    return STATE_WORDS[status.state]
+
+
 def _state_line(status: TaskStatus) -> str:
     marker = '<strong class="attention">Needs you: </strong>' if needs_you(status) else ""
-    words = _e(STATE_WORDS[status.state])
+    words = _e(state_words(status))
     return f'<p class="state state-{_e(status.state.value)}">{marker}{words}</p>'
 
 
@@ -268,20 +286,23 @@ def task_list(demo: Demo) -> str:
 def _path(entry: Entry) -> str:
     """The task's way from authorisation to merge, one line per step, in words."""
     st, flags = entry.status, entry.status.flags
+    state = st.underlying  # paused: the rows still show where it stands
     rows: list[tuple[str, str, str]] = []  # (marker, step, detail)
 
     # Each row claims only what the model established. A "done" mark needs a state the model
     # reaches only after that gate passed; anything else says "not shown" rather than guess.
-    if Flag.UNAUTHORIZED_WORK in flags:
+    if Flag.AUTHORIZATION_WITHDRAWN in flags:
+        authorised = ("!", "withdrawn: agent:ready was removed")
+    elif Flag.UNAUTHORIZED_WORK in flags:
         authorised = ("!", "no")
-    elif st.state is State.PROPOSED:
+    elif state is State.PROPOSED:
         authorised = ("-", "not yet")
     elif Flag.AUTHORIZATION_UNVERIFIED in flags:
         authorised = ("?", "not verifiable: GitHub shows only the current issue link")
     elif Flag.ISSUE_NOT_LINKED in flags:
         # A merged PR with no readable linked issue (Codex's review of 72607b3).
         authorised = ("?", "not shown: no linked issue to show it")
-    elif st.state in AUTHORISED_STATES:
+    elif state in AUTHORISED_STATES:
         authorised = ("done", "yes, by the owner")
     else:
         authorised = ("?", "not shown in this state")
@@ -300,13 +321,13 @@ def _path(entry: Entry) -> str:
         review = ("?", "not shown: Billy's run records aren't read here")
     elif Flag.FIX_ROUNDS_EXHAUSTED in flags:
         review = ("!", "fix rounds used up; your decision")
-    elif st.state is State.CHANGES_NEEDED:
+    elif state is State.CHANGES_NEEDED:
         review = ("!", "blocking problems found")
     elif Flag.MERGED_UNREVIEWED in flags:
         review = ("!", "the merged commit never passed review")
     elif Flag.STALE_REVIEW in flags:
         review = ("!", "only for an older commit")
-    elif st.state is State.REVIEWING:
+    elif state is State.REVIEWING:
         review = ("...", "under way")
     else:
         review = ("-", "not yet")
@@ -321,8 +342,10 @@ def _path(entry: Entry) -> str:
 
     for flag, marker in (
         (Flag.CHECKS_FAILING, "!"),
-        (Flag.CHECKS_STALE, "!"),
-        (Flag.CHECKS_MISSING, "!"),
+        # Stale or missing results are still coming, not an alert: "...", never a "!" that
+        # nothing else backs up (Fable's review of 0cf099c).
+        (Flag.CHECKS_STALE, "..."),
+        (Flag.CHECKS_MISSING, "..."),
         (Flag.CHECKS_PENDING, "..."),
         (Flag.CHECKS_PASSED, "done"),
         # Not known here: neither passed nor "not yet" (Codex's review of b7d568e).
@@ -345,16 +368,23 @@ def _path(entry: Entry) -> str:
         else:
             rows.append(("-", "Clinician", "approval of the final commit needed, later"))
 
-    if st.state is State.MERGED:
+    # The Owner row says what is true of this state, never "approve and merge, later" beside
+    # an unsafe, closed, unlinked or unknown one (Fable's review of 0cf099c).
+    if state is State.MERGED:
         rows.append(("done", "Owner", "merged"))
-    elif st.state is State.UNSAFE and st.flags & {
-        Flag.MERGER_UNKNOWN,  # Codex's review of 48929aa
-        Flag.UNAUTHORIZED_MERGE,
-        Flag.MERGED_UNREVIEWED,
-        Flag.MERGED_WITHOUT_CLINICIAN,
-    }:
+    elif st.merged:
         rows.append(("!", "Owner", "merged unsafely; see the reasons"))
-    elif st.state is State.AWAITING_OWNER:
+    elif state is State.UNSAFE:
+        rows.append(("!", "Owner", "do not approve or merge"))
+    elif state is State.CLOSED:
+        rows.append(("-", "Owner", "nothing to merge: closed"))
+    elif state is State.NOT_LINKED:
+        rows.append(("-", "Owner", "not on Billy's path: decide on GitHub"))
+    elif state is State.UNKNOWN:
+        rows.append(("?", "Owner", "not shown: the data can't be trusted"))
+    elif state is State.AWAITING_OWNER and Flag.FIX_ROUNDS_EXHAUSTED in flags:
+        rows.append(("!", "Owner", "decide what happens next: not a merge"))
+    elif state is State.AWAITING_OWNER:
         rows.append(("...", "Owner", "your decision"))
     else:
         rows.append(("-", "Owner", "approve and merge, later"))
@@ -375,6 +405,8 @@ def task_detail(demo: Demo, entry: Entry) -> str:
         clinical = "yes"
     elif Flag.FILES_UNVERIFIED in st.flags or st.state is State.UNKNOWN:
         clinical = "not known"  # unreadable data says nothing (Codex's review of 7faf35a)
+    elif st.pr is None:
+        clinical = "not known yet"  # no pull request: no file list judged (Fable, 0cf099c)
     else:
         clinical = "no"
     reasons = "".join(f"<li>{_e(r)}</li>" for r in st.reasons)

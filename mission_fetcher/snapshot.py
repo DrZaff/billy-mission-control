@@ -1058,25 +1058,32 @@ DECISIVE = ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")
 
 
 def _essential_reviews(reviews: list[dict], head: str, pull: dict) -> list[dict]:
-    """The reviews the clinician gate reads (tasks._clinician_approved): decisive reviews of
-    the head commit, and for each clinician only those at their latest time, and, for a merged
-    pull request, at their latest time up to the merge. Same verdict, far fewer entries."""
+    """The reviews the clinician gate reads (tasks._clinician_approved), for each clinician
+    only those at their latest time and, for a merged pull request, at their latest time up to
+    the merge: among their decisive reviews of the head (the approval), and among their decisive
+    reviews of any commit (an outstanding changes request blocks; Fable's review of 0cf099c).
+    Same verdict, far fewer entries."""
     merged_at = pull.get("merged_at")
     limit = datetime.fromisoformat(merged_at) if merged_at else None
-    by_user: dict[str, list[dict]] = {}
-    for review in reviews:
-        if review["commit_id"] == head and review["state"] in DECISIVE:
+
+    def latest(candidates: list[dict]) -> list[dict]:
+        by_user: dict[str, list[dict]] = {}
+        for review in candidates:
             by_user.setdefault(review["user"], []).append(review)
-    kept = []
-    for user_reviews in by_user.values():
-        times = [datetime.fromisoformat(r["at"]) for r in user_reviews]
-        wanted = {max(times)}
-        if limit is not None:
-            before = [t for t in times if t <= limit]
-            if before:
-                wanted.add(max(before))
-        kept += [r for r, t in zip(user_reviews, times, strict=True) if t in wanted]
-    return kept
+        kept = []
+        for user_reviews in by_user.values():
+            times = [datetime.fromisoformat(r["at"]) for r in user_reviews]
+            wanted = {max(times)}
+            if limit is not None:
+                before = [t for t in times if t <= limit]
+                if before:
+                    wanted.add(max(before))
+            kept += [r for r, t in zip(user_reviews, times, strict=True) if t in wanted]
+        return kept
+
+    decisive = [r for r in reviews if r["state"] in DECISIVE]
+    chosen = latest([r for r in decisive if r["commit_id"] == head]) + latest(decisive)
+    return [r for r in reviews if any(r is c for c in chosen)]
 
 
 def _essential_checks(checks: list[dict], head: str) -> list[dict]:

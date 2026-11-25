@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from . import tasks
-from .tasks import State, TaskStatus
+from .tasks import Flag, State, TaskStatus
 
 DEMO_FILE = Path(__file__).with_name("demo.json")
 
@@ -73,6 +73,8 @@ class Demo:
         sha = status.head_sha
         if kind is None or sha is None or entry.repo is None or entry.branch is None:
             return None
+        if Flag.RUNS_UNVERIFIED in status.flags:
+            return None  # its review history isn't known: no next step offered (Fable, 0cf099c)
         if not BRANCH.fullmatch(entry.branch) or ".." in entry.branch:
             return None
         values = {

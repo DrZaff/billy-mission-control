@@ -2619,6 +2619,110 @@
      "from_fork": true
     }
    }
+  },
+  {
+   "id": "example-site-933",
+   "title": "Glossary page (authorisation withdrawn)",
+   "risk": "low",
+   "task": {
+    "repo": "example-org/example-site",
+    "owner": "example-owner",
+    "clinicians": [
+     "example-clinician"
+    ],
+    "clinical_paths": [
+     "evidence/*",
+     "faq/*",
+     "course-*.html"
+    ],
+    "required_checks": [
+     "lint",
+     "test"
+    ],
+    "max_fix_rounds": 1,
+    "paused": false,
+    "issue": {
+     "number": 921,
+     "state": "open",
+     "timeline": [
+      {
+       "event": "labeled",
+       "actor": "example-owner",
+       "at": "2026-11-14T09:00:00+00:00",
+       "label": "agent:ready"
+      },
+      {
+       "event": "unlabeled",
+       "label": "agent:ready",
+       "actor": "example-owner",
+       "at": "2026-11-15T09:00:00+00:00"
+      }
+     ]
+    },
+    "branch": {
+     "name": "claude/about-forward",
+     "head": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55"
+    },
+    "runs": [
+     {
+      "step": "build",
+      "repo": "example-org/example-site",
+      "branch": "claude/about-forward",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T16:10:00+00:00",
+      "status": "finished"
+     },
+     {
+      "step": "review",
+      "repo": "example-org/example-site",
+      "branch": "claude/about-forward",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T16:20:00+00:00",
+      "status": "finished",
+      "verdict": "no_blocking_findings",
+      "findings": [
+       {
+        "severity": "note"
+       }
+      ]
+     },
+     {
+      "step": "publish",
+      "repo": "example-org/example-site",
+      "branch": "agent/pub-d00d1e5",
+      "sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+      "at": "2026-11-14T16:25:00+00:00",
+      "pr": 922
+     }
+    ],
+    "pull_request": {
+     "number": 933,
+     "state": "open",
+     "draft": true,
+     "merged": false,
+     "merged_by": null,
+     "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+     "files": [
+      "site/footer.html"
+     ],
+     "reviews": [],
+     "checks": [
+      {
+       "name": "lint",
+       "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+       "status": "completed",
+       "conclusion": "success"
+      },
+      {
+       "name": "test",
+       "head_sha": "d00d1e55d00d1e55d00d1e55d00d1e55d00d1e55",
+       "status": "completed",
+       "conclusion": "success"
+      }
+     ],
+     "from_fork": false
+    }
+   }
   }
  ]
 }

@@ -537,11 +537,13 @@ class Merges(unittest.TestCase):
         self.assertEqual(s.state, State.UNSAFE)
         self.assertIn(Flag.UNAUTHORIZED_WORK, s.flags)
 
-    def test_merge_past_failing_checks_is_merged_but_flagged(self):
+    def test_a_merged_prs_checks_are_never_judged(self):
+        # Results carry no time, so a later run could rewrite the verdict either way (Fable's
+        # review of 0cf099c); GitHub's merge box enforced them at the time.
         s = derive(self.merged(checks=[check("lint"), check("test", conclusion="failure")]))
         self.assertEqual(s.state, State.MERGED)
-        self.assertIn(Flag.MERGED_WITH_CHECKS_NOT_PASSED, s.flags)
-        self.assertTrue(s.needs_attention)
+        self.assertIn(Flag.CHECKS_UNVERIFIED, s.flags)
+        self.assertNotIn(Flag.CHECKS_FAILING, s.flags)
 
 
 class BlockedFailedPausedClosed(unittest.TestCase):
@@ -1300,3 +1302,120 @@ class Coverage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FableReviewOf0cf099c(unittest.TestCase):
+    """An independent hostile review of the task model, before the next formal review."""
+
+    def test_conflicting_records_never_hide_a_known_unsafe_merge(self):
+        value = task(
+            runs=[run("build"), passed(), failed(minute=5)],
+            pull_request=pr(state="closed", merged=True, merged_by=STRANGER, merged_at=t(30)),
+        )
+        s = derive(value)
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.UNAUTHORIZED_MERGE, s.flags)
+        self.assertIn(Flag.CONFLICTING_RECORDS, s.flags)
+        self.assertEqual((s.head_sha, s.pr), (A, 12))
+
+    def test_a_conflict_on_an_older_commit_leaves_the_head_judged(self):
+        value = task(
+            runs=[
+                run("build", B),
+                passed(B, 2),
+                failed(B, 3),
+                run("build", A, 4),
+                passed(A, 5),
+                published(A, 6),
+            ],
+            pull_request=pr(),
+        )
+        s = derive(value)
+        self.assertEqual(s.state, State.AWAITING_OWNER)
+        self.assertIn(Flag.CONFLICTING_RECORDS, s.flags)
+        conflicted_head = copy.deepcopy(value)
+        conflicted_head["runs"].append(failed(A, 7))
+        s = derive(conflicted_head)
+        self.assertEqual(s.state, State.UNKNOWN)
+        self.assertEqual(s.pr, 12)
+
+    def test_github_gates_hold_on_every_path_with_records(self):
+        failing = [check("lint", conclusion="failure"), check("test")]
+        cases = {
+            "fix rounds": [run("build"), failed(B, 3), failed(C, 4), passed(A, 5)],
+            "changes needed": [run("build"), failed(A, 3)],
+            "built": [run("build")],
+            "blocked": [run("build"), run("question", sha=None, minute=3)],
+            "failed": [run("build"), run("failure", minute=5)],
+        }
+        for name, runs in cases.items():
+            with self.subTest(name):
+                s = derive(
+                    task(runs=runs, pull_request=pr(checks=failing, files=("evidence/a.json",)))
+                )
+                self.assertIn(Flag.CHECKS_FAILING, s.flags)
+                self.assertIn(Flag.CLINICAL_APPROVAL_MISSING, s.flags)
+                approved = task(
+                    runs=runs,
+                    pull_request=pr(files=("evidence/a.json",), reviews=[approval()]),
+                )
+                self.assertIn(Flag.CLINICIAN_APPROVED, derive(approved).flags)
+
+    def test_the_stop_switch_never_hides_what_needs_you(self):
+        for runs in (
+            [run("build"), run("failure", minute=5)],
+            [run("build"), run("question", sha=None, minute=3)],
+            [run("build"), passed(), published()],
+        ):
+            s = derive(task(paused=True, runs=runs, pull_request=pr()))
+            self.assertEqual(s.state, State.PAUSED)
+            self.assertIsNotNone(s.would_be)
+            self.assertTrue(s.needs_attention, runs[-1]["step"])
+
+    def test_a_closed_unlinked_or_fork_pr_is_calm(self):
+        for over in ({"issue": None}, {}):
+            value = task(runs=None, pull_request=pr(state="closed", from_fork=not over), **over)
+            s = derive(value)
+            self.assertEqual(s.state, State.CLOSED)
+            self.assertFalse(s.needs_attention, over)
+
+    def test_records_after_a_merge_raise_no_alert(self):
+        value = task(
+            runs=[run("build"), passed(), published(), run("build", C, 59, branch="claude/other")],
+            pull_request=pr(state="closed", merged=True, merged_by=OWNER, merged_at=t(30)),
+        )
+        s = derive(value)
+        self.assertEqual(s.state, State.MERGED)
+        self.assertNotIn(Flag.WRONG_BRANCH_RECORD, s.flags)
+        self.assertFalse(s.needs_attention)
+
+    def test_an_outstanding_changes_request_blocks_approval(self):
+        value = task(
+            clinicians=[CLINICIAN, "clinician-two"],
+            runs=[run("build"), passed(), published()],
+            pull_request=pr(
+                files=("evidence/a.json",),
+                reviews=[
+                    approval("clinician-two", sha=B, state="CHANGES_REQUESTED", minute=4),
+                    approval(minute=6),
+                ],
+            ),
+        )
+        s = derive(value)
+        self.assertNotIn(Flag.CLINICIAN_APPROVED, s.flags)
+        self.assertEqual(s.state, State.CLINICAL_REVIEW)
+        value["pull_request"]["reviews"].append(approval("clinician-two", minute=7))
+        self.assertEqual(derive(value).state, State.AWAITING_OWNER)
+
+    def test_a_withdrawn_authorisation_says_so(self):
+        timeline = [labeled(), labeled(kind="unlabeled", minute=20)]
+        s = derive(
+            task(
+                issue={"number": 7, "state": "open", "timeline": timeline},
+                runs=[run("build"), passed(), published()],
+                pull_request=pr(),
+            )
+        )
+        self.assertEqual(s.state, State.UNSAFE)
+        self.assertIn(Flag.AUTHORIZATION_WITHDRAWN, s.flags)
+        self.assertIn("withdrawn", s.reasons[0])

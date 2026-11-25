@@ -120,7 +120,7 @@ class Words(unittest.TestCase):
     def test_each_task_shows_its_state_in_words_and_attention_in_text(self):
         for e in DEMO.entries:
             _, _, body = call(APP, f"/tasks/{e.id}")
-            self.assertIn(views.STATE_WORDS[e.status.state].replace("'", "&#x27;"), body, e.id)
+            self.assertIn(views.state_words(e.status).replace("'", "&#x27;"), body, e.id)
             for flag in e.status.flags:
                 self.assertIn(views.FLAG_WORDS[flag].replace("'", "&#x27;"), body, (e.id, flag))
             self.assertEqual("Needs you:" in body, views.needs_you(e.status), e.id)
@@ -468,7 +468,7 @@ class CodexReviewOfCaa5552(unittest.TestCase):
                 self.assertIn(e.status.state, (State.AWAITING_OWNER, State.MERGED), e.id)
                 self.assertNotIn(Flag.FIX_ROUNDS_EXHAUSTED, e.status.flags, e.id)
             if path_row(body, "Authorised") == "done":
-                self.assertIn(e.status.state, views.AUTHORISED_STATES, e.id)
+                self.assertIn(e.status.underlying, views.AUTHORISED_STATES, e.id)
             if path_row(body, "Review") == "done":
                 self.assertIsNotNone(e.status.reviewed_sha, e.id)
             if path_row(body, "Owner") == "done":
@@ -557,3 +557,43 @@ class ReadOnlyAndErrors(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FableReviewOf0cf099cScreens(unittest.TestCase):
+    """The view never says the opposite of the model (independent review of 0cf099c)."""
+
+    def test_the_owner_row_matches_the_state(self):
+        expected = {
+            State.UNSAFE: ("!",),
+            State.CLOSED: ("-",),
+            State.NOT_LINKED: ("-",),
+            State.UNKNOWN: ("?",),
+            State.MERGED: ("done",),
+        }
+        for e in DEMO.entries:
+            body = views.task_detail(DEMO, e)
+            row = path_row(body, "Owner")
+            if e.status.underlying in expected:
+                self.assertIn(row, expected[e.status.underlying], e.id)
+                self.assertNotIn("approve and merge, later", body, e.id)
+
+    def test_no_file_list_is_never_clinical_no(self):
+        for e in DEMO.entries:
+            body = views.task_detail(DEMO, e)
+            if e.status.pr is None:
+                self.assertNotIn("clinical: no<", body, e.id)
+
+    def test_unverified_states_never_read_as_a_negative(self):
+        for e in DEMO.entries:
+            words = views.state_words(e.status)
+            if Flag.CHECKS_UNVERIFIED in e.status.flags:
+                self.assertNotIn("not all passed", words, e.id)
+            if Flag.RUNS_UNVERIFIED in e.status.flags:
+                self.assertNotIn("waiting for review", words, e.id)
+                self.assertIsNone(DEMO.command(e), e.id)
+
+    def test_stale_or_missing_checks_are_pending_not_alarms(self):
+        for e in DEMO.entries:
+            body = views.task_detail(DEMO, e)
+            if e.status.flags & {Flag.CHECKS_STALE, Flag.CHECKS_MISSING}:
+                self.assertEqual(path_row(body, "Checks"), "...", e.id)
