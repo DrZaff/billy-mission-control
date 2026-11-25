@@ -73,7 +73,12 @@ def github_checks(cfg, github) -> list[Check]:
 
 
 def _end() -> None:
-    """End by SIGTERM itself, as systemd expects of a clean stop."""
+    """End by SIGTERM itself, as systemd expects of a clean stop, what was printed flushed."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            pass
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     os.kill(os.getpid(), signal.SIGTERM)
 
@@ -82,6 +87,9 @@ def _on_sigterm(signum, frame) -> None:
     # Mid-refresh, the refresh ends first as "interrupted", its token revoked and its status
     # written; otherwise nothing is under way and the process ends now (Codex's review of
     # b7d0915: raising here could cut off the revocation or the status write).
+    # First, before any lock (Event.set takes one): a second SIGTERM ends the process at once
+    # and never runs this handler inside itself (Fable's pre-review of cd6c441).
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
     STOPPING.set()
     if not ACTIVE.is_set():
         _end()

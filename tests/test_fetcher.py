@@ -6,13 +6,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import stat
+import subprocess
+import sys
 import threading
 import time
 import unittest
 from datetime import UTC, timedelta
+from pathlib import Path
 from unittest import mock
 
 from cryptography.hazmat.primitives import serialization
@@ -4634,6 +4638,59 @@ class CodexReviewOfB7d0915(Base):
         status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
         self.assertEqual((status["result"], status["reason"]), ("failed", "interrupted"))
         self.assertEqual(status["last_refresh"]["reason"], "interrupted")
+
+    def test_a_stop_as_the_last_read_is_answered_still_fails_the_refresh(self):
+        # Only the check after every request can catch it (Fable's pre-review of cd6c441).
+        now = [NOW.timestamp()]
+        refresher = self.make(lambda: now[0])
+        self.assertEqual(refresher.run(), server.OK)
+        reads = sum(path == "/graphql" for _, path in self.fake.calls)
+        good = (self.cfg.snapshot_dir / snapshot.SNAPSHOT).read_bytes()
+        fake, seen = self.fake, []
+
+        def transport(method, path, headers, body):
+            answer = fake(method, path, headers, body)
+            seen.append(path)
+            if seen.count("/graphql") == reads and path == "/graphql":
+                gh.STOPPING.set()
+            return answer
+
+        self.fake = transport
+        now[0] += 120
+        self.assertEqual(refresher.run(), b"failed:interrupted\n")
+        self.assertEqual(seen[-1], "/installation/token")
+        self.assertEqual((self.cfg.snapshot_dir / snapshot.SNAPSHOT).read_bytes(), good)
+
+    def test_a_real_sigterm_mid_refresh_ends_the_process_after_revoking(self):
+        code = (
+            "import sys, time\n"
+            "from tests import test_fetcher as t\n"
+            "from mission_fetcher import __main__ as entry\n"
+            "case = t.CodexReviewOfB7d0915('test_the_service_loop_ends_after_a_stop')\n"
+            "case.setUp(); fake = case.fake\n"
+            "def transport(method, path, headers, body):\n"
+            "    if path == '/graphql' and not fake.calls.count(('POST', '/graphql')):\n"
+            "        print('reading', flush=True); time.sleep(1)\n"
+            "    return fake(method, path, headers, body)\n"
+            "case.fake = transport\n"
+            "print(case.cfg.snapshot_dir, flush=True)\n"
+            "refresher = case.make(lambda: t.NOW.timestamp())\n"
+            "entry._main = lambda argv: print(refresher.run(), fake.calls[-1]) or 0\n"
+            "entry.main([])\n"
+        )
+        root = Path(__file__).resolve().parent.parent
+        child = subprocess.Popen(
+            [sys.executable, "-c", code], cwd=root, stdout=subprocess.PIPE, text=True
+        )
+        folder = Path(child.stdout.readline().strip())
+        self.addCleanup(shutil.rmtree, folder.parent, True)
+        self.assertEqual(child.stdout.readline().strip(), "reading")
+        child.send_signal(signal.SIGTERM)
+        out, _ = child.communicate(timeout=60)
+        self.assertEqual(child.returncode, -signal.SIGTERM)
+        self.assertIn("b'failed:interrupted\\n' ('DELETE', '/installation/token')", out)
+        status = snapshot.read_json(folder, snapshot.STATUS)
+        self.assertEqual((status["result"], status["reason"]), ("failed", "interrupted"))
 
     def test_a_stop_mid_refresh_says_when_the_token_outlived_it(self):
         fake = self.stop_at("/graphql")
