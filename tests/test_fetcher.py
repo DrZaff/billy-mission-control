@@ -302,6 +302,28 @@ class Refresh(Base):
         pull = self.run_refresh()["items"][0]["task"]["pull_request"]
         self.assertFalse(pull.get("checks_complete", True))
 
+    def test_a_missing_snapshot_folder_is_a_fault_when_strict(self):
+        # Codex's review of 662e72b: it read as "no file" even when strict.
+        missing = self.base / "gone"
+        self.assertIsNone(snapshot.read_json(missing, snapshot.STATUS))
+        with self.assertRaises(OSError):
+            snapshot.read_json(missing, snapshot.STATUS, strict=True)
+        self.assertIsNone(snapshot.read_json(self.cfg.snapshot_dir, "absent.json", strict=True))
+
+    def test_a_task_the_model_rejects_is_never_written_as_built(self):
+        # Codex's review of 662e72b: beside a readable item, a rejected task was written as is.
+        self.fake.prs[REPO_A]["open"] = [pr_node(1, issue=issue_node(10)), pr_node(2)]
+        seen = []
+
+        def reads(task):  # the model rejects the first task it is shown: pull request 1's
+            seen.append(task)
+            return task is not None and len(seen) != 1
+
+        with mock.patch.object(snapshot, "_model_reads", reads):
+            items = {i["number"]: i for i in self.run_refresh()["items"]}
+        self.assertIsNone(items[1]["task"])  # UNKNOWN, an alert
+        self.assertIsNotNone(items[2]["task"])
+
     def test_a_file_that_opens_but_cant_be_read_is_unreadable(self):
         # Codex's review of 2ee1f93: an error after the open escaped the None fallback.
         snapshot.write_json(self.cfg.snapshot_dir, snapshot.STATUS, {"a": 1})
@@ -3095,10 +3117,13 @@ class CodexReviewOf322b659(Base):
         data = {
             "repository": {
                 "open": {"totalCount": 2, "nodes": [{"number": 1}, {"number": 1}]},
-                "closed": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+                "closed": {"totalCount": 0, "nodes": [], "pageInfo": {"hasNextPage": False}},
             }
         }
         self.assertEqual(snapshot._listing(REPO_A, data, NOW), ([1], True))
+        # Without the repeat, whole: only the repeat cut it off (Codex's review of 662e72b).
+        data["repository"]["open"] = {"totalCount": 1, "nodes": [{"number": 1}]}
+        self.assertEqual(snapshot._listing(REPO_A, data, NOW), ([1], False))
 
 
 class CodexReviewOf07c05d4(Base):

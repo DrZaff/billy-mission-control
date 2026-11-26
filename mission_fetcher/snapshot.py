@@ -1698,7 +1698,6 @@ def repo_items(
     since = now - timedelta(days=RECENT_DAYS)
     items = []
     details = _details(github, token, owner, name, numbers, deadline, tuple(cfg.clinicians))
-    readable = False
     for number, node, _lite in details:
         try:
             item = _item(repo, cfg, node, now)  # UNREADABLE is no object: a bad answer
@@ -1709,7 +1708,10 @@ def repo_items(
             # fetcher's own (Codex's review of 48929aa: an unhashable review state raised
             # TypeError and failed the refresh for every repository).
             item = _unreadable(repo, number)
-        readable = readable or _model_reads(item["task"])
+        if item["task"] is not None and not _model_reads(item["task"]):
+            # A task the model rejects is UNKNOWN, never written as built (Codex's review of
+            # 662e72b: one reached the snapshot whenever another item was readable).
+            item = _unreadable(repo, number)
         # One closed between the list and its details still belongs here. One the details
         # place before the window contradicts the list: kept (it may be an unsafe merge), and
         # the repository marked cut off (pre-review of 07c3480).
@@ -2025,6 +2027,13 @@ def read_json(
     non-object file raises ValueError (Codex's review of 9aeff19)."""
     try:
         folder_fd = open_folder(folder)
+    except OSError:
+        # The folder itself missing or unusable is a storage fault, never "no file": strict
+        # callers see it (Codex's review of 662e72b).
+        if strict:
+            raise
+        return None
+    try:
         try:
             fd = open_regular(name, dir_fd=folder_fd)
         finally:

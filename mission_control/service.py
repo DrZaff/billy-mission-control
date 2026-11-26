@@ -199,4 +199,9 @@ def systemd_socket(environ=os.environ, pid: int | None = None) -> socket.socket:
     if sock.family != socket.AF_UNIX or sock.type != socket.SOCK_STREAM:
         sock.detach()
         raise RuntimeError("systemd passed something other than a Unix stream socket")
+    # Listening, too: one that isn't fails every accept, after the service said it was ready
+    # (Codex's review of a86575d).
+    if sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) != 1:
+        sock.detach()
+        raise RuntimeError("systemd passed a socket that isn't listening")
     return sock
