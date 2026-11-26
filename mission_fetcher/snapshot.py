@@ -756,10 +756,11 @@ def _checks(
     if "potentialMergeCommit" not in pr:
         complete = False  # left out by a retry: never read as "no test merge commit" (42a3721)
     merge, mergeable = pr.get("potentialMergeCommit"), pr.get("mergeable")
-    if merge is None and mergeable != "CONFLICTING":
+    if merge is None:
         # Null while GitHub is still generating it (often until the next refresh after a push
-        # to the base): its results may yet differ. Only a pull request with conflicts has none
-        # to wait for (Codex's review of 521361b).
+        # to the base): its results may yet differ (Codex's review of 521361b). Null with
+        # conflicts too: the pull request can't be merged as it stands, so its checks never
+        # pass, or it would read as ready for the owner (Codex's review of 2676a4d).
         complete = False
     if merge is not None:
         # Whatever it says, it is read like the head's below, so a failure in it is never lost.

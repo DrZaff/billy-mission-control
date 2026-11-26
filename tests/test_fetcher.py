@@ -212,11 +212,11 @@ class Refresh(Base):
         with_status = dict(clean, status={"contexts": [{"context": "ci/other"}]})
         with_suite = dict(clean, checkSuites={"totalCount": 1})
         for merge, mergeable, has_checks in (
-            # None: still being generated, its results not known yet; with conflicts, there is
-            # none to wait for (Codex's review of 521361b).
+            # None: still being generated, its results not known yet (Codex's review of
+            # 521361b); or the pull request has conflicts, and is never ready either.
             (None, "MERGEABLE", False),
             (None, "UNKNOWN", False),
-            (None, "CONFLICTING", True),
+            (None, "CONFLICTING", False),  # can't be merged: never ready (Codex, 2676a4d)
             (clean, "MERGEABLE", True),
             (clean, "CONFLICTING", False),  # GitHub gives none then: odd, so not known
             (with_status, "MERGEABLE", False),
