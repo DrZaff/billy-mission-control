@@ -81,7 +81,7 @@ def pr_node(
     check_event="pull_request",
     renamed=(),
     updated_at=None,
-    merge_commit=None,
+    merge_commit="none yet",
     statuses=None,
 ):
     node = {
@@ -97,7 +97,15 @@ def pr_node(
         "mergedAt": (closed_at or "2026-11-23T00:00:00Z") if merged else None,
         "headRefName": f"claude/task-{number}",
         "headRefOid": head,
-        "potentialMergeCommit": merge_commit,
+        # An open, mergeable pull request's test merge commit, with no results of its own.
+        "mergeable": "MERGEABLE",
+        "potentialMergeCommit": {
+            "oid": "c" * 40,
+            "status": None,
+            "checkSuites": {"totalCount": 0, "nodes": []},
+        }
+        if merge_commit == "none yet"
+        else merge_commit,
         "files": {
             "totalCount": len(files) if files_total is None else files_total,
             "nodes": [
@@ -192,6 +200,7 @@ def answer_for(node, query: str):
         "files": "files(",
         "commits": "commits(",
         "potentialMergeCommit": "potentialMergeCommit",
+        "mergeable": "mergeable",
         "closingIssuesReferences": "closingIssuesReferences",
         "headRefName": "\n  headRefName",
         "title": "\n  title",
@@ -256,6 +265,8 @@ class FakeGitHub:
             },
             REPO_B: {"open": [pr_node(3, issue=issue_node(11, repo=REPO_B))], "closed": []},
         }
+        # An hour after NOW, as GitHub's tokens last; a test that moves the clock moves it too.
+        self.expires_at = "2026-11-24T13:00:00Z"
         self.fail = {}  # path -> (status, headers, body) or an exception
         self.calls = []
         self.revoked = 0
@@ -320,7 +331,7 @@ class FakeGitHub:
                         "token": TOKEN,
                         "permissions": self.token_permissions,
                         "repository_selection": "selected",
-                        "expires_at": "2026-11-24T13:00:00Z",
+                        "expires_at": self.expires_at,
                     }
                 ).encode(),
             )

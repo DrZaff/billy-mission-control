@@ -188,6 +188,8 @@ def _piece(field) -> str | None:
         return None
     if REVIEW_ALIAS.fullmatch(field):
         return "reviews"
+    if field == "mergeable":
+        return "potentialMergeCommit"  # asked for with it (Fable's pre-review of 7f24519)
     return field if field in PIECES else None
 
 
@@ -259,7 +261,7 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
     for path in error.paths:
         alias = path[1]
         field = path[2] if len(path) > 2 else None
-        if field in ("files", "commits") and len(path) > 3:
+        if field in ("files", "commits", "potentialMergeCommit") and len(path) > 3:
             deep.setdefault(alias, set()).add(field)
         if field == "files" and len(path) > 3:
             # An error inside one file's entry: GitHub nulled it, and the paths it did give are
@@ -267,7 +269,7 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
             # partial, never complete (Codex's reviews of c5adbba and 96a9e17).
             deep_files.add(alias)
             continue
-        if field == "commits" and len(path) > 3:
+        if field in ("commits", "potentialMergeCommit") and len(path) > 3:
             # An error inside the checks: what GitHub did give is kept, marked partial, so a
             # failure it reported still counts; nothing in it can pass (Fable's pre-review of
             # 4945de9: a failing check vanished).
@@ -315,6 +317,18 @@ _LIMITS = {
 # The optional parts, each of which can be left out on its own: a retry leaves out only the
 # parts GitHub had an error on (Fable's pre-review of 4945de9), and the lite read only the large
 # ones. Reviews are asked for per clinician (`reviews`, below).
+# A commit's results, for the head and the test merge commit alike.
+COMMIT = Template("""oid status { contexts { context state createdAt } }
+    checkSuites(first: $suites) {
+      totalCount
+      nodes {
+        id app { slug }
+        workflowRun { event }
+        checkRuns(first: $runs, filterBy: {checkType: LATEST}) {
+          totalCount nodes { id name status conclusion completedAt }
+        }
+      }
+    }""").substitute(_LIMITS)
 PIECES = {
     "title": "title",
     "headRefName": "headRefName",
@@ -341,29 +355,22 @@ PIECES = {
       }
     }
   }""").substitute(_LIMITS),
-    "potentialMergeCommit": """
+    # Read like the head's: GitHub judges this commit when it has results, so a failure in them
+    # counts (Codex's review of 521361b). Null while still being generated: `mergeable` tells.
+    "potentialMergeCommit": Template("""
+  mergeable
   potentialMergeCommit {
-    oid
-    status { contexts { context } }
-    checkSuites(first: 1) { totalCount }
-  }""",
+    $commit
+  }""").substitute(_LIMITS, commit=COMMIT),
     "files": Template("""
   files(first: $files) { totalCount nodes { path changeType } }""").substitute(_LIMITS),
     "reviews": None,  # built per clinician
     "commits": Template("""
   commits(last: 1) {
     nodes { commit {
-      oid status { contexts { context state createdAt } } checkSuites(first: $suites) {
-      totalCount
-      nodes {
-        id app { slug }
-        workflowRun { event }
-        checkRuns(first: $runs, filterBy: {checkType: LATEST}) {
-          totalCount nodes { id name status conclusion completedAt }
-        }
-      }
-    } } }
-  }""").substitute(_LIMITS),
+      $commit
+    } }
+  }""").substitute(_LIMITS, commit=COMMIT),
 }
 LARGE = frozenset({"files", "commits", "potentialMergeCommit"})  # left out of the lite read
 ALL_PIECES = frozenset(PIECES)
@@ -720,6 +727,29 @@ FUTURE_SKEW = timedelta(minutes=5)
 # failing (A5b; Codex's reviews of 05062fc to 28d71fe; owner's decision, 2026-11-25).
 
 
+def _no_runs(conn: Any) -> bool:
+    """Whether a suite list is readable whole and holds no runs at all: nothing GitHub could
+    judge. An empty suite is no result (Codex's review of a214c08)."""
+    if not isinstance(conn, dict):
+        return False
+    nodes, total = conn.get("nodes"), conn.get("totalCount")
+    if not isinstance(nodes, list) or type(total) is not int or total != len(nodes):
+        return False
+    return len(nodes) <= MAX_SUITES and all(
+        isinstance(n, dict)
+        and isinstance(n.get("checkRuns"), dict)
+        and type(n["checkRuns"].get("totalCount")) is int
+        and n["checkRuns"]["totalCount"] == 0
+        and n["checkRuns"].get("nodes") == []
+        for n in nodes
+    )
+
+
+def _obj_or_none(value: Any) -> dict:
+    """The object, or an empty one for anything else."""
+    return value if isinstance(value, dict) else {}
+
+
 def _checks(
     pr: dict,
     head: str,
@@ -739,29 +769,51 @@ def _checks(
     complete = not pr.get("__checks_partial__")
     out: list[dict] = []
     # When GitHub has results for the test merge commit, it judges that commit, not the head.
-    # Such results aren't read here, so the list is partial (Codex's review of 23bfb61).
+    # They are read like the head's, so a failure in them counts, and the list is partial:
+    # they never pass on their own (Codex's reviews of 23bfb61 and 521361b).
     if "potentialMergeCommit" not in pr:
         complete = False  # left out by a retry: never read as "no test merge commit" (42a3721)
-    merge = pr.get("potentialMergeCommit")
+    merge, mergeable = pr.get("potentialMergeCommit"), pr.get("mergeable")
+    if merge is None:
+        # Null while GitHub is still generating it (often until the next refresh after a push
+        # to the base): its results may yet differ (Codex's review of 521361b). Null with
+        # conflicts too: the pull request can't be merged as it stands, so its checks never
+        # pass, or it would read as ready for the owner (Codex's review of 2676a4d).
+        complete = False
     if merge is not None:
+        # Whatever it says, it is read like the head's below, so a failure in it is never lost.
+        # Only a mergeable one with no results at all, said plainly, leaves the list whole.
+        status = merge.get("status") if isinstance(merge, dict) else 0
+        suites = merge.get("checkSuites") if isinstance(merge, dict) else None
         try:
-            merge = _obj(merge)
-            if _sha(merge.get("oid")) in (head, VANISHED):
+            if _sha(_obj(merge).get("oid")) in (head, VANISHED):
                 complete = False  # never the head (6b7da87), nor "gone" (Codex, 34ad21c)
-            if "status" not in merge:
-                complete = False  # left out: not known, never "no statuses" (Codex, a34154f)
-            merge_status = merge.get("status")
-            if merge_status is not None and _list(_obj(merge_status).get("contexts")):
-                complete = False
-            if _int(_obj(merge.get("checkSuites")).get("totalCount")) > 0:
-                complete = False
         except FetchError:
             complete = False
-    commits = _list(_obj(pr.get("commits")).get("nodes"))
+        if (
+            not isinstance(merge, dict)
+            or mergeable != "MERGEABLE"
+            or "status" not in merge  # left out: never "no statuses" (Codex, a34154f)
+            or not (status is None or (isinstance(status, dict) and status.get("contexts") == []))
+            or not _no_runs(suites)
+        ):
+            complete = False
+    # A test merge commit with results of its own is read even when the head's row can't be:
+    # a failure in it is never lost (Fable's pre-review of 619b757).
+    merge_results = isinstance(merge, dict) and (
+        bool(_obj_or_none(merge.get("checkSuites")).get("nodes"))
+        or bool(_obj_or_none(merge.get("status")).get("contexts"))
+    )
+    try:
+        commits = _list(_obj(pr.get("commits")).get("nodes"))
+    except FetchError:
+        if not merge_results:
+            raise
+        commits, complete = [], False
     # Exactly the head: an open pull request always has one, and asked for the last one, GitHub
     # gives one row (pre-review of 07c3480: none read as "no checks", a second was ignored).
     if len(commits) != 1:
-        if not commits:
+        if not commits and not merge_results:
             return [], False
         complete = False
     # Every row naming the head is read, wherever it is: its failures still count (Codex's
@@ -776,10 +828,14 @@ def _checks(
             continue
         if oid == head:
             heads.append(commit)
-    if not heads:
+    if not heads and not merge_results:
         raise _Incomplete()  # results for another commit: none of them apply
+    if not heads:
+        complete = False
     if len(heads) > 1:
         complete = False
+    if isinstance(merge, dict):
+        heads.append(merge)  # the test merge commit's results, read like the head's
     run_ids: set[str] = set()
     suites: list = []
     for commit in heads:
@@ -1271,7 +1327,9 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
     # them at the time (owner's decision, 2026-11-25, after Codex's review of a1e05e5).
     pull["checks"] = None
     expiry: list[datetime] = []
-    if state == "OPEN" and "commits" in pr:
+    # Read when either commit is there: a test merge commit's failure counts even when the
+    # head's commits were left out (Codex's review of b2e12a7).
+    if state == "OPEN" and ("commits" in pr or "potentialMergeCommit" in pr):
         try:
             required = tuple(settings.required_checks)
             pull["checks"], complete = _checks(pr, head, settings.checks_app, required, now, expiry)
@@ -1396,6 +1454,7 @@ def _listing(
     numbers = [_int(_obj(n).get("number")) for n in open_nodes[:MAX_OPEN]]
     rows = list(numbers)  # every row read, older closed ones included
     last = repository.get("closed")
+    totals = [_obj(last).get("totalCount")]
     closed, cursor, page_rows, times, doubt = _closed_page(last, since)
     numbers += closed
     rows += page_rows
@@ -1406,6 +1465,7 @@ def _listing(
     disordered = False
     while cursor is not None and more_pages is not None and pages < CLOSED_PAGES:
         last = page = _obj(_obj(more_pages(cursor)).get("repository")).get("closed")
+        totals.append(_obj(page).get("totalCount"))
         closed, cursor, page_rows, page_times, page_doubt = _closed_page(page, since)
         read += len(page_rows)
         # Promised more, an empty page is no end: the list changed (Codex's review of 7ac622f).
@@ -1419,11 +1479,15 @@ def _listing(
     # Any repeat among every row read, within a page, across pages or between the lists, means
     # the list changed while it was read: one may be missing (Codex, 07c05d4 and 96cb8a9).
     repeated = len(set(rows)) != len(rows)
-    # Read to the end, every closed pull request was read: the count must agree, or rows may be
-    # missing from a short last page (Codex's review of a78c3cb).
-    total = _obj(last).get("totalCount")
-    if _obj(_obj(last).get("pageInfo")).get("hasNextPage") is False:
-        doubt = doubt or type(total) is not int or total != read
+    # The count must agree with what was read, on every page alike: read to the end, every row
+    # (a short last page can't hide one; Codex's review of a78c3cb); stopped early, more than
+    # were read (Codex's review of a214c08: a count contradicting the rows went unnoticed).
+    ended = _obj(_obj(last).get("pageInfo")).get("hasNextPage") is False
+    total = totals[0]
+    counted = all(type(t) is int and t == total for t in totals) and (
+        total == read if ended else total > read
+    )
+    doubt = doubt or not counted
     cut_off = more_open or repeated or disordered or doubt or cursor is not None
     return list(dict.fromkeys(numbers)), cut_off
 

@@ -208,25 +208,145 @@ class Refresh(Base):
                 self.assertIn(flag, tasks.derive(self.reviewed(item)).flags)
 
     def test_results_on_the_test_merge_commit_leave_the_checks_out(self):
-        clean = {"oid": SHA2, "status": None, "checkSuites": {"totalCount": 0}}
+        clean = {"oid": SHA2, "status": None, "checkSuites": {"totalCount": 0, "nodes": []}}
         with_status = dict(clean, status={"contexts": [{"context": "ci/other"}]})
         with_suite = dict(clean, checkSuites={"totalCount": 1})
-        for merge, has_checks in (
-            (None, True),
-            (clean, True),
-            (with_status, False),
-            (with_suite, False),
+        for merge, mergeable, has_checks in (
+            # None: still being generated, its results not known yet (Codex's review of
+            # 521361b); or the pull request has conflicts, and is never ready either.
+            (None, "MERGEABLE", False),
+            (None, "UNKNOWN", False),
+            (None, "CONFLICTING", False),  # can't be merged: never ready (Codex, 2676a4d)
+            (clean, "MERGEABLE", True),
+            (clean, "CONFLICTING", False),  # GitHub gives none then: odd, so not known
+            (with_status, "MERGEABLE", False),
+            (with_suite, "MERGEABLE", False),
         ):
-            with self.subTest(merge=merge):
-                self.fake.prs[REPO_A]["open"][0] = pr_node(
-                    1, issue=issue_node(10), merge_commit=merge
-                )
+            with self.subTest(merge=merge, mergeable=mergeable):
+                node = pr_node(1, issue=issue_node(10), merge_commit=merge)
+                node["mergeable"] = mergeable
+                self.fake.prs[REPO_A]["open"][0] = node
                 item = self.run_refresh()["items"][0]
                 pull = item["task"]["pull_request"]
                 # Results on the test merge commit make the head's partial: never passed.
                 self.assertEqual(pull.get("checks_complete", True), has_checks)
                 passed = tasks.Flag.CHECKS_PASSED in tasks.derive(self.reviewed(item)).flags
                 self.assertEqual(passed, has_checks)
+
+    def test_the_test_merge_commits_failure_fails_and_its_pass_never_passes(self):
+        # Read like the head's (Codex's review of 521361b): a failure counts, a pass doesn't.
+        for conclusion, flag in (("FAILURE", "CHECKS_FAILING"), ("SUCCESS", "CHECKS_UNVERIFIED")):
+            with self.subTest(conclusion=conclusion):
+                node = pr_node(1, issue=issue_node(10))
+                merge = node["commits"]["nodes"][0]["commit"]
+                merge = json.loads(json.dumps(dict(merge, oid=SHA2)))
+                merge["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][0]["conclusion"] = conclusion
+                node["potentialMergeCommit"] = merge
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                flags = tasks.derive(self.reviewed(item)).flags
+                self.assertIn(getattr(tasks.Flag, flag), flags)
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
+
+    def test_a_test_merge_commit_that_contradicts_itself_never_hides_its_failure(self):
+        # Fable's pre-review of 7f24519: a zero count over a failing suite passed, and any odd
+        # field dropped the failure. Whatever it says, its runs are read.
+        def odd(merge):
+            merge["checkSuites"]["totalCount"] = 0  # yet a failing suite below
+
+        for i, spoil in enumerate((odd, lambda m: m.update(status=5), lambda m: m.update(oid="z"))):
+            with self.subTest(spoil=i):
+                self.spoiled_merge_commit_fails(spoil)
+        # Present, but GitHub not yet sure it is mergeable: not known either.
+        for mergeable in ("UNKNOWN", None):
+            node = pr_node(1, issue=issue_node(10))
+            node["mergeable"] = mergeable
+            self.fake.prs[REPO_A]["open"][0] = node
+            pull = self.run_refresh()["items"][0]["task"]["pull_request"]
+            self.assertFalse(pull.get("checks_complete", True))
+        # An error on `mergeable` leaves out its piece, never the whole pull request.
+        self.assertEqual(snapshot._piece("mergeable"), "potentialMergeCommit")
+
+    def test_an_empty_suite_on_the_test_merge_commit_is_no_result(self):
+        # Codex's review of a214c08: a suite with no runs gives GitHub nothing to judge.
+        empty = {"totalCount": 0, "nodes": []}
+        for app, runs, passes in (
+            ("github-actions", empty, True),
+            ("other-ci", empty, True),
+            ("other-ci", {"totalCount": 1, "nodes": []}, False),  # a run left out
+        ):
+            with self.subTest(app=app, runs=runs):
+                suite = {"app": {"slug": app}, "workflowRun": None, "checkRuns": runs}
+                merge = {"oid": SHA2, "status": None, "checkSuites": {"totalCount": 1}}
+                merge["checkSuites"]["nodes"] = [suite]
+                self.fake.prs[REPO_A]["open"][0] = pr_node(
+                    1, issue=issue_node(10), merge_commit=merge
+                )
+                flags = tasks.derive(self.reviewed(self.run_refresh()["items"][0])).flags
+                self.assertEqual(tasks.Flag.CHECKS_PASSED in flags, passes)
+
+    def failing_merge_commit(self):
+        node = pr_node(1, issue=issue_node(10))
+        merge = json.loads(json.dumps(dict(node["commits"]["nodes"][0]["commit"], oid=SHA2)))
+        merge["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][0]["conclusion"] = "FAILURE"
+        node["potentialMergeCommit"] = merge
+        return node, merge
+
+    def spoiled_merge_commit_fails(self, spoil=lambda merge: None, github=None):
+        node, merge = self.failing_merge_commit()
+        self.fake.prs[REPO_A]["open"][0] = node
+        spoil(merge)
+        item = snapshot.refresh(self.cfg, github or client(self.fake), NOW)["items"][0]
+        self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+        self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
+
+    def test_the_test_merge_commits_failure_counts_when_the_heads_row_cant(self):
+        # Fable's pre-review of 619b757: it was lost when the head's row couldn't be used.
+        other = {"commit": {"oid": SHA2, "status": None, "checkSuites": {"totalCount": 0}}}
+        for rows in ([None], [], [other]):
+            with self.subTest(rows=rows):
+
+                def spoil(merge, rows=rows):
+                    self.fake.prs[REPO_A]["open"][0]["commits"]["nodes"] = rows
+
+                self.spoiled_merge_commit_fails(spoil)
+        with self.subTest(rows="errored"):
+            self.spoiled_merge_commit_fails(github=self.with_field_errors({1: ["commits"]}))
+        with self.subTest(rows="left out"):  # Codex's review of b2e12a7
+
+            def leave_out(merge):
+                del self.fake.prs[REPO_A]["open"][0]["commits"]
+
+            self.spoiled_merge_commit_fails(leave_out)
+
+    def test_an_error_inside_the_test_merge_commit_keeps_what_github_gave(self):
+        real = self.fake.__call__
+        where = ["potentialMergeCommit", "checkSuites", "nodes", 0, "app"]
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number:" in body:
+                answer = json.loads(data)
+                node = answer["data"]["repository"]["p0"]
+                suites = (node or {}).get("potentialMergeCommit", {}).get("checkSuites", {})
+                if suites.get("nodes"):  # only the pull request whose merge commit has a suite
+                    suites["nodes"][0]["app"] = None
+                    answer["errors"] = [{"type": "X", "path": ["repository", "p0", *where]}]
+                    data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        self.spoiled_merge_commit_fails(github=github)
+
+    def test_an_error_on_mergeable_leaves_the_pull_request_readable(self):
+        for github in (
+            self.with_field_errors({1: ["mergeable"]}),
+            self.nulled_once({1}, [["mergeable"]]),
+        ):
+            self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10))
+            item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
+            self.assertIsNotNone(item["task"])
+            self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
 
     def test_a_commit_status_can_only_add_caution(self):
         for checks, statuses, flag in (
@@ -3347,7 +3467,11 @@ class CodexReviewOfB03ad71(PreReviewOf07c3480):
             return {"number": n, "closedAt": at, "updatedAt": at}
 
         full = [row(100 + i, recent - timedelta(minutes=i)) for i in range(snapshot.MAX_CLOSED)]
-        first = {"nodes": full, "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}
+        first = {
+            "totalCount": snapshot.MAX_CLOSED + 1,
+            "nodes": full,
+            "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+        }
         second = {  # starts later than the first page ended: out of order
             "totalCount": snapshot.MAX_CLOSED + 1,
             "nodes": [row(4, recent + timedelta(hours=2))],
@@ -3363,6 +3487,17 @@ class CodexReviewOfB03ad71(PreReviewOf07c3480):
         for total in (snapshot.MAX_CLOSED + 2, None):
             second["totalCount"] = total
             self.assertEqual(snapshot._listing(REPO_A, data, NOW, pages.get), (expected, True))
+        # Stopped early, the count must still exceed what was read, alike on every page
+        # (Codex's review of a214c08).
+        second["totalCount"] = snapshot.MAX_CLOSED + 1
+        old_rows = [row(200 + i, recent - timedelta(days=30 + i)) for i in range(2)]
+        first["nodes"] = full[:-2] + old_rows  # the last row is old: no need to read further
+        data["repository"]["closed"] = first
+        listed = snapshot._listing(REPO_A, data, NOW, pages.get)[1]
+        self.assertFalse(listed)
+        for total in (snapshot.MAX_CLOSED, 3, None):
+            first["totalCount"] = total
+            self.assertTrue(snapshot._listing(REPO_A, data, NOW, pages.get)[1])
 
 
 class PreReviewOf6b7da87(PreReviewOf07c3480):
@@ -3392,7 +3527,7 @@ class PreReviewOf6b7da87(PreReviewOf07c3480):
         node["potentialMergeCommit"] = {
             "oid": SHA1,
             "status": None,
-            "checkSuites": {"totalCount": 0},
+            "checkSuites": {"totalCount": 0, "nodes": []},
         }
         self.checks_partial(node)  # the test merge commit can't be the head
         node["potentialMergeCommit"]["oid"] = snapshot.VANISHED  # nor "gone" (Codex, 34ad21c)
@@ -3839,7 +3974,11 @@ class SweepOf160cc5a(Base):
             checks=("lint", "test", "docs"),
             reviews=(review_node(),),
             statuses=(("lint", "SUCCESS"),),
-            merge_commit={"oid": SHA2, "status": None, "checkSuites": {"totalCount": 0}},
+            merge_commit={
+                "oid": SHA2,
+                "status": None,
+                "checkSuites": {"totalCount": 0, "nodes": []},
+            },
         )
         mine = node["commits"]["nodes"][0]["commit"]["checkSuites"]
         failed = dict(mine["nodes"][0]["checkRuns"]["nodes"][2], conclusion="FAILURE")
