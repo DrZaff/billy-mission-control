@@ -4,6 +4,7 @@ No network: every response is synthetic, and the App's key is generated at run t
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import tempfile
@@ -80,7 +81,7 @@ def pr_node(
     check_event="pull_request",
     renamed=(),
     updated_at=None,
-    merge_commit=None,
+    merge_commit="none yet",
     statuses=None,
 ):
     node = {
@@ -92,11 +93,19 @@ def pr_node(
         "merged": merged,
         "closedAt": closed_at,
         "updatedAt": updated_at or closed_at or "2026-11-23T00:00:00Z",
-        "mergedBy": {"login": OWNER} if merged else None,
+        "mergedBy": {"__typename": "User", "login": OWNER} if merged else None,
         "mergedAt": (closed_at or "2026-11-23T00:00:00Z") if merged else None,
         "headRefName": f"claude/task-{number}",
         "headRefOid": head,
-        "potentialMergeCommit": merge_commit,
+        # An open, mergeable pull request's test merge commit, with no results of its own.
+        "mergeable": "MERGEABLE",
+        "potentialMergeCommit": {
+            "oid": "c" * 40,
+            "status": None,
+            "checkSuites": {"totalCount": 0, "nodes": []},
+        }
+        if merge_commit == "none yet"
+        else merge_commit,
         "files": {
             "totalCount": len(files) if files_total is None else files_total,
             "nodes": [
@@ -122,7 +131,10 @@ def pr_node(
                             "nodes": [
                                 {
                                     "app": {"slug": checks_app},
-                                    "workflowRun": {"event": check_event},
+                                    # Only GitHub Actions suites have a workflow run.
+                                    "workflowRun": {"event": check_event}
+                                    if checks_app == "github-actions"
+                                    else None,
                                     "checkRuns": {
                                         "totalCount": len(checks),
                                         "nodes": [
@@ -170,7 +182,7 @@ def issue_node(number, actor=OWNER, label="agent:ready", repo=REPO_A):
                 {
                     "__typename": "LabeledEvent",
                     "createdAt": "2026-11-20T09:00:00Z",
-                    "actor": {"login": actor},
+                    "actor": {"__typename": "User", "login": actor},
                     "label": {"name": label},
                 }
             ],
@@ -188,10 +200,10 @@ def answer_for(node, query: str):
         "files": "files(",
         "commits": "commits(",
         "potentialMergeCommit": "potentialMergeCommit",
+        "mergeable": "mergeable",
         "closingIssuesReferences": "closingIssuesReferences",
         "headRefName": "\n  headRefName",
         "title": "\n  title",
-        "updatedAt": "\n  updatedAt",
     }
     for key, marker in pieces.items():
         if marker not in query:
@@ -206,7 +218,32 @@ def answer_for(node, query: str):
             and str(r["author"].get("login")).lower() == login.lower()  # as GitHub matches
         ]
         node[alias] = {"totalCount": totals.get(login, len(mine)), "nodes": mine}
-    return node
+    return with_ids(node)
+
+
+COUNTED = re.compile(r"checkSuites|checkRuns|timelineItems|rv\d+")
+
+
+def with_ids(value):
+    """A copy where every row of a counted list has a node id, as GitHub always gives one: a
+    row's own id if it has one, else one made from its content, so identical rows (a repeat)
+    share an id, as GitHub's would."""
+    if isinstance(value, list):
+        return [with_ids(v) for v in value]
+    if not isinstance(value, dict):
+        return value
+    out = {k: with_ids(v) for k, v in value.items()}
+    for key, conn in out.items():
+        if (
+            COUNTED.fullmatch(key)
+            and isinstance(conn, dict)
+            and isinstance(conn.get("nodes"), list)
+        ):
+            for row in conn["nodes"]:
+                if isinstance(row, dict) and "id" not in row:
+                    content = json.dumps(row, sort_keys=True).encode()
+                    row["id"] = "N_" + hashlib.sha256(content).hexdigest()[:16]
+    return out
 
 
 class FakeGitHub:
@@ -228,6 +265,8 @@ class FakeGitHub:
             },
             REPO_B: {"open": [pr_node(3, issue=issue_node(11, repo=REPO_B))], "closed": []},
         }
+        # An hour after NOW, as GitHub's tokens last; a test that moves the clock moves it too.
+        self.expires_at = "2026-11-24T13:00:00Z"
         self.fail = {}  # path -> (status, headers, body) or an exception
         self.calls = []
         self.revoked = 0
@@ -291,7 +330,8 @@ class FakeGitHub:
                     {
                         "token": TOKEN,
                         "permissions": self.token_permissions,
-                        "expires_at": "2026-11-24T13:00:00Z",
+                        "repository_selection": "selected",
+                        "expires_at": self.expires_at,
                     }
                 ).encode(),
             )
@@ -304,7 +344,11 @@ class FakeGitHub:
                 json.dumps(
                     {
                         "total_count": len(self.installed),
-                        "repositories": [{"full_name": r} for r in self.installed],
+                        "repository_selection": "selected",
+                        "repositories": [
+                            {"full_name": r, "permissions": {"admin": False, "push": False}}
+                            for r in self.installed
+                        ],
                     }
                 ).encode(),
             )
@@ -319,6 +363,7 @@ class FakeGitHub:
                 page = data["closed"][start : start + self.closed_page]
                 more = start + self.closed_page < len(data["closed"])
                 closed = {
+                    "totalCount": len(data["closed"]),
                     "nodes": [{k: n[k] for k in ("number", "closedAt", "updatedAt")} for n in page],
                     "pageInfo": {
                         "hasNextPage": more,

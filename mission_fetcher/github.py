@@ -22,6 +22,7 @@ import ssl
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -189,6 +190,28 @@ def https_transport(method: str, path: str, headers: dict[str, str], body: bytes
         conn.close()
 
 
+# Set on SIGTERM: every request after it fails as "interrupted" except the token's revocation,
+# so a refresh under way ends as an ordinary failure, its token revoked and its status written,
+# never cut off part way (Codex's review of b7d0915).
+STOPPING = threading.Event()
+
+# What call() returns for GitHub's 204 No Content: distinct from any JSON body, null included.
+NO_CONTENT = object()
+# GitHub's own ISO shape for a time, with a zone.
+ISO_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})")
+
+
+def _may_write(row: dict) -> bool:
+    """Whether a repository row says, or may say, the App can write: permissions that aren't
+    an object, or admin, maintain or push that is anything but false."""
+    if "permissions" not in row:
+        return False
+    perms = row["permissions"]
+    if not isinstance(perms, dict):
+        return True
+    return any(k in perms and perms[k] is not False for k in ("admin", "maintain", "push"))
+
+
 def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -239,6 +262,8 @@ class GitHub:
         own short limit."""
         if not path.startswith("/") or "//" in path or "\n" in path or "\r" in path:
             raise FetchError("bad-path")
+        if STOPPING.is_set() and not final:
+            raise FetchError("interrupted")
         limit = REVOKE_LIMIT if final else REQUEST_LIMIT
         if self.deadline is not None and not final:
             left = self.deadline - time.monotonic()
@@ -271,8 +296,11 @@ class GitHub:
         if status == 401:
             raise FetchError("unauthorised")
         if status == 204:
-            return None
-        if not 200 <= status < 300:
+            return NO_CONTENT
+        # Only the successes GitHub gives these calls: 200, and 201 for a new token. Any other,
+        # such as 206 Partial Content or 202 Accepted, is never taken as a whole answer
+        # (Codex's review of 09f37a5).
+        if status not in (200, 201):
             raise FetchError(f"http-{status}" if 100 <= status < 600 else "http-bad-status")
         try:
             return json.loads(data.decode("utf-8"))
@@ -289,14 +317,19 @@ class GitHub:
         found = set()
         for repo in repos:
             inst = self.call("GET", f"/repos/{repo}/installation", self.app_jwt())
-            if not isinstance(inst, dict) or not isinstance(inst.get("id"), int):
+            inst_id = inst.get("id") if isinstance(inst, dict) else None
+            if not isinstance(inst_id, int) or isinstance(inst_id, bool):
                 raise FetchError("bad-response")
             if inst.get("app_id") != self.app_id:
                 raise FetchError("wrong-app")
             account = inst.get("account")
             if not isinstance(account, dict) or account.get("login") != owner:
                 raise FetchError("wrong-account")
-            if inst.get("suspended_at") is not None:
+            # Left out is not "not suspended": the key must be there, null (pre-review of
+            # 07c3480).
+            if "suspended_at" not in inst:
+                raise FetchError("bad-response")
+            if inst.get("suspended_at") is not None or inst.get("suspended_by") is not None:
                 raise FetchError("suspended")
             if inst.get("repository_selection") != "selected":
                 raise FetchError("not-selected-repositories")
@@ -326,7 +359,27 @@ class GitHub:
             # of f772122).
             revoked = self.revoke(token)
             raise FetchError("token-not-read-only" + ("" if revoked else "+token-not-revoked"))
+        # It must also be for the selected repositories only, and last about an hour, as the
+        # warnings about a token left unrevoked say (pre-review of 6b7da87).
+        if answer.get("repository_selection") != "selected" or not self._expires_soon(
+            answer.get("expires_at")
+        ):
+            revoked = self.revoke(token)
+            raise FetchError("token-not-limited" + ("" if revoked else "+token-not-revoked"))
         return token
+
+    def _expires_soon(self, value: Any) -> bool:
+        """Whether a token's expires_at is a real time, about an hour away: still valid, and
+        no later than GitHub's hour plus five minutes for the clocks to differ (Codex's review
+        of a214c08: a day either way let an expired or a day-long token through). A clock off
+        by more fails every refresh, visibly, as "token-not-limited"."""
+        if not isinstance(value, str) or not ISO_TIME.fullmatch(value):
+            return False
+        try:
+            left = datetime.fromisoformat(value).timestamp() - self.clock()
+        except (ValueError, OverflowError):
+            return False
+        return 0 < left <= 3600 + 300
 
     def repositories(self, token: str, repos: list[str]) -> None:
         """The installation reaches exactly the configured repositories, no more."""
@@ -339,11 +392,29 @@ class GitHub:
         names = [r.get("full_name") if isinstance(r, dict) else None for r in rows]
         if not all(isinstance(n, str) for n in names):
             raise FetchError("bad-response")
+        # Nor may the list say the App can write, or reach every repository (pre-review of
+        # 6b7da87).
+        # GitHub's documented answer may leave the selection out; the installation and the
+        # token have already said "selected" (Codex's review of b7d0915). Said, it must agree.
+        selection = answer.get("repository_selection", "selected")
+        writes = any(_may_write(r) for r in rows)
+        if selection != "selected" or writes:
+            raise FetchError("not-read-only")
         exact = len(names) == len(set(names)) == len(repos) and set(names) == set(repos)
         if answer.get("total_count") != len(repos) or not exact:
             raise FetchError("wrong-repositories")
 
-    def graphql(self, token: str, query: str, variables: dict[str, Any]) -> dict:
+    def graphql(
+        self,
+        token: str,
+        query: str,
+        variables: dict[str, Any],
+        placeable: Callable[[tuple], bool] | None = None,
+    ) -> dict:
+        """The query's data. With `placeable`, a cost error GitHub placed where it says yes (a
+        part the caller can leave out) is a partial error like any other; anywhere else, on a
+        whole pull request, on the repository, or with no place, it is too heavy, and the
+        caller splits the batch (pre-review of 6b7da87)."""
         answer = self.call("POST", "/graphql", token, {"query": query, "variables": variables})
         if not isinstance(answer, dict):
             raise FetchError("bad-response")
@@ -363,8 +434,6 @@ class GitHub:
             }
             if "RATE_LIMITED" in kinds:
                 raise FetchError("rate-limited")
-            if kinds & HEAVY_KINDS:
-                raise FetchError("too-heavy")  # GitHub stopped the query for its cost
             paths = tuple(
                 tuple(e["path"])
                 if isinstance(e, dict)
@@ -376,6 +445,22 @@ class GitHub:
             # The partial answer goes with the error, never in its place: a caller that
             # doesn't look at the places gets no data at all (Codex's review of c3ee86b).
             data = answer.get("data")
+            heavy = [
+                path
+                for e, path in zip(errors, paths, strict=True)
+                if isinstance(e, dict)
+                and isinstance(e.get("type"), str)
+                and e["type"] in HEAVY_KINDS
+            ]
+            if heavy and (
+                not isinstance(data, dict)
+                or placeable is None
+                or not all(p is not None and placeable(p) for p in heavy)
+            ):
+                # GitHub stopped the query for its cost, and placed it nowhere a part can be
+                # left out: too heavy. One placed on such a part, with the rest of the answer,
+                # is like any other partial error (Codex's review of b1f5a1a).
+                raise FetchError("too-heavy")
             raise FetchError("graphql-error", paths, data if isinstance(data, dict) else None)
         data = answer.get("data")
         if not isinstance(data, dict):
@@ -385,7 +470,8 @@ class GitHub:
     def revoke(self, token: str) -> bool:
         """Revoke the installation token. Best effort: it expires within the hour anyway."""
         try:
-            self.call("DELETE", "/installation/token", token, final=True)
+            # Only GitHub's 204 No Content confirms it, never a body that reads as null (Codex's
+            # reviews of 09f37a5 and 6e22a60).
+            return self.call("DELETE", "/installation/token", token, final=True) is NO_CONTENT
         except FetchError:
             return False
-        return True

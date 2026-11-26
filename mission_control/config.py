@@ -28,6 +28,13 @@ class ConfigError(ValueError):
     pass
 
 
+def shown(error: ConfigError) -> str:
+    """A config error's text, fit for a terminal or a service log: it may quote the file, so no
+    control characters and at most 200 characters (Codex's review of 96a9e17)."""
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", "?", str(error))
+    return text if len(text) <= 200 else text[:199] + "…"
+
+
 @dataclass(frozen=True)
 class AppConfig:
     origin: str
@@ -58,13 +65,18 @@ def _keys(data: Any, expected: set[str], name: str) -> dict:
     _req(isinstance(data, dict), f"{name} must be a JSON object")
     missing, extra = expected - set(data), set(data) - expected
     _req(not missing, f"{name} is missing: {', '.join(sorted(missing))}")
-    _req(not extra, f"{name} has unknown keys: {', '.join(sorted(extra))}")
+    # Counted, never named: a key is the file's own text, and a credential pasted by mistake
+    # would be copied into a terminal or a log (Codex's review of 9650d02).
+    _req(not extra, f"{name} has {len(extra)} unknown key(s)")
     return data
 
 
 def _path(value: Any, name: str) -> Path:
     _req(isinstance(value, str) and value.startswith("/"), f"{name} must be an absolute path")
-    _req("\x00" not in value and len(value) <= 300, f"{name} is not a usable path")
+    # No control characters: a path is printed in start-up checks and logs (pre-review of
+    # 07c3480: one with an escape or a newline wrote its own lines).
+    usable = len(value) <= 300 and not re.search(r"[\x00-\x1f\x7f-\x9f]", value)
+    _req(usable, f"{name} is not a usable path")
     path = Path(value)
     _req(".." not in path.parts and str(path) == value.rstrip("/"), f"{name} must be normalised")
     return path
