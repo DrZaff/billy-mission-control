@@ -1008,6 +1008,13 @@ class Refresh(Base):
 
     def test_prs_that_all_fail_validation_never_replace_the_snapshot(self):
         self.fake.prs[REPO_A]["open"] = [pr_node(1, head="not-a-sha"), pr_node(2, head="nor-this")]
+        # One repository's all unreadable: shown as such, never holding back another's alerts
+        # (Codex's review of 64a78bd).
+        items = self.run_refresh()["items"]
+        self.assertEqual([i["task"] is None for i in items], [True, True, False])
+        # Every repository's: the refresh fails, keeping the last good snapshot.
+        self.fake.prs[REPO_B]["open"] = [pr_node(3, head="nor-this")]
+        self.fake.revoked = 0
         with self.assertRaises(gh.FetchError) as caught:
             self.run_refresh()
         self.assertEqual(caught.exception.code, "bad-response")
@@ -1015,10 +1022,10 @@ class Refresh(Base):
         # One unreadable pull request among readable ones is still only that one.
         self.fake.prs[REPO_A]["open"] = [pr_node(1, head="not-a-sha"), pr_node(2)]
         items = self.run_refresh()["items"]
-        self.assertEqual([i["task"] is None for i in items], [True, False, False])
+        self.assertEqual([i["task"] is None for i in items], [True, False, True])
 
     def test_core_errors_on_every_pr_never_replace_the_snapshot(self):
-        github = self.with_field_errors({1: ["state"], 2: ["merged"]})
+        github = self.with_field_errors({1: ["state"], 2: ["merged"], 3: ["state"]})
         with self.assertRaises(gh.FetchError) as caught:
             snapshot.refresh(self.cfg, github, NOW)
         self.assertEqual(caught.exception.code, "bad-response")
@@ -2362,6 +2369,18 @@ class AuditOf80e8fb3(Base):
         with self.assertRaises(OSError):
             snapshot.write_json(folder, snapshot.STATUS, {"a": 1})
         self.assertEqual(list(target.iterdir()), [])
+        # Nor a link higher up its path, for writing or reading (Codex's review of 64a78bd).
+        (target / "inner").mkdir()
+        snapshot.write_json(target / "inner", snapshot.STATUS, {"a": 1})
+        inner = folder / "inner"
+        with self.assertRaises(OSError):
+            snapshot.write_json(inner, snapshot.STATUS, {"a": 2})
+        self.assertIsNone(snapshot.read_json(inner, snapshot.STATUS))
+        with self.assertRaises(OSError):
+            snapshot.read_json(inner, snapshot.STATUS, strict=True)
+        for odd in ("relative", f"{self.base}/x/../inner"):
+            with self.assertRaises(OSError):
+                snapshot.open_folder(odd)
 
 
 class CodexReviewOfB1fef32(Base):
