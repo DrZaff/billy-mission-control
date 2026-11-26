@@ -59,6 +59,14 @@ def boot_clock() -> tuple[str | None, float]:
 MAX_KEY = 16 * 1024
 
 
+def _unrecorded(reply: bytes) -> bytes:
+    """The reply when the outcome couldn't be written to the status file: what happened, and
+    that it isn't on record, never a plain "ok" (Codex's review of d99c9a7). The status file
+    still says "running" from the attempt, so a reader never takes it for a recorded success."""
+    text = reply.decode("ascii").strip()
+    return f"{text}{'+' if ':' in text else ':'}status-not-written\n".encode("ascii")
+
+
 def read_key(path: Path) -> bytes:
     """The App's key, read without following a symlink; never logged or returned anywhere
     else."""
@@ -287,7 +295,7 @@ class Refresher:
             try:
                 write_json(self.cfg.snapshot_dir, STATUS, status)
             except OSError:
-                pass
+                return _unrecorded(reply)
             return reply
         snapshot = None
         try:
@@ -327,7 +335,7 @@ class Refresher:
         try:
             write_json(self.cfg.snapshot_dir, STATUS, status)
         except OSError:
-            pass  # the reply still says what happened
+            return _unrecorded(reply)
         return reply
 
 
