@@ -315,6 +315,18 @@ _LIMITS = {
 # The optional parts, each of which can be left out on its own: a retry leaves out only the
 # parts GitHub had an error on (Fable's pre-review of 4945de9), and the lite read only the large
 # ones. Reviews are asked for per clinician (`reviews`, below).
+# A commit's results, for the head and the test merge commit alike.
+COMMIT = Template("""oid status { contexts { context state createdAt } }
+    checkSuites(first: $suites) {
+      totalCount
+      nodes {
+        id app { slug }
+        workflowRun { event }
+        checkRuns(first: $runs, filterBy: {checkType: LATEST}) {
+          totalCount nodes { id name status conclusion completedAt }
+        }
+      }
+    }""").substitute(_LIMITS)
 PIECES = {
     "title": "title",
     "headRefName": "headRefName",
@@ -341,29 +353,22 @@ PIECES = {
       }
     }
   }""").substitute(_LIMITS),
-    "potentialMergeCommit": """
+    # Read like the head's: GitHub judges this commit when it has results, so a failure in them
+    # counts (Codex's review of 521361b). Null while still being generated: `mergeable` tells.
+    "potentialMergeCommit": Template("""
+  mergeable
   potentialMergeCommit {
-    oid
-    status { contexts { context } }
-    checkSuites(first: 1) { totalCount }
-  }""",
+    $commit
+  }""").substitute(_LIMITS, commit=COMMIT),
     "files": Template("""
   files(first: $files) { totalCount nodes { path changeType } }""").substitute(_LIMITS),
     "reviews": None,  # built per clinician
     "commits": Template("""
   commits(last: 1) {
     nodes { commit {
-      oid status { contexts { context state createdAt } } checkSuites(first: $suites) {
-      totalCount
-      nodes {
-        id app { slug }
-        workflowRun { event }
-        checkRuns(first: $runs, filterBy: {checkType: LATEST}) {
-          totalCount nodes { id name status conclusion completedAt }
-        }
-      }
-    } } }
-  }""").substitute(_LIMITS),
+      $commit
+    } }
+  }""").substitute(_LIMITS, commit=COMMIT),
 }
 LARGE = frozenset({"files", "commits", "potentialMergeCommit"})  # left out of the lite read
 ALL_PIECES = frozenset(PIECES)
@@ -739,11 +744,16 @@ def _checks(
     complete = not pr.get("__checks_partial__")
     out: list[dict] = []
     # When GitHub has results for the test merge commit, it judges that commit, not the head.
-    # Such results aren't read here, so the list is partial (Codex's review of 23bfb61).
+    # They are read like the head's, so a failure in them counts, and the list is partial:
+    # they never pass on their own (Codex's reviews of 23bfb61 and 521361b).
     if "potentialMergeCommit" not in pr:
         complete = False  # left out by a retry: never read as "no test merge commit" (42a3721)
-    merge = pr.get("potentialMergeCommit")
-    if merge is not None:
+    merge, merge_row = pr.get("potentialMergeCommit"), None
+    if merge is None and pr.get("mergeable") != "CONFLICTING":
+        # Null while GitHub is still generating it: its results may yet differ. Only a pull
+        # request with conflicts has none to wait for (Codex's review of 521361b).
+        complete = False
+    elif merge is not None:
         try:
             merge = _obj(merge)
             if _sha(merge.get("oid")) in (head, VANISHED):
@@ -751,10 +761,10 @@ def _checks(
             if "status" not in merge:
                 complete = False  # left out: not known, never "no statuses" (Codex, a34154f)
             merge_status = merge.get("status")
-            if merge_status is not None and _list(_obj(merge_status).get("contexts")):
-                complete = False
-            if _int(_obj(merge.get("checkSuites")).get("totalCount")) > 0:
-                complete = False
+            if (merge_status is not None and _list(_obj(merge_status).get("contexts"))) or _int(
+                _obj(merge.get("checkSuites")).get("totalCount")
+            ) > 0:
+                complete, merge_row = False, merge
         except FetchError:
             complete = False
     commits = _list(_obj(pr.get("commits")).get("nodes"))
@@ -778,6 +788,8 @@ def _checks(
             heads.append(commit)
     if not heads:
         raise _Incomplete()  # results for another commit: none of them apply
+    if merge_row is not None:
+        heads.append(merge_row)
     if len(heads) > 1:
         complete = False
     run_ids: set[str] = set()

@@ -211,22 +211,41 @@ class Refresh(Base):
         clean = {"oid": SHA2, "status": None, "checkSuites": {"totalCount": 0}}
         with_status = dict(clean, status={"contexts": [{"context": "ci/other"}]})
         with_suite = dict(clean, checkSuites={"totalCount": 1})
-        for merge, has_checks in (
-            (None, True),
-            (clean, True),
-            (with_status, False),
-            (with_suite, False),
+        for merge, mergeable, has_checks in (
+            # None: still being generated, its results not known yet; with conflicts, there is
+            # none to wait for (Codex's review of 521361b).
+            (None, "MERGEABLE", False),
+            (None, "UNKNOWN", False),
+            (None, "CONFLICTING", True),
+            (clean, "MERGEABLE", True),
+            (with_status, "MERGEABLE", False),
+            (with_suite, "MERGEABLE", False),
         ):
-            with self.subTest(merge=merge):
-                self.fake.prs[REPO_A]["open"][0] = pr_node(
-                    1, issue=issue_node(10), merge_commit=merge
-                )
+            with self.subTest(merge=merge, mergeable=mergeable):
+                node = pr_node(1, issue=issue_node(10), merge_commit=merge)
+                node["mergeable"] = mergeable
+                self.fake.prs[REPO_A]["open"][0] = node
                 item = self.run_refresh()["items"][0]
                 pull = item["task"]["pull_request"]
                 # Results on the test merge commit make the head's partial: never passed.
                 self.assertEqual(pull.get("checks_complete", True), has_checks)
                 passed = tasks.Flag.CHECKS_PASSED in tasks.derive(self.reviewed(item)).flags
                 self.assertEqual(passed, has_checks)
+
+    def test_the_test_merge_commits_failure_fails_and_its_pass_never_passes(self):
+        # Read like the head's (Codex's review of 521361b): a failure counts, a pass doesn't.
+        for conclusion, flag in (("FAILURE", "CHECKS_FAILING"), ("SUCCESS", "CHECKS_UNVERIFIED")):
+            with self.subTest(conclusion=conclusion):
+                node = pr_node(1, issue=issue_node(10))
+                merge = node["commits"]["nodes"][0]["commit"]
+                merge = json.loads(json.dumps(dict(merge, oid=SHA2)))
+                merge["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][0]["conclusion"] = conclusion
+                node["potentialMergeCommit"] = merge
+                self.fake.prs[REPO_A]["open"][0] = node
+                item = self.run_refresh()["items"][0]
+                flags = tasks.derive(self.reviewed(item)).flags
+                self.assertIn(getattr(tasks.Flag, flag), flags)
+                self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
 
     def test_a_commit_status_can_only_add_caution(self):
         for checks, statuses, flag in (
