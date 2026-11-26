@@ -4,6 +4,7 @@ synthetic, and the App's key is generated at run time, never committed."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import unittest
 from datetime import UTC, timedelta
@@ -266,6 +267,41 @@ class Refresh(Base):
             self.assertFalse(pull.get("checks_complete", True))
         # An error on `mergeable` leaves out its piece, never the whole pull request.
         self.assertEqual(snapshot._piece("mergeable"), "potentialMergeCommit")
+
+    def test_one_suite_under_the_head_and_the_test_merge_commit_is_never_whole(self):
+        # Codex's review of 2ee1f93: its empty copy passed for "no results".
+        node = pr_node(1, issue=issue_node(10))
+        node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["id"] = "S1"
+        runs = {"totalCount": 0, "nodes": []}
+        suite = {"id": "S1", "app": {"slug": "github-actions"}, "workflowRun": None}
+        merge = {"oid": SHA2, "status": None}
+        merge["checkSuites"] = {"totalCount": 1, "nodes": [dict(suite, checkRuns=runs)]}
+        node["potentialMergeCommit"] = merge
+        self.fake.prs[REPO_A]["open"][0] = node
+        pull = self.run_refresh()["items"][0]["task"]["pull_request"]
+        self.assertFalse(pull.get("checks_complete", True))
+
+    def test_a_file_that_opens_but_cant_be_read_is_unreadable(self):
+        # Codex's review of 2ee1f93: an error after the open escaped the None fallback.
+        snapshot.write_json(self.cfg.snapshot_dir, snapshot.STATUS, {"a": 1})
+
+        class Broken:
+            def __init__(self, fd, mode):
+                os.close(fd)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, size):
+                raise OSError("I/O error")
+
+        with mock.patch.object(snapshot.os, "fdopen", Broken):
+            self.assertIsNone(snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS))
+            with self.assertRaises(OSError):
+                snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS, strict=True)
 
     def test_an_empty_suite_on_the_test_merge_commit_is_no_result(self):
         # Codex's review of a214c08: a suite with no runs gives GitHub nothing to judge.

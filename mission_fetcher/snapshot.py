@@ -837,6 +837,7 @@ def _checks(
     if isinstance(merge, dict):
         heads.append(merge)  # the test merge commit's results, read like the head's
     run_ids: set[str] = set()
+    suite_ids: set[str] = set()
     suites: list = []
     for commit in heads:
         try:
@@ -849,6 +850,12 @@ def _checks(
         # a failure among it, is still read (Codex's review of 6e22a60).
         if not _whole(suites_conn, nodes, MAX_SUITES):
             complete = False
+        # One suite under both the head and the test merge commit contradicts itself: its other
+        # copy may hold what this one lacks (Codex's review of 2ee1f93).
+        for suite_id in (n.get("id") for n in nodes if isinstance(n, dict)):
+            if isinstance(suite_id, str):
+                complete = complete and suite_id not in suite_ids
+                suite_ids.add(suite_id)
         suites += nodes
     for suite in suites:
         if not isinstance(suite, dict):
@@ -1978,8 +1985,13 @@ def read_json(
         if strict:
             raise
         return None
-    with os.fdopen(fd, "rb") as f:
-        data = f.read(limit + 1)
+    try:
+        with os.fdopen(fd, "rb") as f:
+            data = f.read(limit + 1)
+    except OSError:  # opened, yet unreadable: the same as unreadable (Codex's review of 2ee1f93)
+        if strict:
+            raise
+        return None
     try:
         if len(data) > limit:
             raise ValueError("too large")
