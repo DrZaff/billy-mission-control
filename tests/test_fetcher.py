@@ -294,6 +294,12 @@ class Refresh(Base):
                 self.spoiled_merge_commit_fails(spoil)
         with self.subTest(rows="errored"):
             self.spoiled_merge_commit_fails(github=self.with_field_errors({1: ["commits"]}))
+        with self.subTest(rows="left out"):  # Codex's review of b2e12a7
+
+            def leave_out(merge):
+                del self.fake.prs[REPO_A]["open"][0]["commits"]
+
+            self.spoiled_merge_commit_fails(leave_out)
 
     def test_an_error_inside_the_test_merge_commit_keeps_what_github_gave(self):
         real = self.fake.__call__

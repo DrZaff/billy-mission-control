@@ -376,12 +376,24 @@ class App(unittest.TestCase):
         # Never pthread_kill, pidfd_send_signal and the like (Fable's pre-review of 0d516b1).
         allowed = {"signal", "SIGTERM", "SIG_DFL", "raise_signal"}
         for path in sorted((ROOT / "mission_fetcher").rglob("*.py")):
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            receivers = set()
+            for node in ast.walk(tree):
+                where = (path.name, getattr(node, "lineno", None))
                 self.assertFalse(
-                    isinstance(node, ast.ImportFrom) and node.module == "signal", path.name
+                    isinstance(node, ast.ImportFrom) and node.module == "signal", where
                 )
-                if isinstance(node, ast.Attribute) and ast.unparse(node.value) == "signal":
-                    self.assertIn(node.attr, allowed, (path.name, node.lineno))
+                # Never under another name (Codex's review of b2e12a7).
+                if isinstance(node, ast.alias) and node.name == "signal":
+                    self.assertIsNone(node.asname, where)
+                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                    if node.value.id == "signal":
+                        self.assertIn(node.attr, allowed, where)
+                        receivers.add(id(node.value))
+            # Nor handed on: the name is only ever read as `signal.<allowed>`.
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and node.id == "signal":
+                    self.assertIn(id(node), receivers, (path.name, node.lineno))
 
     def test_only_the_fetchers_github_module_reaches_the_network(self):
         # Owner's decision for A5a (issues #15 and #16): one module may make outbound calls,

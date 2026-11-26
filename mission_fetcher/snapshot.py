@@ -1311,7 +1311,9 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
     # them at the time (owner's decision, 2026-11-25, after Codex's review of a1e05e5).
     pull["checks"] = None
     expiry: list[datetime] = []
-    if state == "OPEN" and "commits" in pr:
+    # Read when either commit is there: a test merge commit's failure counts even when the
+    # head's commits were left out (Codex's review of b2e12a7).
+    if state == "OPEN" and ("commits" in pr or "potentialMergeCommit" in pr):
         try:
             required = tuple(settings.required_checks)
             pull["checks"], complete = _checks(pr, head, settings.checks_app, required, now, expiry)
