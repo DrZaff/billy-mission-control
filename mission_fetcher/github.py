@@ -369,16 +369,17 @@ class GitHub:
         return token
 
     def _expires_soon(self, value: Any) -> bool:
-        """Whether a token's expires_at is a real time, about an hour away. Bounded loosely, a
-        day either way: the machine's clock may be off, and an exact bound would then fail
-        every refresh; a token said to last for years is still refused."""
+        """Whether a token's expires_at is a real time, about an hour away: still valid, and
+        no later than GitHub's hour plus five minutes for the clocks to differ (Codex's review
+        of a214c08: a day either way let an expired or a day-long token through). A clock off
+        by more fails every refresh, visibly, as "token-not-limited"."""
         if not isinstance(value, str) or not ISO_TIME.fullmatch(value):
             return False
         try:
             left = datetime.fromisoformat(value).timestamp() - self.clock()
         except (ValueError, OverflowError):
             return False
-        return -86400 < left <= 86400
+        return 0 < left <= 3600 + 300
 
     def repositories(self, token: str, repos: list[str]) -> None:
         """The installation reaches exactly the configured repositories, no more."""

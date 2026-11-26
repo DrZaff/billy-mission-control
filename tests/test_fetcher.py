@@ -267,6 +267,24 @@ class Refresh(Base):
         # An error on `mergeable` leaves out its piece, never the whole pull request.
         self.assertEqual(snapshot._piece("mergeable"), "potentialMergeCommit")
 
+    def test_an_empty_suite_on_the_test_merge_commit_is_no_result(self):
+        # Codex's review of a214c08: a suite with no runs gives GitHub nothing to judge.
+        empty = {"totalCount": 0, "nodes": []}
+        for app, runs, passes in (
+            ("github-actions", empty, True),
+            ("other-ci", empty, True),
+            ("other-ci", {"totalCount": 1, "nodes": []}, False),  # a run left out
+        ):
+            with self.subTest(app=app, runs=runs):
+                suite = {"app": {"slug": app}, "workflowRun": None, "checkRuns": runs}
+                merge = {"oid": SHA2, "status": None, "checkSuites": {"totalCount": 1}}
+                merge["checkSuites"]["nodes"] = [suite]
+                self.fake.prs[REPO_A]["open"][0] = pr_node(
+                    1, issue=issue_node(10), merge_commit=merge
+                )
+                flags = tasks.derive(self.reviewed(self.run_refresh()["items"][0])).flags
+                self.assertEqual(tasks.Flag.CHECKS_PASSED in flags, passes)
+
     def failing_merge_commit(self):
         node = pr_node(1, issue=issue_node(10))
         merge = json.loads(json.dumps(dict(node["commits"]["nodes"][0]["commit"], oid=SHA2)))
@@ -3449,7 +3467,11 @@ class CodexReviewOfB03ad71(PreReviewOf07c3480):
             return {"number": n, "closedAt": at, "updatedAt": at}
 
         full = [row(100 + i, recent - timedelta(minutes=i)) for i in range(snapshot.MAX_CLOSED)]
-        first = {"nodes": full, "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}
+        first = {
+            "totalCount": snapshot.MAX_CLOSED + 1,
+            "nodes": full,
+            "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+        }
         second = {  # starts later than the first page ended: out of order
             "totalCount": snapshot.MAX_CLOSED + 1,
             "nodes": [row(4, recent + timedelta(hours=2))],
@@ -3465,6 +3487,17 @@ class CodexReviewOfB03ad71(PreReviewOf07c3480):
         for total in (snapshot.MAX_CLOSED + 2, None):
             second["totalCount"] = total
             self.assertEqual(snapshot._listing(REPO_A, data, NOW, pages.get), (expected, True))
+        # Stopped early, the count must still exceed what was read, alike on every page
+        # (Codex's review of a214c08).
+        second["totalCount"] = snapshot.MAX_CLOSED + 1
+        old_rows = [row(200 + i, recent - timedelta(days=30 + i)) for i in range(2)]
+        first["nodes"] = full[:-2] + old_rows  # the last row is old: no need to read further
+        data["repository"]["closed"] = first
+        listed = snapshot._listing(REPO_A, data, NOW, pages.get)[1]
+        self.assertFalse(listed)
+        for total in (snapshot.MAX_CLOSED, 3, None):
+            first["totalCount"] = total
+            self.assertTrue(snapshot._listing(REPO_A, data, NOW, pages.get)[1])
 
 
 class PreReviewOf6b7da87(PreReviewOf07c3480):

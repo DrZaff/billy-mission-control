@@ -703,6 +703,9 @@ class GitHubClient(Base):
         for change, code in (
             ({"repository_selection": "all"}, "token-not-limited"),
             ({"expires_at": "2099-01-01T00:00:00Z"}, "token-not-limited"),
+            # Already expired, or longer than GitHub's hour (Codex's review of a214c08).
+            ({"expires_at": "2026-11-24T11:59:00Z"}, "token-not-limited"),
+            ({"expires_at": "2026-11-24T14:00:00Z"}, "token-not-limited"),
         ):
             with self.subTest(change=change):
 

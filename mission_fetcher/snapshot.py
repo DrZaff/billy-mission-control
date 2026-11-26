@@ -727,6 +727,24 @@ FUTURE_SKEW = timedelta(minutes=5)
 # failing (A5b; Codex's reviews of 05062fc to 28d71fe; owner's decision, 2026-11-25).
 
 
+def _no_runs(conn: Any) -> bool:
+    """Whether a suite list is readable whole and holds no runs at all: nothing GitHub could
+    judge. An empty suite is no result (Codex's review of a214c08)."""
+    if not isinstance(conn, dict):
+        return False
+    nodes, total = conn.get("nodes"), conn.get("totalCount")
+    if not isinstance(nodes, list) or type(total) is not int or total != len(nodes):
+        return False
+    return len(nodes) <= MAX_SUITES and all(
+        isinstance(n, dict)
+        and isinstance(n.get("checkRuns"), dict)
+        and type(n["checkRuns"].get("totalCount")) is int
+        and n["checkRuns"]["totalCount"] == 0
+        and n["checkRuns"].get("nodes") == []
+        for n in nodes
+    )
+
+
 def _obj_or_none(value: Any) -> dict:
     """The object, or an empty one for anything else."""
     return value if isinstance(value, dict) else {}
@@ -767,7 +785,6 @@ def _checks(
         # Only a mergeable one with no results at all, said plainly, leaves the list whole.
         status = merge.get("status") if isinstance(merge, dict) else 0
         suites = merge.get("checkSuites") if isinstance(merge, dict) else None
-        total = suites.get("totalCount") if isinstance(suites, dict) else None
         try:
             if _sha(_obj(merge).get("oid")) in (head, VANISHED):
                 complete = False  # never the head (6b7da87), nor "gone" (Codex, 34ad21c)
@@ -778,9 +795,7 @@ def _checks(
             or mergeable != "MERGEABLE"
             or "status" not in merge  # left out: never "no statuses" (Codex, a34154f)
             or not (status is None or (isinstance(status, dict) and status.get("contexts") == []))
-            or type(total) is not int
-            or total != 0
-            or suites.get("nodes") != []
+            or not _no_runs(suites)
         ):
             complete = False
     # A test merge commit with results of its own is read even when the head's row can't be:
@@ -1439,6 +1454,7 @@ def _listing(
     numbers = [_int(_obj(n).get("number")) for n in open_nodes[:MAX_OPEN]]
     rows = list(numbers)  # every row read, older closed ones included
     last = repository.get("closed")
+    totals = [_obj(last).get("totalCount")]
     closed, cursor, page_rows, times, doubt = _closed_page(last, since)
     numbers += closed
     rows += page_rows
@@ -1449,6 +1465,7 @@ def _listing(
     disordered = False
     while cursor is not None and more_pages is not None and pages < CLOSED_PAGES:
         last = page = _obj(_obj(more_pages(cursor)).get("repository")).get("closed")
+        totals.append(_obj(page).get("totalCount"))
         closed, cursor, page_rows, page_times, page_doubt = _closed_page(page, since)
         read += len(page_rows)
         # Promised more, an empty page is no end: the list changed (Codex's review of 7ac622f).
@@ -1462,11 +1479,15 @@ def _listing(
     # Any repeat among every row read, within a page, across pages or between the lists, means
     # the list changed while it was read: one may be missing (Codex, 07c05d4 and 96cb8a9).
     repeated = len(set(rows)) != len(rows)
-    # Read to the end, every closed pull request was read: the count must agree, or rows may be
-    # missing from a short last page (Codex's review of a78c3cb).
-    total = _obj(last).get("totalCount")
-    if _obj(_obj(last).get("pageInfo")).get("hasNextPage") is False:
-        doubt = doubt or type(total) is not int or total != read
+    # The count must agree with what was read, on every page alike: read to the end, every row
+    # (a short last page can't hide one; Codex's review of a78c3cb); stopped early, more than
+    # were read (Codex's review of a214c08: a count contradicting the rows went unnoticed).
+    ended = _obj(_obj(last).get("pageInfo")).get("hasNextPage") is False
+    total = totals[0]
+    counted = all(type(t) is int and t == total for t in totals) and (
+        total == read if ended else total > read
+    )
+    doubt = doubt or not counted
     cut_off = more_open or repeated or disordered or doubt or cursor is not None
     return list(dict.fromkeys(numbers)), cut_off
 

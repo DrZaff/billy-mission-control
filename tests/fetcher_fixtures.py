@@ -265,6 +265,8 @@ class FakeGitHub:
             },
             REPO_B: {"open": [pr_node(3, issue=issue_node(11, repo=REPO_B))], "closed": []},
         }
+        # An hour after NOW, as GitHub's tokens last; a test that moves the clock moves it too.
+        self.expires_at = "2026-11-24T13:00:00Z"
         self.fail = {}  # path -> (status, headers, body) or an exception
         self.calls = []
         self.revoked = 0
@@ -329,7 +331,7 @@ class FakeGitHub:
                         "token": TOKEN,
                         "permissions": self.token_permissions,
                         "repository_selection": "selected",
-                        "expires_at": "2026-11-24T13:00:00Z",
+                        "expires_at": self.expires_at,
                     }
                 ).encode(),
             )
