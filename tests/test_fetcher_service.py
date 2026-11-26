@@ -569,6 +569,26 @@ class AuditOfE58b933(Base):
             code = entry.main(argv)
         return code, github_checks, refresher, umask
 
+    def test_a_github_selfcheck_whose_outcome_isnt_recorded_never_passes(self):
+        # Codex's review of f6016a5: every check passing hid the unwritten status.
+        from mission_fetcher import __main__ as entry
+        from mission_fetcher.checks import Check
+
+        passing = [Check("key file", True, "private")]
+        for reply, expected in ((b"ok\n", 0), (b"ok:status-not-written\n", 1)):
+            with (
+                self.subTest(reply=reply),
+                mock.patch.object(entry, "read_config", return_value="{}"),
+                mock.patch.object(entry, "parse_fetcher", return_value=self.cfg),
+                mock.patch.object(entry, "fetcher_checks", return_value=list(passing)),
+                mock.patch("mission_fetcher.server.Refresher") as refresher,
+                mock.patch.object(entry.os, "umask"),
+                mock.patch("builtins.print"),
+            ):
+                refresher.return_value.run.return_value = reply
+                refresher.return_value.results = [Check("read-only token", True, "yes")]
+                self.assertEqual(entry.main(["selfcheck", "--github", "--config", "x"]), expected)
+
     def test_nothing_starts_unless_every_check_passes(self):
         from mission_fetcher.checks import Check
 
