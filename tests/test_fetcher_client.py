@@ -205,6 +205,13 @@ class StartupChecks(Base):
         os.chmod(self.base / "key.pem", 0o644)
         self.assertFalse(self.checks()["reader key"].ok)
 
+    def test_a_key_the_fetcher_cannot_read_fails(self):
+        # Codex's review of 09f37a5 (should fix): it passed, and every JWT then failed.
+        os.chmod(self.base / "key.pem", 0o200)
+        self.assertFalse(self.checks()["reader key"].ok)
+        (self.base / "key.pem").unlink()
+        self.assertFalse(self.checks()["reader key"].ok)
+
     def test_the_snapshot_folder_is_for_the_web_app_only(self):
         folder = self.cfg.snapshot_dir
         # Setgid is required, so new files take the folder's group (Codex, f772122).
@@ -636,6 +643,190 @@ class GitHubClient(Base):
         self.transport_with(b'{"a": 1}', "8")  # whole: fine
         self.transport_with(b'{"a": 1}', None)  # read to the end: fine
 
+    def test_only_the_successes_github_gives_are_answers(self):
+        # Codex's review of 09f37a5 (should fix): 206 Partial Content, or a 202 for a
+        # revocation, was taken as success.
+        real = self.fake.__call__
+        for status in (202, 206, 299):
+            with self.subTest(status=status):
+
+                def call(method, path, headers, body, status=status):
+                    got = real(method, path, headers, body)
+                    if path.startswith("/installation/") or path == "/graphql":
+                        return status, got[1], got[2] or b"{}"
+                    return got
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.repositories(TOKEN, [REPO_A, REPO_B])
+                self.assertEqual(caught.exception.code, f"http-{status}")
+                self.assertFalse(github.revoke(TOKEN))
+        self.assertTrue(client(self.fake).revoke(TOKEN))  # GitHub's 204: confirmed
+        # Nor a success whose body reads as null (Codex's review of 6e22a60).
+        for status in (200, 201):
+            with self.subTest(null_body=status):
+
+                def null(method, path, headers, body, status=status):
+                    if path == "/installation/token" and method == "DELETE":
+                        return status, {}, b"null"
+                    return self.fake(method, path, headers, body)
+
+                github = gh.GitHub(APP_ID, KEY, transport=null, clock=lambda: NOW.timestamp())
+                self.assertFalse(github.revoke(TOKEN))
+
+    def test_an_installation_must_say_it_is_not_suspended_and_have_a_whole_id(self):
+        # Pre-review of 07c3480: a missing suspended_at read as "not suspended", and an id of
+        # true passed as a number.
+        real = self.fake.__call__
+        for change in ({"drop": "suspended_at"}, {"id": True}):
+            with self.subTest(change=change):
+
+                def call(method, path, headers, body, change=change):
+                    status, h, data = real(method, path, headers, body)
+                    if path.endswith("/installation"):
+                        answer = json.loads(data)
+                        if "drop" in change:
+                            del answer[change["drop"]]
+                        else:
+                            answer.update(change)
+                        data = json.dumps(answer).encode()
+                    return status, h, data
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.installation(OWNER, [REPO_A, REPO_B])
+                self.assertEqual(caught.exception.code, "bad-response")
+
+    def test_the_token_and_the_list_must_be_limited_and_read_only(self):
+        # Pre-review of 6b7da87.
+        real = self.fake.__call__
+        for change, code in (
+            ({"repository_selection": "all"}, "token-not-limited"),
+            ({"expires_at": "2099-01-01T00:00:00Z"}, "token-not-limited"),
+        ):
+            with self.subTest(change=change):
+
+                def call(method, path, headers, body, change=change):
+                    status, h, data = real(method, path, headers, body)
+                    if path.endswith("/access_tokens"):
+                        data = json.dumps(dict(json.loads(data), **change)).encode()
+                    return status, h, data
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.token(77)
+                self.assertEqual(caught.exception.code, code)
+
+        def rows(method, path, headers, body):
+            if path == "/installation/repositories?per_page=100":
+                writable = {"full_name": REPO_B, "permissions": {"push": True}}
+                answer = {
+                    "total_count": 2,
+                    "repository_selection": "selected",
+                    "repositories": [{"full_name": REPO_A}, writable],
+                }
+                return 200, {}, json.dumps(answer).encode()
+            return real(method, path, headers, body)
+
+        github = gh.GitHub(APP_ID, KEY, transport=rows, clock=lambda: NOW.timestamp())
+        with self.assertRaises(gh.FetchError) as caught:
+            github.repositories(TOKEN, [REPO_A, REPO_B])
+        self.assertEqual(caught.exception.code, "not-read-only")
+
+    def test_the_list_left_out_selection_is_accepted(self):
+        # Codex's review of b7d0915: GitHub's documented answer may leave it out; the
+        # installation and the token have already said "selected".
+        real = self.fake.__call__
+        answer = {"total_count": 2, "repositories": [{"full_name": REPO_A}, {"full_name": REPO_B}]}
+
+        def call(method, path, headers, body):
+            if path == "/installation/repositories?per_page=100":
+                return 200, {}, json.dumps(answer).encode()
+            return real(method, path, headers, body)
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        github.repositories(TOKEN, [REPO_A, REPO_B])
+
+    def test_a_selection_said_must_agree_and_odd_permissions_may_write(self):
+        real = self.fake.__call__
+        both = [{"full_name": REPO_A}, {"full_name": REPO_B}]
+        for answer in (
+            {"total_count": 2, "repository_selection": "all", "repositories": both},
+            {"total_count": 2, "repository_selection": None, "repositories": both},
+            {
+                "total_count": 2,
+                "repository_selection": "selected",
+                "repositories": [
+                    {"full_name": REPO_A, "permissions": "admin"},
+                    {"full_name": REPO_B},
+                ],
+            },
+        ):
+            with self.subTest(answer=answer):
+
+                def call(method, path, headers, body, answer=answer):
+                    if path == "/installation/repositories?per_page=100":
+                        return 200, {}, json.dumps(answer).encode()
+                    return real(method, path, headers, body)
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.repositories(TOKEN, [REPO_A, REPO_B])
+                self.assertEqual(caught.exception.code, "not-read-only")
+
+    def test_a_token_expiry_in_another_shape_is_refused(self):
+        real = self.fake.__call__
+        for odd in ("2026-11-24", "2026-W48-2T13:00:00Z", "2026-11-24T13:00:00"):
+            with self.subTest(odd=odd):
+
+                def call(method, path, headers, body, odd=odd):
+                    status, h, data = real(method, path, headers, body)
+                    if path.endswith("/access_tokens"):
+                        data = json.dumps(dict(json.loads(data), expires_at=odd)).encode()
+                    return status, h, data
+
+                github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+                with self.assertRaises(gh.FetchError) as caught:
+                    github.token(77)
+                self.assertEqual(caught.exception.code, "token-not-limited")
+
+    def test_suspended_by_alone_is_suspended(self):
+        self.fake.suspended = None
+        real = self.fake.__call__
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path.endswith("/installation"):
+                data = json.dumps(dict(json.loads(data), suspended_by={"login": "x"})).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        with self.assertRaises(gh.FetchError) as caught:
+            github.installation(OWNER, [REPO_A, REPO_B])
+        self.assertEqual(caught.exception.code, "suspended")
+
+    def test_a_cost_error_is_partial_only_on_a_part_that_can_be_left_out(self):
+        def answer(place):
+            def call(method, path, headers, body):
+                errors = [{"type": "RESOURCE_LIMITS_EXCEEDED", "path": place}]
+                data = {"repository": {"p0": None}}
+                return 200, {}, json.dumps({"data": data, "errors": errors}).encode()
+
+            return gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+
+        def placeable(path):
+            return len(path) >= 3 and path[2] == "files"
+
+        for place, code in (
+            (["repository", "p0", "files"], "graphql-error"),
+            (["repository", "p0"], "too-heavy"),
+            (["repository"], "too-heavy"),
+            (["repository", "p0", "state"], "too-heavy"),
+        ):
+            with self.subTest(place=place), self.assertRaises(gh.FetchError) as caught:
+                answer(place).graphql(TOKEN, "q", {}, placeable=placeable)
+            self.assertEqual(caught.exception.code, code)
+
     def test_an_odd_or_repeated_repository_row_is_never_skipped(self):
         # Codex's review of df5912d (should fix).
         real = self.fake.__call__
@@ -650,7 +841,11 @@ class GitHubClient(Base):
 
                 def call(method, path, headers, body, rows=rows, total=total):
                     if path == "/installation/repositories?per_page=100":
-                        answer = {"total_count": total, "repositories": rows}
+                        answer = {
+                            "total_count": total,
+                            "repository_selection": "selected",
+                            "repositories": rows,
+                        }
                         return 200, {}, json.dumps(answer).encode()
                     return real(method, path, headers, body)
 

@@ -121,8 +121,16 @@ def reachable_by(
 
 
 def key_file(path: Path, owner: int) -> Check:
+    """Private, and readable by the fetcher: one it can't read passed, and every refresh then
+    failed to sign its JWT (Codex's review of 09f37a5)."""
     check = private_file(path, owner)
-    return Check("reader key", check.ok, check.detail)
+    if not check.ok:
+        return Check("reader key", False, check.detail)
+    try:
+        readable = os.lstat(path).st_mode & 0o400
+    except OSError:
+        return Check("reader key", False, "missing or unreadable")
+    return Check("reader key", bool(readable), check.detail if readable else "not readable")
 
 
 def shared_with_web_app(

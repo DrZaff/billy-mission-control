@@ -76,6 +76,7 @@ FETCHER_ALLOWED_TOP = {
     "pathlib",
     "pwd",
     "re",
+    "signal",  # SIGTERM unwinds a refresh (pre-review of e4a8096); no network
     "socket",
     "stat",
     "string",
@@ -132,7 +133,7 @@ APP_ALLOWED_PARTS = {
 }
 # Ways to start a process or signal one through os, banned in both packages.
 PROCESS_NAMES = re.compile(
-    r"system|popen|posix_spawnp?|fork|forkpty|exec[lv]p?e?|spawn[lv]p?e?|startfile|killpg?"
+    r"_?(system|popen|posix_spawnp?|fork(pty)?|exec[lv]p?e?|spawn[lv]p?e?f?|startfile|kill(pg)?)"
 )
 
 # Ways to reach a module, a builtin or an object's insides without naming it in the code,
@@ -263,6 +264,9 @@ class App(unittest.TestCase):
                     self.assertIn(node.asname, (None, "os"), (path.name, node.lineno))
                 for name in names:
                     self.assertIsNone(PROCESS_NAMES.fullmatch(name), (path.name, node.lineno))
+        # The pattern itself (Codex's review of 0f323f6: it missed "kill").
+        names = ("kill", "killpg", "fork", "_execvpe", "_spawnvef")
+        self.assertTrue(all(PROCESS_NAMES.fullmatch(n) for n in names))
 
     def test_nothing_is_reached_around_the_rules(self):
         # Audit of 7712dec: __import__, sys.modules, a star import, __dict__, type(conn)(...),
@@ -367,6 +371,17 @@ class App(unittest.TestCase):
                     unix = isinstance(first, ast.Attribute) and first.attr == "AF_UNIX"
                     handed = any(k.arg == "fileno" for k in node.keywords) and not node.args
                     self.assertTrue(unix or handed, (path.name, node.lineno))
+
+    def test_the_fetcher_uses_signal_only_to_stop_itself(self):
+        # Never pthread_kill, pidfd_send_signal and the like (Fable's pre-review of 0d516b1).
+        allowed = {"signal", "SIGTERM", "SIG_DFL", "raise_signal"}
+        for path in sorted((ROOT / "mission_fetcher").rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                self.assertFalse(
+                    isinstance(node, ast.ImportFrom) and node.module == "signal", path.name
+                )
+                if isinstance(node, ast.Attribute) and ast.unparse(node.value) == "signal":
+                    self.assertIn(node.attr, allowed, (path.name, node.lineno))
 
     def test_only_the_fetchers_github_module_reaches_the_network(self):
         # Owner's decision for A5a (issues #15 and #16): one module may make outbound calls,

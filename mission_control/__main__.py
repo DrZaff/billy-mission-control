@@ -103,7 +103,7 @@ def _stopper_config(path: str):
 
 def service_main(argv: list[str]) -> int:
     from . import checks
-    from .config import ConfigError
+    from .config import ConfigError, shown
 
     parser = argparse.ArgumentParser(prog="python3 -m mission_control")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -131,7 +131,7 @@ def service_main(argv: list[str]) -> int:
             kind = "stopper" if args.command == "stopper" else "app"
             cfg = _app_config(args.config) if kind == "app" else _stopper_config(args.config)
     except (OSError, ValueError, ConfigError) as error:
-        detail = str(error) if isinstance(error, ConfigError) else type(error).__name__
+        detail = shown(error) if isinstance(error, ConfigError) else type(error).__name__
         return _fail("the config could not be read: " + detail)
 
     from pathlib import Path
