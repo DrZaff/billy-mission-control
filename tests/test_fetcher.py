@@ -234,20 +234,41 @@ class Refresh(Base):
                 passed = tasks.Flag.CHECKS_PASSED in tasks.derive(self.reviewed(item)).flags
                 self.assertEqual(passed, has_checks)
 
-    def test_the_test_merge_commits_failure_fails_and_its_pass_never_passes(self):
-        # Read like the head's (Codex's review of 521361b): a failure counts, a pass doesn't.
-        for conclusion, flag in (("FAILURE", "CHECKS_FAILING"), ("SUCCESS", "CHECKS_UNVERIFIED")):
-            with self.subTest(conclusion=conclusion):
+    def merge_like_head(self, node, drop=()):
+        """A test merge commit with the head's results, under ids of its own."""
+        merge = json.loads(json.dumps(dict(node["commits"]["nodes"][0]["commit"], oid=SHA2)))
+        for i, suite in enumerate(merge["checkSuites"]["nodes"]):
+            suite["id"] = f"MS{i}"
+            runs = suite["checkRuns"]
+            runs["nodes"] = [r for r in runs["nodes"] if r["name"] not in drop]
+            runs["totalCount"] = len(runs["nodes"])
+            for j, run in enumerate(runs["nodes"]):
+                run["id"] = f"MR{i}.{j}"
+        return merge
+
+    def test_the_test_merge_commits_results_are_judged_with_the_heads(self):
+        # Read like the head's: a failure counts (Codex's review of 521361b), and a whole, fresh
+        # result for every required check counts too (Codex's review of 3ea4769).
+        for change, drop, flag in (
+            ("merge fails", (), "CHECKS_FAILING"),
+            ("head fails", (), "CHECKS_FAILING"),
+            ("both pass", (), "CHECKS_PASSED"),
+            ("merge lacks one", ("test",), "CHECKS_UNVERIFIED"),
+        ):
+            with self.subTest(change=change):
                 node = pr_node(1, issue=issue_node(10))
-                merge = node["commits"]["nodes"][0]["commit"]
-                merge = json.loads(json.dumps(dict(merge, oid=SHA2)))
-                merge["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][0]["conclusion"] = conclusion
+                merge = self.merge_like_head(node, drop)
+                failing = (
+                    merge if change == "merge fails" else node["commits"]["nodes"][0]["commit"]
+                )
+                if "fails" in change:
+                    failing["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][0]["conclusion"] = (
+                        "FAILURE"
+                    )
                 node["potentialMergeCommit"] = merge
                 self.fake.prs[REPO_A]["open"][0] = node
-                item = self.run_refresh()["items"][0]
-                flags = tasks.derive(self.reviewed(item)).flags
+                flags = tasks.derive(self.reviewed(self.run_refresh()["items"][0])).flags
                 self.assertIn(getattr(tasks.Flag, flag), flags)
-                self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
 
     def test_a_test_merge_commit_that_contradicts_itself_never_hides_its_failure(self):
         # Fable's pre-review of 7f24519: a zero count over a failing suite passed, and any odd
@@ -2381,6 +2402,19 @@ class AuditOf80e8fb3(Base):
         for odd in ("relative", f"{self.base}/x/../inner"):
             with self.assertRaises(OSError):
                 snapshot.open_folder(odd)
+        # The folders on the way are passed through, never opened for reading: one that only
+        # grants search permission still works (Codex's review of 3ea4769).
+        opened = []
+        real_open = os.open
+
+        def recording(path, flags, *args, **kwargs):
+            opened.append(flags)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(snapshot.os, "open", recording):
+            os.close(snapshot.open_folder(target / "inner"))
+        self.assertTrue(all(f & os.O_PATH for f in opened[:-1]), opened)
+        self.assertFalse(opened[-1] & os.O_PATH)
 
 
 class CodexReviewOfB1fef32(Base):

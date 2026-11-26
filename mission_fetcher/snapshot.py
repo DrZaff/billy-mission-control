@@ -745,6 +745,27 @@ def _no_runs(conn: Any) -> bool:
     )
 
 
+def _settles(
+    merge: dict, head: str, app: str, required: tuple[str, ...], now: datetime | None
+) -> bool:
+    """Whether the test merge commit's own results, read alone as if it were the head, are
+    whole and hold a result for every required check."""
+    own = {
+        "commits": {"nodes": [{"commit": dict(merge, oid=head)}]},
+        "mergeable": "MERGEABLE",
+        "potentialMergeCommit": {
+            "oid": "e" * 40 if head != "e" * 40 else "d" * 40,
+            "status": None,
+            "checkSuites": {"totalCount": 0, "nodes": []},
+        },
+    }
+    try:
+        records, whole = _checks(own, head, app, required, now, [])
+    except (_Incomplete, *_SHAPE):
+        return False
+    return whole and set(required) <= {r["name"] for r in records}
+
+
 def _obj_or_none(value: Any) -> dict:
     """The object, or an empty one for anything else."""
     return value if isinstance(value, dict) else {}
@@ -782,7 +803,9 @@ def _checks(
         complete = False
     if merge is not None:
         # Whatever it says, it is read like the head's below, so a failure in it is never lost.
-        # Only a mergeable one with no results at all, said plainly, leaves the list whole.
+        # A mergeable one leaves the list whole only with no results at all, said plainly, or
+        # with a whole, fresh result of its own for every required check: GitHub judges it then
+        # (Codex's review of 3ea4769). Either way, the head's failures still count too.
         status = merge.get("status") if isinstance(merge, dict) else 0
         suites = merge.get("checkSuites") if isinstance(merge, dict) else None
         try:
@@ -790,13 +813,11 @@ def _checks(
                 complete = False  # never the head (6b7da87), nor "gone" (Codex, 34ad21c)
         except FetchError:
             complete = False
-        if (
-            not isinstance(merge, dict)
-            or mergeable != "MERGEABLE"
-            or "status" not in merge  # left out: never "no statuses" (Codex, a34154f)
-            or not (status is None or (isinstance(status, dict) and status.get("contexts") == []))
-            or not _no_runs(suites)
-        ):
+        plain = isinstance(merge, dict) and mergeable == "MERGEABLE" and "status" in merge
+        empty = (
+            status is None or (isinstance(status, dict) and status.get("contexts") == [])
+        ) and _no_runs(suites)
+        if not (plain and (empty or _settles(merge, head, app, required, now))):
             complete = False
     # A test merge commit with results of its own is read even when the head's row can't be:
     # a failure in it is never lost (Fable's pre-review of 619b757).
@@ -1911,10 +1932,15 @@ def open_folder(folder: Path | str) -> int:
     parts = Path(folder).parts
     if not parts or parts[0] != "/" or any(p in (".", "..") for p in parts[1:]):
         raise OSError(f"{os.fspath(folder)!r} is not a plain absolute path")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open("/", flags)
+    # The folders on the way are passed through, never read (O_PATH): one that grants only
+    # search permission, as start-up allows, still works (Codex's review of 3ea4769). The folder
+    # itself is opened for reading, as its files are listed and synced through it.
+    passing = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    reading = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open("/", passing if parts[1:] else reading)
     try:
-        for part in parts[1:]:
+        for i, part in enumerate(parts[1:], start=2):
+            flags = reading if i == len(parts) else passing
             fd, parent = os.open(part, flags, dir_fd=fd), fd
             os.close(parent)
     except BaseException:
