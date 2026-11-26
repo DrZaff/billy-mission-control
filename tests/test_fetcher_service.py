@@ -148,6 +148,27 @@ class RefresherFiles(Base):
             boot=boot or (lambda: ("boot-1", clock() - NOW.timestamp() + 1000.0)),
         )
 
+    def test_an_outcome_that_cant_be_recorded_is_never_a_plain_ok(self):
+        # Codex's review of d99c9a7: the final status write failing still replied "ok".
+        real = server.write_json
+
+        def failing(folder, name, data, durable=False):
+            if name == snapshot.STATUS and not durable:  # the outcome, not the attempt
+                raise OSError("disk full")
+            return real(folder, name, data, durable)
+
+        now = [NOW.timestamp()]
+        refresher = self.make(lambda: now[0])
+        with mock.patch.object(server, "write_json", failing):
+            self.assertEqual(refresher.run(), b"ok:status-not-written\n")
+            now[0] += 120
+            self.assertEqual(refresher.run(list), b"ok:status-not-written\n")  # a selfcheck
+            now[0] += 120
+            self.fake.fail["/graphql"] = (502, {}, b"")
+            self.assertEqual(refresher.run(), b"failed:http-502+status-not-written\n")
+        status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
+        self.assertEqual(status["result"], "running")  # never a recorded success
+
     def test_ok_writes_the_snapshot_and_status_readable_by_the_group_only(self):
         reply = self.make(lambda: NOW.timestamp()).run()
         self.assertEqual(reply, server.OK)
@@ -547,6 +568,26 @@ class AuditOfE58b933(Base):
             refresher.return_value.results = []
             code = entry.main(argv)
         return code, github_checks, refresher, umask
+
+    def test_a_github_selfcheck_whose_outcome_isnt_recorded_never_passes(self):
+        # Codex's review of f6016a5: every check passing hid the unwritten status.
+        from mission_fetcher import __main__ as entry
+        from mission_fetcher.checks import Check
+
+        passing = [Check("key file", True, "private")]
+        for reply, expected in ((b"ok\n", 0), (b"ok:status-not-written\n", 1)):
+            with (
+                self.subTest(reply=reply),
+                mock.patch.object(entry, "read_config", return_value="{}"),
+                mock.patch.object(entry, "parse_fetcher", return_value=self.cfg),
+                mock.patch.object(entry, "fetcher_checks", return_value=list(passing)),
+                mock.patch("mission_fetcher.server.Refresher") as refresher,
+                mock.patch.object(entry.os, "umask"),
+                mock.patch("builtins.print"),
+            ):
+                refresher.return_value.run.return_value = reply
+                refresher.return_value.results = [Check("read-only token", True, "yes")]
+                self.assertEqual(entry.main(["selfcheck", "--github", "--config", "x"]), expected)
 
     def test_nothing_starts_unless_every_check_passes(self):
         from mission_fetcher.checks import Check

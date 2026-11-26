@@ -136,6 +136,10 @@ def _main(argv: list[str] | None = None) -> int:
 
             reply = refresher.run(checked).decode().strip()
             results += refresher.results
+            if "status-not-written" in reply:
+                # The checks ran, but their outcome isn't on record: never "all passed" (Codex's
+                # review of f6016a5).
+                results.append(Check("outcome recorded in the status file", False, "not written"))
             if not refresher.results:
                 # Too soon, busy or failed before any check: said, never skipped (audits of
                 # e58b933 and 24973b8).
