@@ -73,6 +73,23 @@ class Config(Base):
             {"repos": {REPO_A: {"required_checks": ["x"]}}},
             {"owner": "bad login!"},
             {"clinicians": []},
+            # Guards no test held (mutation sweep of 160cc5a): each alone refuses the file.
+            {"app_id": 0},
+            {"clinicians": "ab"},
+            {"clinicians": [5]},
+            {"repos": [REPO_A]},
+            *(
+                {"repos": {REPO_A: {"required_checks": c, "clinical_paths": p, "checks_app": "x"}}}
+                for c, p in (
+                    (["a\nb"], []),
+                    (["x"], "evidence/*"),
+                    (["x"], [5]),
+                    (["x"], [""]),
+                    (["x"], ["a\x00"]),
+                    (["x"], ["p" * 201]),
+                    (["x"], ["p"] * 51),
+                )
+            ),
             {"key": "relative/key.pem"},
             {"extra": 1},
         ):
@@ -462,12 +479,14 @@ class GitHubClient(Base):
         # Codex's review of 7faf35a: a list or object type raised TypeError.
         for kind in (["RATE_LIMITED"], {"a": 1}, None, 7):
             with self.subTest(kind=kind):
-                answer = {"data": None, "errors": [{"type": kind}]}
+                errors = [{"type": kind, "path": [{}]}, {"path": [True]}]  # nor odd places
+                answer = {"data": None, "errors": errors}
                 fake = lambda *a, answer=answer: (200, {}, json.dumps(answer).encode())  # noqa: E731
                 github = gh.GitHub(APP_ID, KEY, transport=fake, clock=lambda: NOW.timestamp())
                 with self.assertRaises(gh.FetchError) as caught:
                     github.graphql(TOKEN, "query { x }", {})
                 self.assertEqual(caught.exception.code, "graphql-error")
+                self.assertEqual(caught.exception.paths, (None, None))
 
     def test_the_trust_store_never_comes_from_the_environment(self):
         # Real files at the variables' paths (audit of 24973b8: with paths that didn't exist,
@@ -740,7 +759,9 @@ class GitHubClient(Base):
         # Codex's review of b7d0915: GitHub's documented answer may leave it out; the
         # installation and the token have already said "selected".
         real = self.fake.__call__
-        answer = {"total_count": 2, "repositories": [{"full_name": REPO_A}, {"full_name": REPO_B}]}
+        # Rows as GitHub gives them: a "push": false is no write (untested until 160cc5a's sweep).
+        row = {"full_name": REPO_A, "permissions": {"admin": False, "push": False, "pull": True}}
+        answer = {"total_count": 2, "repositories": [row, {"full_name": REPO_B}]}
 
         def call(method, path, headers, body):
             if path == "/installation/repositories?per_page=100":
@@ -779,7 +800,13 @@ class GitHubClient(Base):
 
     def test_a_token_expiry_in_another_shape_is_refused(self):
         real = self.fake.__call__
-        for odd in ("2026-11-24", "2026-W48-2T13:00:00Z", "2026-11-24T13:00:00"):
+        for odd in (
+            "2026-11-24",
+            "2026-W48-2T13:00:00Z",
+            "2026-11-24T13:00:00",
+            "2026-13-45T00:00:00Z",
+            None,
+        ):
             with self.subTest(odd=odd):
 
                 def call(method, path, headers, body, odd=odd):
@@ -809,10 +836,10 @@ class GitHubClient(Base):
         self.assertEqual(caught.exception.code, "suspended")
 
     def test_a_cost_error_is_partial_only_on_a_part_that_can_be_left_out(self):
-        def answer(place):
+        def answer(place, whole=True):
             def call(method, path, headers, body):
-                errors = [{"type": "RESOURCE_LIMITS_EXCEEDED", "path": place}]
-                data = {"repository": {"p0": None}}
+                errors = [{"type": "RESOURCE_LIMITS_EXCEEDED", "path": place}, "odd"]
+                data = {"repository": {"p0": None}} if whole else None
                 return 200, {}, json.dumps({"data": data, "errors": errors}).encode()
 
             return gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
@@ -829,6 +856,16 @@ class GitHubClient(Base):
             with self.subTest(place=place), self.assertRaises(gh.FetchError) as caught:
                 answer(place).graphql(TOKEN, "q", {}, placeable=placeable)
             self.assertEqual(caught.exception.code, code)
+        # Nor with no place, no answer, or no part to leave out (160cc5a's sweep).
+        files = ["repository", "p0", "files"]
+        for github, part in (
+            (answer(None), placeable),
+            (answer(files, False), placeable),
+            (answer(files), None),
+        ):
+            with self.assertRaises(gh.FetchError) as caught:
+                github.graphql(TOKEN, "q", {}, placeable=part)
+            self.assertEqual(caught.exception.code, "too-heavy")
 
     def test_an_odd_or_repeated_repository_row_is_never_skipped(self):
         # Codex's review of df5912d (should fix).
@@ -839,6 +876,9 @@ class GitHubClient(Base):
             ([{"full_name": REPO_A}, {"full_name": {"x": 1}}], 2, "bad-response"),
             ([*good, {"full_name": REPO_A}], 2, "wrong-repositories"),
             ([{"full_name": REPO_A}, {"full_name": REPO_A}], 2, "wrong-repositories"),
+            # As many, but another one; and more than the rows given (160cc5a's sweep).
+            ([{"full_name": REPO_A}, {"full_name": REPO_B + "2"}], 2, "wrong-repositories"),
+            (good, 3, "wrong-repositories"),
         ):
             with self.subTest(rows=rows):
 
