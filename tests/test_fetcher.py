@@ -46,6 +46,7 @@ from tests.fetcher_fixtures import (
     make_cfg,
     pr_node,
     review_node,
+    with_ids,
 )
 
 # ---------------------------------------------------------------- config
@@ -3584,7 +3585,8 @@ class CodexReviewOf07c05d4(Base):
                 answer = json.loads(data)
                 for pr in answer["data"]["repository"].values():
                     if pr and "rv0" in pr:
-                        pr["rv0"] = {"totalCount": 2, "nodes": [approved, later]}
+                        # With ids, so only the missing author can refuse it (Codex, a78c3cb).
+                        pr.update(with_ids({"rv0": {"totalCount": 2, "nodes": [approved, later]}}))
                 data = json.dumps(answer).encode()
             return status, h, data
 
@@ -3606,7 +3608,11 @@ class CodexReviewOf07c05d4(Base):
                         "open": {"totalCount": 1, "nodes": [{"number": 5}]}
                         if len(closed) == 1
                         else {"totalCount": 0, "nodes": []},
-                        "closed": {"nodes": closed, "pageInfo": {"hasNextPage": False}},
+                        "closed": {
+                            "totalCount": len(closed),
+                            "nodes": closed,
+                            "pageInfo": {"hasNextPage": False},
+                        },
                     }
                 }
                 self.assertEqual(snapshot._listing(REPO_A, data, NOW), ([5], True))
@@ -4017,6 +4023,7 @@ class CodexReviewOfB03ad71(PreReviewOf07c3480):
         full = [row(100 + i, recent - timedelta(minutes=i)) for i in range(snapshot.MAX_CLOSED)]
         first = {"nodes": full, "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}
         second = {  # starts later than the first page ended: out of order
+            "totalCount": snapshot.MAX_CLOSED + 1,
             "nodes": [row(4, recent + timedelta(hours=2))],
             "pageInfo": {"hasNextPage": False},
         }
@@ -4026,6 +4033,10 @@ class CodexReviewOfB03ad71(PreReviewOf07c3480):
         self.assertEqual(snapshot._listing(REPO_A, data, NOW, pages.get), (expected, True))
         second["nodes"] = [row(4, recent - timedelta(hours=2))]  # in order: whole
         self.assertEqual(snapshot._listing(REPO_A, data, NOW, pages.get), (expected, False))
+        # The last page, but the count says more: rows are missing (Codex, a78c3cb).
+        for total in (snapshot.MAX_CLOSED + 2, None):
+            second["totalCount"] = total
+            self.assertEqual(snapshot._listing(REPO_A, data, NOW, pages.get), (expected, True))
 
 
 class PreReviewOf6b7da87(PreReviewOf07c3480):
@@ -4087,8 +4098,9 @@ class PreReviewOf6b7da87(PreReviewOf07c3480):
         issue["timelineItems"]["nodes"].append(removal)
         issue["timelineItems"]["totalCount"] = 2
         self.assertIsNone(self.item_for(pr_node(1, issue=issue))["task"]["issue"])
-        removal["label"] = {"name": "agent:ready "}  # nor its removal with a space
-        self.assertIsNone(self.item_for(pr_node(1, issue=issue))["task"]["issue"])
+        for odd in ("agent:ready ", " Agent:Ready "):  # nor its removal padded (Codex, a78c3cb)
+            removal["label"] = {"name": odd}
+            self.assertIsNone(self.item_for(pr_node(1, issue=issue))["task"]["issue"])
 
     def test_a_closed_prs_commit_row_must_name_its_head(self):
         review = review_node(OWNER, "APPROVED")

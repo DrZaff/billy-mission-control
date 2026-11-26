@@ -352,6 +352,7 @@ class FakeGitHub:
                 page = data["closed"][start : start + self.closed_page]
                 more = start + self.closed_page < len(data["closed"])
                 closed = {
+                    "totalCount": len(data["closed"]),
                     "nodes": [{k: n[k] for k in ("number", "closedAt", "updatedAt")} for n in page],
                     "pageInfo": {
                         "hasNextPage": more,

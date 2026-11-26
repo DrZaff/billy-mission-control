@@ -108,6 +108,7 @@ query($$owner: String!, $$name: String!) {
     }
     closed: pullRequests(states: [CLOSED, MERGED], first: $closed,
                          orderBy: {field: UPDATED_AT, direction: DESC}) {
+      totalCount
       nodes { number closedAt updatedAt }
       pageInfo { hasNextPage endCursor }
     }
@@ -123,6 +124,7 @@ query($$owner: String!, $$name: String!, $$after: String!) {
   repository(owner: $$owner, name: $$name) {
     closed: pullRequests(states: [CLOSED, MERGED], first: $closed, after: $$after,
                          orderBy: {field: UPDATED_AT, direction: DESC}) {
+      totalCount
       nodes { number closedAt updatedAt }
       pageInfo { hasNextPage endCursor }
     }
@@ -1128,7 +1130,7 @@ def _issue(
             label = e["label"]
             if label not in (None, READY_LABEL) and (
                 label.casefold() == READY_LABEL.casefold()
-                or (e["event"] == "unlabeled" and label.strip() == READY_LABEL)
+                or (e["event"] == "unlabeled" and label.strip().casefold() == READY_LABEL)
             ):
                 raise _Incomplete()
             if e["event"] in ("closed", "reopened") or e["label"] == READY_LABEL:
@@ -1393,16 +1395,19 @@ def _listing(
     # More than asked for is flagged, and never all read in detail (pre-review of 8c4bfec).
     numbers = [_int(_obj(n).get("number")) for n in open_nodes[:MAX_OPEN]]
     rows = list(numbers)  # every row read, older closed ones included
-    closed, cursor, page_rows, times, doubt = _closed_page(repository.get("closed"), since)
+    last = repository.get("closed")
+    closed, cursor, page_rows, times, doubt = _closed_page(last, since)
     numbers += closed
     rows += page_rows
+    read = len(page_rows)
     pages = 1
     # The order is checked across pages too: a page that starts later than the last one ended
     # breaks the cut-off the earlier pages relied on (Codex's review of b03ad71).
     disordered = False
     while cursor is not None and more_pages is not None and pages < CLOSED_PAGES:
-        page = _obj(_obj(more_pages(cursor)).get("repository")).get("closed")
+        last = page = _obj(_obj(more_pages(cursor)).get("repository")).get("closed")
         closed, cursor, page_rows, page_times, page_doubt = _closed_page(page, since)
+        read += len(page_rows)
         # Promised more, an empty page is no end: the list changed (Codex's review of 7ac622f).
         doubt = doubt or page_doubt or not page_rows
         if times and page_times and page_times[0] > times[-1]:
@@ -1414,6 +1419,11 @@ def _listing(
     # Any repeat among every row read, within a page, across pages or between the lists, means
     # the list changed while it was read: one may be missing (Codex, 07c05d4 and 96cb8a9).
     repeated = len(set(rows)) != len(rows)
+    # Read to the end, every closed pull request was read: the count must agree, or rows may be
+    # missing from a short last page (Codex's review of a78c3cb).
+    total = _obj(last).get("totalCount")
+    if _obj(_obj(last).get("pageInfo")).get("hasNextPage") is False:
+        doubt = doubt or type(total) is not int or total != read
     cut_off = more_open or repeated or disordered or doubt or cursor is not None
     return list(dict.fromkeys(numbers)), cut_off
 
