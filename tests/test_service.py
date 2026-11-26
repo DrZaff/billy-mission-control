@@ -788,15 +788,24 @@ class SocketActivation(unittest.TestCase):
                 systemd_socket(dict(environ, LISTEN_PID=environ.get("LISTEN_PID", "1")), pid=99)
 
     def test_accepts_the_unix_socket_systemd_passes(self):
-        code = (
-            f"import os, socket, sys; sys.path.insert(0, {str(ROOT)!r});"
-            "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); os.dup2(s.fileno(), 3);"
-            "os.environ.update(LISTEN_PID=str(os.getpid()), LISTEN_FDS='1');"
-            "from mission_control.service import systemd_socket;"
-            "print(systemd_socket().family == socket.AF_UNIX)"
-        )
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
-        self.assertEqual(result.stdout.strip(), "True", result.stderr)
+        # A listening one only: one that isn't fails every accept (Codex's review of a86575d).
+        for listening, expected in ((True, "True"), (False, "refused")):
+            with self.subTest(listening=listening), tempfile.TemporaryDirectory() as folder:
+                code = (
+                    f"import os, socket, sys; sys.path.insert(0, {str(ROOT)!r});"
+                    "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM);"
+                    f"s.bind({str(Path(folder) / 's')!r});"
+                    + ("s.listen();" if listening else "")
+                    + "os.dup2(s.fileno(), 3);"
+                    "os.environ.update(LISTEN_PID=str(os.getpid()), LISTEN_FDS='1');"
+                    "from mission_control.service import systemd_socket;"
+                    "\ntry: print(systemd_socket().family == socket.AF_UNIX)"
+                    "\nexcept RuntimeError: print('refused')"
+                )
+                result = subprocess.run(
+                    [sys.executable, "-c", code], capture_output=True, text=True
+                )
+                self.assertEqual(result.stdout.strip(), expected, result.stderr)
 
 
 # ---------------------------------------------------------------- the command line

@@ -168,7 +168,16 @@ DYNAMIC_ATTRIBUTES = (
 )
 
 # Everything either package may use from the socket module: Unix sockets, and shutting one down.
-SOCKET_NAMES = ("socket", "AF_UNIX", "SOCK_STREAM", "SOL_SOCKET", "SO_PEERCRED", "SHUT_RDWR")
+# SO_ACCEPTCONN only reads whether systemd's socket is listening (Codex's review of a86575d).
+SOCKET_NAMES = (
+    "socket",
+    "AF_UNIX",
+    "SOCK_STREAM",
+    "SOL_SOCKET",
+    "SO_PEERCRED",
+    "SO_ACCEPTCONN",
+    "SHUT_RDWR",
+)
 
 CONNECTION_NAMES = ("HTTPSConnection", "HTTPConnection")
 OUTBOUND_NAMES = ("create_connection", "get_server_certificate", "open_connection", "set_tunnel")

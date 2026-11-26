@@ -43,7 +43,7 @@ def read_config(path: str) -> str:
 
 
 def _fail(message: str) -> int:
-    print("STOP: " + message, file=sys.stderr)
+    print("STOP: " + message, file=sys.stderr, flush=True)
     return 2
 
 
@@ -73,12 +73,9 @@ def github_checks(cfg, github) -> list[Check]:
 
 
 def _end() -> None:
-    """End by SIGTERM itself, as systemd expects of a clean stop, what was printed flushed."""
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.flush()
-        except (OSError, ValueError):
-            pass
+    """End by SIGTERM itself, as systemd expects of a clean stop. Nothing is flushed here: the
+    log's thread may hold stdout, blocked, and a flush would wait on it for ever (Codex's
+    review of a86575d). What the commands print is flushed as it is printed instead."""
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     signal.raise_signal(signal.SIGTERM)  # this process only
 
@@ -143,12 +140,12 @@ def _main(argv: list[str] | None = None) -> int:
                 # Too soon, busy or failed before any check: said, never skipped (audits of
                 # e58b933 and 24973b8).
                 results.append(Check("GitHub checks", False, reply))
-        print(report(results))
+        print(report(results), flush=True)
         failed = failures(results)
-        print(f"{len(results) - len(failed)} of {len(results)} checks passed.")
+        print(f"{len(results) - len(failed)} of {len(results)} checks passed.", flush=True)
         return 1 if failed else 0
     if failures(results):
-        print(report(failures(results)), file=sys.stderr)
+        print(report(failures(results)), file=sys.stderr, flush=True)
         return _fail("start-up checks failed; nothing was started")
 
     os.umask(0o077)
@@ -157,7 +154,7 @@ def _main(argv: list[str] | None = None) -> int:
     refresher = Refresher(cfg)
     if args.command == "fetch-now":
         reply = refresher.run().decode().strip()
-        print(f"Refresh at {datetime.now(UTC).isoformat()}: {reply}")
+        print(f"Refresh at {datetime.now(UTC).isoformat()}: {reply}", flush=True)
         return 0 if reply == "ok" else 1
 
     from mission_control.service import systemd_socket

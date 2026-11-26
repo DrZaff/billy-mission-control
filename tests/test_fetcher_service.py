@@ -21,6 +21,7 @@ from unittest import mock
 from cryptography.hazmat.primitives import serialization
 
 from mission_fetcher import __main__ as entry
+from mission_fetcher import checks as fchecks
 from mission_fetcher import config as fconfig
 from mission_fetcher import github as gh
 from mission_fetcher import server, snapshot
@@ -44,6 +45,41 @@ from tests.fetcher_fixtures import (
 
 
 class ServicePieces(Base):
+    def test_ending_on_a_stop_never_waits_on_stdout(self):
+        # Codex's review of a86575d: a flush could wait for ever on the log thread's write.
+        class Stuck:
+            def write(self, text):
+                return len(text)
+
+            def flush(self):
+                raise AssertionError("flushed while ending")
+
+        raised = []
+        with (
+            mock.patch.object(entry.sys, "stdout", Stuck()),
+            mock.patch.object(entry.sys, "stderr", Stuck()),
+            mock.patch.object(entry.signal, "raise_signal", raised.append),
+        ):
+            before = signal.getsignal(signal.SIGTERM)
+            try:
+                entry._end()
+            finally:
+                signal.signal(signal.SIGTERM, before)
+        self.assertEqual(raised, [signal.SIGTERM])
+
+    def test_a_file_gone_mid_scan_never_fails_start_up(self):
+        # Codex's review of a86575d: a refresh renaming its temp file between the listing and
+        # the look at it failed the start-up checks.
+        real_listdir = os.listdir
+        folder = self.cfg.snapshot_dir
+
+        def listing(path):
+            return [*real_listdir(path), ".gone.tmp"]
+
+        with mock.patch.object(fchecks.os, "listdir", listing):
+            self.assertTrue(fchecks.folder_files(folder, os.getuid()).ok)
+        self.assertFalse(fchecks._has_acl(str(folder / ".gone.tmp")))
+
     def test_a_symlinked_key_is_never_followed(self):
         real_key = self.base / "real.pem"
         real_key.write_text("synthetic")
@@ -844,7 +880,7 @@ class CodexReviewOfB7d0915(Base):
             "case.fake = transport\n"
             "print(case.cfg.snapshot_dir, flush=True)\n"
             "refresher = case.make(lambda: t.NOW.timestamp())\n"
-            "entry._main = lambda argv: print(refresher.run(), fake.calls[-1]) or 0\n"
+            "entry._main = lambda argv: print(refresher.run(), fake.calls[-1], flush=True) or 0\n"
             "entry.main([])\n"
         )
         root = Path(__file__).resolve().parent.parent

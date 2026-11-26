@@ -61,6 +61,8 @@ def _has_acl(path: str) -> bool:
     failure to look counts as one, so the check fails closed (Codex's review of b24ac2d)."""
     try:
         names = os.listxattr(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return False  # gone since it was listed (a refresh renamed its temp file): no ACL
     except OSError as error:
         return error.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP)
     return any(name in ACL_ATTRIBUTES for name in names)
@@ -192,6 +194,8 @@ def folder_files(path: Path, uid: int) -> Check:
     for entry in sorted(entries):
         try:
             info = os.lstat(path / entry)
+        except FileNotFoundError:
+            continue  # gone since it was listed: a refresh renamed its temp file (Codex, a86575d)
         except OSError:
             return Check(name, False, f"{entry} can't be read")
         if not stat.S_ISREG(info.st_mode):
