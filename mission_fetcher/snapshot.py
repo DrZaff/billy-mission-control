@@ -702,15 +702,10 @@ def _reviews(
             if merged_at is not None and at > merged_at:
                 continue  # after the merge: skipped before anything else (audit of 0585599)
             author = n.get("author")
-            # GitHub returned it in this clinician's own connection, so an author it can't name
-            # (null, or a deleted account) is a surprise, never "someone else": the reviews are
-            # not known (Codex's review of 07c05d4: skipping one could hide a changes request).
-            if author is None:
-                raise _Incomplete()
             # GitHub filtered by author, and logins are case-insensitive: anything else in this
-            # connection is a surprise, so the reviews are "not known" (audit of 28009de).
-            # Only a GitHub user is a clinician: a bot, or an author whose kind GitHub didn't
-            # say, makes the reviews "not known" (Codex's review of 322b659).
+            # clinician's own connection (no author, a deleted account, a bot, a kind GitHub
+            # didn't say) is a surprise, never "someone else": the reviews are not known
+            # (Codex's reviews of 07c05d4 and 322b659: skipping one could hide a changes request).
             if not isinstance(author, dict) or author.get("__typename") != "User":
                 raise _Incomplete()
             seen = author.get("login")
@@ -1159,9 +1154,13 @@ def _issue(
             # (Codex's review of dc1eb14). A closing ends the authorisation as an unlabel does,
             # so leaving them out would show a closed-and-reopened issue as still authorised.
             # GitHub's label names ignore case: an event on the label in another case is a
-            # surprise, never another label (pre-review of 6b7da87).
+            # surprise, never another label (pre-review of 6b7da87); so is its removal under
+            # the name with spaces round it, which GitHub never keeps.
             label = e["label"]
-            if label not in (None, READY_LABEL) and label.casefold() == READY_LABEL.casefold():
+            if label not in (None, READY_LABEL) and (
+                label.casefold() == READY_LABEL.casefold()
+                or (e["event"] == "unlabeled" and label.strip() == READY_LABEL)
+            ):
                 raise _Incomplete()
             if e["event"] in ("closed", "reopened") or e["label"] == READY_LABEL:
                 timeline.append(e)
@@ -1400,14 +1399,9 @@ def _closed_page(
     # That order is checked, never trusted: a page out of order says nothing about the next, so
     # it is read too, or the list marked cut off (pre-review of 07c3480).
     disordered = any(a < b for a, b in zip(updated, updated[1:], strict=False))
-    # An empty page that says more follow is never the end: the next is read, or the list is
-    # marked cut off (Codex's review of 9cc8f43).
-    # A page that can't support stopping (out of order, impossible, empty, or more rows than
-    # asked for) is remembered: a later page that looks orderly never clears it (pre-review of
-    # 6b7da87).
-    # GitHub fills a page before it says more follow: a short one is doubtful too (pre-review
-    # of 8c4bfec), and so is one with more rows than asked for, whatever it says.
-    # Out of order or impossible, even the last page is doubtful (Codex's review of 34ad21c).
+    # A page that can't support stopping is doubtful, and remembered whatever later pages look
+    # like (6b7da87): out of order or impossible, even when it is the last (Codex, 34ad21c);
+    # short or empty though it says more follow (9cc8f43, 8c4bfec); or more rows than asked for.
     doubtful = (
         disordered
         or impossible

@@ -3261,7 +3261,7 @@ class CodexReviewOf2736aee(CodexReviewOf099ef9b):
 
 class CodexReviewOfA34154f(CodexReviewOf099ef9b):
     def test_a_test_merge_commits_status_left_out_is_not_known(self):
-        merge = {"checkSuites": {"totalCount": 0}}  # no status key at all
+        merge = {"oid": SHA2, "checkSuites": {"totalCount": 0}}  # no status key at all
         node = pr_node(1, issue=issue_node(10), merge_commit=merge)
         self.fake.prs[REPO_A]["open"][0] = node
         item = self.run_refresh()["items"][0]
@@ -4069,6 +4069,8 @@ class PreReviewOf6b7da87(PreReviewOf07c3480):
         issue["timelineItems"]["nodes"].append(removal)
         issue["timelineItems"]["totalCount"] = 2
         self.assertIsNone(self.item_for(pr_node(1, issue=issue))["task"]["issue"])
+        removal["label"] = {"name": "agent:ready "}  # nor its removal with a space
+        self.assertIsNone(self.item_for(pr_node(1, issue=issue))["task"]["issue"])
 
     def test_a_closed_prs_commit_row_must_name_its_head(self):
         review = review_node(OWNER, "APPROVED")
@@ -4294,6 +4296,19 @@ class PreReviewOfB8b1ca7(PreReviewOf07c3480):
                 item = self.item_for(node)
                 self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
                 self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
+
+    def test_a_suite_whose_app_is_left_out_is_never_one_with_no_app(self):
+        # Runs naming no required check: null is passed over, left out is not known.
+        for left_out in (False, True):
+            node = pr_node(1, issue=issue_node(10))
+            suites = node["commits"]["nodes"][0]["commit"]["checkSuites"]
+            runs = {"totalCount": 0, "nodes": []}
+            suites["nodes"].append({"app": None, "workflowRun": None, "checkRuns": runs})
+            suites["totalCount"] = 2
+            if left_out:
+                del suites["nodes"][1]["app"]
+            pull = self.item_for(node)["task"]["pull_request"]
+            self.assertEqual(pull.get("checks_complete", True), not left_out)
 
     def test_a_failure_in_a_suite_of_unknown_app_still_fails(self):
         odd = ({"slug": ""}, {"slug": "GitHub-Actions"}, {"slug": " github-actions"})
@@ -4558,14 +4573,13 @@ class CodexReviewOfB7d0915(Base):
 
     def test_a_real_sigterm_mid_refresh_ends_the_process_after_revoking(self):
         code = (
-            "import sys, time\n"
             "from tests import test_fetcher as t\n"
             "from mission_fetcher import __main__ as entry\n"
             "case = t.CodexReviewOfB7d0915('test_the_service_loop_ends_after_a_stop')\n"
             "case.setUp(); fake = case.fake\n"
             "def transport(method, path, headers, body):\n"
             "    if path == '/graphql' and not fake.calls.count(('POST', '/graphql')):\n"
-            "        print('reading', flush=True); time.sleep(1)\n"
+            "        print('reading', flush=True); t.gh.STOPPING.wait(30)\n"
             "    return fake(method, path, headers, body)\n"
             "case.fake = transport\n"
             "print(case.cfg.snapshot_dir, flush=True)\n"
@@ -4582,8 +4596,7 @@ class CodexReviewOfB7d0915(Base):
         self.addCleanup(child.stdout.close)
         self.addCleanup(child.wait)
         self.addCleanup(child.kill)  # never left running, whatever fails
-        # Every line read by one thread into a queue, waited for 30 s at most: no read that
-        # could wait for ever, and none buffered out of a select's sight (Codex, d99b49a).
+        # One thread reads every line into a queue; each wait is 30 s at most (Codex, d99b49a).
         lines: queue.Queue = queue.Queue()
 
         def pump():
@@ -4633,7 +4646,7 @@ class CodexReviewOfB7d0915(Base):
         self.assertEqual(status["last_refresh"]["result"], "ok")
 
     def test_sigterm_ends_at_once_when_idle_and_after_the_refresh_otherwise(self):
-        before = signal.getsignal(signal.SIGTERM)
+        before = signal.signal(signal.SIGTERM, entry._on_sigterm)
         killed = []
         with mock.patch.object(entry.signal, "raise_signal", killed.append):
             server.ACTIVE.set()
@@ -4643,6 +4656,7 @@ class CodexReviewOfB7d0915(Base):
                 server.ACTIVE.clear()
             self.assertEqual(killed, [])  # mid-refresh: only marked
             self.assertTrue(gh.STOPPING.is_set())
+            self.assertIs(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)  # a second one ends
             entry._on_sigterm(signal.SIGTERM, None)
             self.assertEqual(killed, [signal.SIGTERM])  # idle: now
         signal.signal(signal.SIGTERM, before)
@@ -4656,6 +4670,9 @@ class CodexReviewOfB7d0915(Base):
             gh.STOPPING.set()
             return 0
 
+        with mock.patch.object(entry, "_main", lambda argv: 0):
+            entry.main([])
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)  # restored
         with (
             mock.patch.object(entry, "_main", fake_main),
             mock.patch.object(entry.signal, "raise_signal", killed.append),
@@ -4667,6 +4684,8 @@ class CodexReviewOfB7d0915(Base):
     def test_the_service_loop_ends_after_a_stop(self):
         class Listener:
             def accept(self):
+                if gh.STOPPING.is_set():
+                    raise AssertionError("served on after the stop")
                 gh.STOPPING.set()
                 a, b = socket.socketpair()
                 b.close()
