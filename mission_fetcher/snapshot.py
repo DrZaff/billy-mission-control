@@ -1697,12 +1697,6 @@ def repo_items(
         items.append(item)
     # No guard on lite reads: one leaves files and checks "not known", an alert, never greener
     # than GitHub; rejecting them let two huge pull requests stall every refresh (28009de).
-    if len(details) > 1 and not readable:
-        # Every pull request unreadable is no per-PR problem: fail, keeping the last good
-        # snapshot (7faf35a). Judged on the items as built, not on GitHub's answer (Codex's
-        # review of c3ee86b). Only with more than one: a lone pull request with bad data of
-        # its own is shown as unreadable (Fable's pre-review of a21bd27).
-        raise _bad()
     return items, more
 
 
@@ -1727,6 +1721,13 @@ def refresh(cfg: FetcherConfig, github: GitHub, now: datetime) -> dict:
             items += repo_list
             if more:
                 truncated.append(repo)
+        # Every pull request unreadable, in every repository, is no per-PR problem: fail,
+        # keeping the last good snapshot (7faf35a). Judged on the items as built (Codex's review
+        # of c3ee86b), only with more than one (a lone one with bad data of its own is shown as
+        # unreadable; a21bd27), and over all repositories: one repository's unreadable pull
+        # requests never hold back another's alerts (Codex's review of 64a78bd).
+        if len(items) > 1 and not any(_model_reads(item["task"]) for item in items):
+            raise _bad()
         snapshot = {
             "version": VERSION,
             "fetched_at": now.astimezone(UTC).isoformat(),
@@ -1903,14 +1904,32 @@ def encode(data: dict) -> bytes:
 # ---------------------------------------------------------------- files
 
 
+def open_folder(folder: Path | str) -> int:
+    """A descriptor for this folder, following no symlink anywhere on its path: each part is
+    opened from the one before with O_NOFOLLOW, which on a full path guards only its last part
+    (Codex's review of 64a78bd)."""
+    parts = Path(folder).parts
+    if not parts or parts[0] != "/" or any(p in (".", "..") for p in parts[1:]):
+        raise OSError(f"{os.fspath(folder)!r} is not a plain absolute path")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open("/", flags)
+    try:
+        for part in parts[1:]:
+            fd, parent = os.open(part, flags, dir_fd=fd), fd
+            os.close(parent)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def write_json(folder: Path, name: str, data: dict, durable: bool = False) -> None:
     """Write `name` in `folder` whole, then rename it into place: a reader never sees half a
     file. Never through a symlink (the folder is opened with O_NOFOLLOW and used by its file
     descriptor); private while being written, then readable by the folder's group (the web
     app's account) only."""
     text = encode(data)
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    folder_fd = os.open(folder, flags)
+    folder_fd = open_folder(folder)
     try:
         group = os.fstat(folder_fd).st_gid
         tmp = f".{name}.{os.getpid()}.tmp"
@@ -1956,11 +1975,12 @@ def write_json(folder: Path, name: str, data: dict, durable: bool = False) -> No
         os.close(folder_fd)
 
 
-def open_regular(path: Path | str) -> int:
+def open_regular(path: Path | str, dir_fd: int | None = None) -> int:
     """A read-only descriptor for a regular file, never through a symlink. Opened without
     blocking, so a FIFO or device in its place can't hang the read, and refused unless regular
     (Codex's review of b1fef32: the config was read before it was checked)."""
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+    fd = os.open(path, flags, dir_fd=dir_fd)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(f"{os.fspath(path)!r} is not a regular file")
@@ -1978,7 +1998,11 @@ def read_json(
     unreadable status file was taken for "no earlier refresh"), and a malformed, oversized or
     non-object file raises ValueError (Codex's review of 9aeff19)."""
     try:
-        fd = open_regular(folder / name)
+        folder_fd = open_folder(folder)
+        try:
+            fd = open_regular(name, dir_fd=folder_fd)
+        finally:
+            os.close(folder_fd)
     except FileNotFoundError:
         return None
     except OSError:
