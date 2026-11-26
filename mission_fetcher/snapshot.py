@@ -727,6 +727,11 @@ FUTURE_SKEW = timedelta(minutes=5)
 # failing (A5b; Codex's reviews of 05062fc to 28d71fe; owner's decision, 2026-11-25).
 
 
+def _obj_or_none(value: Any) -> dict:
+    """The object, or an empty one for anything else."""
+    return value if isinstance(value, dict) else {}
+
+
 def _checks(
     pr: dict,
     head: str,
@@ -777,11 +782,22 @@ def _checks(
             or suites.get("nodes") != []
         ):
             complete = False
-    commits = _list(_obj(pr.get("commits")).get("nodes"))
+    # A test merge commit with results of its own is read even when the head's row can't be:
+    # a failure in it is never lost (Fable's pre-review of 619b757).
+    merge_results = isinstance(merge, dict) and (
+        bool(_obj_or_none(merge.get("checkSuites")).get("nodes"))
+        or bool(_obj_or_none(merge.get("status")).get("contexts"))
+    )
+    try:
+        commits = _list(_obj(pr.get("commits")).get("nodes"))
+    except FetchError:
+        if not merge_results:
+            raise
+        commits, complete = [], False
     # Exactly the head: an open pull request always has one, and asked for the last one, GitHub
     # gives one row (pre-review of 07c3480: none read as "no checks", a second was ignored).
     if len(commits) != 1:
-        if not commits:
+        if not commits and not merge_results:
             return [], False
         complete = False
     # Every row naming the head is read, wherever it is: its failures still count (Codex's
@@ -796,8 +812,10 @@ def _checks(
             continue
         if oid == head:
             heads.append(commit)
-    if not heads:
+    if not heads and not merge_results:
         raise _Incomplete()  # results for another commit: none of them apply
+    if not heads:
+        complete = False
     if len(heads) > 1:
         complete = False
     if isinstance(merge, dict):

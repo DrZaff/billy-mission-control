@@ -218,6 +218,7 @@ class Refresh(Base):
             (None, "UNKNOWN", False),
             (None, "CONFLICTING", True),
             (clean, "MERGEABLE", True),
+            (clean, "CONFLICTING", False),  # GitHub gives none then: odd, so not known
             (with_status, "MERGEABLE", False),
             (with_suite, "MERGEABLE", False),
         ):
@@ -253,15 +254,9 @@ class Refresh(Base):
         def odd(merge):
             merge["checkSuites"]["totalCount"] = 0  # yet a failing suite below
 
-        for spoil in (odd, lambda m: m.update(status=5), lambda m: m.update(oid="zz")):
-            node = pr_node(1, issue=issue_node(10))
-            merge = json.loads(json.dumps(dict(node["commits"]["nodes"][0]["commit"], oid=SHA2)))
-            merge["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][0]["conclusion"] = "FAILURE"
-            spoil(merge)
-            node["potentialMergeCommit"] = merge
-            self.fake.prs[REPO_A]["open"][0] = node
-            flags = tasks.derive(self.reviewed(self.run_refresh()["items"][0])).flags
-            self.assertIn(tasks.Flag.CHECKS_FAILING, flags)
+        for i, spoil in enumerate((odd, lambda m: m.update(status=5), lambda m: m.update(oid="z"))):
+            with self.subTest(spoil=i):
+                self.spoiled_merge_commit_fails(spoil)
         # Present, but GitHub not yet sure it is mergeable: not known either.
         for mergeable in ("UNKNOWN", None):
             node = pr_node(1, issue=issue_node(10))
@@ -271,6 +266,63 @@ class Refresh(Base):
             self.assertFalse(pull.get("checks_complete", True))
         # An error on `mergeable` leaves out its piece, never the whole pull request.
         self.assertEqual(snapshot._piece("mergeable"), "potentialMergeCommit")
+
+    def failing_merge_commit(self):
+        node = pr_node(1, issue=issue_node(10))
+        merge = json.loads(json.dumps(dict(node["commits"]["nodes"][0]["commit"], oid=SHA2)))
+        merge["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][0]["conclusion"] = "FAILURE"
+        node["potentialMergeCommit"] = merge
+        return node, merge
+
+    def spoiled_merge_commit_fails(self, spoil=lambda merge: None, github=None):
+        node, merge = self.failing_merge_commit()
+        self.fake.prs[REPO_A]["open"][0] = node
+        spoil(merge)
+        item = snapshot.refresh(self.cfg, github or client(self.fake), NOW)["items"][0]
+        self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
+        self.assertIn(tasks.Flag.CHECKS_FAILING, tasks.derive(self.reviewed(item)).flags)
+
+    def test_the_test_merge_commits_failure_counts_when_the_heads_row_cant(self):
+        # Fable's pre-review of 619b757: it was lost when the head's row couldn't be used.
+        other = {"commit": {"oid": SHA2, "status": None, "checkSuites": {"totalCount": 0}}}
+        for rows in ([None], [], [other]):
+            with self.subTest(rows=rows):
+
+                def spoil(merge, rows=rows):
+                    self.fake.prs[REPO_A]["open"][0]["commits"]["nodes"] = rows
+
+                self.spoiled_merge_commit_fails(spoil)
+        with self.subTest(rows="errored"):
+            self.spoiled_merge_commit_fails(github=self.with_field_errors({1: ["commits"]}))
+
+    def test_an_error_inside_the_test_merge_commit_keeps_what_github_gave(self):
+        real = self.fake.__call__
+        where = ["potentialMergeCommit", "checkSuites", "nodes", 0, "app"]
+
+        def call(method, path, headers, body):
+            status, h, data = real(method, path, headers, body)
+            if path == "/graphql" and b"pullRequest(number:" in body:
+                answer = json.loads(data)
+                node = answer["data"]["repository"]["p0"]
+                suites = (node or {}).get("potentialMergeCommit", {}).get("checkSuites", {})
+                if suites.get("nodes"):  # only the pull request whose merge commit has a suite
+                    suites["nodes"][0]["app"] = None
+                    answer["errors"] = [{"type": "X", "path": ["repository", "p0", *where]}]
+                    data = json.dumps(answer).encode()
+            return status, h, data
+
+        github = gh.GitHub(APP_ID, KEY, transport=call, clock=lambda: NOW.timestamp())
+        self.spoiled_merge_commit_fails(github=github)
+
+    def test_an_error_on_mergeable_leaves_the_pull_request_readable(self):
+        for github in (
+            self.with_field_errors({1: ["mergeable"]}),
+            self.nulled_once({1}, [["mergeable"]]),
+        ):
+            self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10))
+            item = snapshot.refresh(self.cfg, github, NOW)["items"][0]
+            self.assertIsNotNone(item["task"])
+            self.assertFalse(item["task"]["pull_request"].get("checks_complete", True))
 
     def test_a_commit_status_can_only_add_caution(self):
         for checks, statuses, flag in (
@@ -3436,7 +3488,7 @@ class PreReviewOf6b7da87(PreReviewOf07c3480):
         node["potentialMergeCommit"] = {
             "oid": SHA1,
             "status": None,
-            "checkSuites": {"totalCount": 0},
+            "checkSuites": {"totalCount": 0, "nodes": []},
         }
         self.checks_partial(node)  # the test merge commit can't be the head
         node["potentialMergeCommit"]["oid"] = snapshot.VANISHED  # nor "gone" (Codex, 34ad21c)
