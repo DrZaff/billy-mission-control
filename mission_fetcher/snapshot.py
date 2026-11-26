@@ -188,6 +188,8 @@ def _piece(field) -> str | None:
         return None
     if REVIEW_ALIAS.fullmatch(field):
         return "reviews"
+    if field == "mergeable":
+        return "potentialMergeCommit"  # asked for with it (Fable's pre-review of 7f24519)
     return field if field in PIECES else None
 
 
@@ -259,7 +261,7 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
     for path in error.paths:
         alias = path[1]
         field = path[2] if len(path) > 2 else None
-        if field in ("files", "commits") and len(path) > 3:
+        if field in ("files", "commits", "potentialMergeCommit") and len(path) > 3:
             deep.setdefault(alias, set()).add(field)
         if field == "files" and len(path) > 3:
             # An error inside one file's entry: GitHub nulled it, and the paths it did give are
@@ -267,7 +269,7 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
             # partial, never complete (Codex's reviews of c5adbba and 96a9e17).
             deep_files.add(alias)
             continue
-        if field == "commits" and len(path) > 3:
+        if field in ("commits", "potentialMergeCommit") and len(path) > 3:
             # An error inside the checks: what GitHub did give is kept, marked partial, so a
             # failure it reported still counts; nothing in it can pass (Fable's pre-review of
             # 4945de9: a failing check vanished).
@@ -748,24 +750,32 @@ def _checks(
     # they never pass on their own (Codex's reviews of 23bfb61 and 521361b).
     if "potentialMergeCommit" not in pr:
         complete = False  # left out by a retry: never read as "no test merge commit" (42a3721)
-    merge, merge_row = pr.get("potentialMergeCommit"), None
-    if merge is None and pr.get("mergeable") != "CONFLICTING":
-        # Null while GitHub is still generating it: its results may yet differ. Only a pull
-        # request with conflicts has none to wait for (Codex's review of 521361b).
+    merge, mergeable = pr.get("potentialMergeCommit"), pr.get("mergeable")
+    if merge is None and mergeable != "CONFLICTING":
+        # Null while GitHub is still generating it (often until the next refresh after a push
+        # to the base): its results may yet differ. Only a pull request with conflicts has none
+        # to wait for (Codex's review of 521361b).
         complete = False
-    elif merge is not None:
+    if merge is not None:
+        # Whatever it says, it is read like the head's below, so a failure in it is never lost.
+        # Only a mergeable one with no results at all, said plainly, leaves the list whole.
+        status = merge.get("status") if isinstance(merge, dict) else 0
+        suites = merge.get("checkSuites") if isinstance(merge, dict) else None
+        total = suites.get("totalCount") if isinstance(suites, dict) else None
         try:
-            merge = _obj(merge)
-            if _sha(merge.get("oid")) in (head, VANISHED):
+            if _sha(_obj(merge).get("oid")) in (head, VANISHED):
                 complete = False  # never the head (6b7da87), nor "gone" (Codex, 34ad21c)
-            if "status" not in merge:
-                complete = False  # left out: not known, never "no statuses" (Codex, a34154f)
-            merge_status = merge.get("status")
-            if (merge_status is not None and _list(_obj(merge_status).get("contexts"))) or _int(
-                _obj(merge.get("checkSuites")).get("totalCount")
-            ) > 0:
-                complete, merge_row = False, merge
         except FetchError:
+            complete = False
+        if (
+            not isinstance(merge, dict)
+            or mergeable != "MERGEABLE"
+            or "status" not in merge  # left out: never "no statuses" (Codex, a34154f)
+            or not (status is None or (isinstance(status, dict) and status.get("contexts") == []))
+            or type(total) is not int
+            or total != 0
+            or suites.get("nodes") != []
+        ):
             complete = False
     commits = _list(_obj(pr.get("commits")).get("nodes"))
     # Exactly the head: an open pull request always has one, and asked for the last one, GitHub
@@ -788,10 +798,10 @@ def _checks(
             heads.append(commit)
     if not heads:
         raise _Incomplete()  # results for another commit: none of them apply
-    if merge_row is not None:
-        heads.append(merge_row)
     if len(heads) > 1:
         complete = False
+    if isinstance(merge, dict):
+        heads.append(merge)  # the test merge commit's results, read like the head's
     run_ids: set[str] = set()
     suites: list = []
     for commit in heads:

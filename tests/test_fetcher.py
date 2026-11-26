@@ -208,7 +208,7 @@ class Refresh(Base):
                 self.assertIn(flag, tasks.derive(self.reviewed(item)).flags)
 
     def test_results_on_the_test_merge_commit_leave_the_checks_out(self):
-        clean = {"oid": SHA2, "status": None, "checkSuites": {"totalCount": 0}}
+        clean = {"oid": SHA2, "status": None, "checkSuites": {"totalCount": 0, "nodes": []}}
         with_status = dict(clean, status={"contexts": [{"context": "ci/other"}]})
         with_suite = dict(clean, checkSuites={"totalCount": 1})
         for merge, mergeable, has_checks in (
@@ -246,6 +246,31 @@ class Refresh(Base):
                 flags = tasks.derive(self.reviewed(item)).flags
                 self.assertIn(getattr(tasks.Flag, flag), flags)
                 self.assertNotIn(tasks.Flag.CHECKS_PASSED, flags)
+
+    def test_a_test_merge_commit_that_contradicts_itself_never_hides_its_failure(self):
+        # Fable's pre-review of 7f24519: a zero count over a failing suite passed, and any odd
+        # field dropped the failure. Whatever it says, its runs are read.
+        def odd(merge):
+            merge["checkSuites"]["totalCount"] = 0  # yet a failing suite below
+
+        for spoil in (odd, lambda m: m.update(status=5), lambda m: m.update(oid="zz")):
+            node = pr_node(1, issue=issue_node(10))
+            merge = json.loads(json.dumps(dict(node["commits"]["nodes"][0]["commit"], oid=SHA2)))
+            merge["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][0]["conclusion"] = "FAILURE"
+            spoil(merge)
+            node["potentialMergeCommit"] = merge
+            self.fake.prs[REPO_A]["open"][0] = node
+            flags = tasks.derive(self.reviewed(self.run_refresh()["items"][0])).flags
+            self.assertIn(tasks.Flag.CHECKS_FAILING, flags)
+        # Present, but GitHub not yet sure it is mergeable: not known either.
+        for mergeable in ("UNKNOWN", None):
+            node = pr_node(1, issue=issue_node(10))
+            node["mergeable"] = mergeable
+            self.fake.prs[REPO_A]["open"][0] = node
+            pull = self.run_refresh()["items"][0]["task"]["pull_request"]
+            self.assertFalse(pull.get("checks_complete", True))
+        # An error on `mergeable` leaves out its piece, never the whole pull request.
+        self.assertEqual(snapshot._piece("mergeable"), "potentialMergeCommit")
 
     def test_a_commit_status_can_only_add_caution(self):
         for checks, statuses, flag in (
@@ -3858,7 +3883,11 @@ class SweepOf160cc5a(Base):
             checks=("lint", "test", "docs"),
             reviews=(review_node(),),
             statuses=(("lint", "SUCCESS"),),
-            merge_commit={"oid": SHA2, "status": None, "checkSuites": {"totalCount": 0}},
+            merge_commit={
+                "oid": SHA2,
+                "status": None,
+                "checkSuites": {"totalCount": 0, "nodes": []},
+            },
         )
         mine = node["commits"]["nodes"][0]["commit"]["checkSuites"]
         failed = dict(mine["nodes"][0]["checkRuns"]["nodes"][2], conclusion="FAILURE")
