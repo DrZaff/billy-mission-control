@@ -23,7 +23,15 @@ from mission_control.stopper import TIMEOUT, LineLog, _read_request, log_line, p
 
 from .config import FetcherConfig
 from .github import STOPPING, FetchError, GitHub, load_key
-from .snapshot import SNAPSHOT, STATUS, open_regular, read_json, refresh, write_json
+from .snapshot import (
+    SNAPSHOT,
+    STATUS,
+    open_folder,
+    open_regular,
+    read_json,
+    refresh,
+    write_json,
+)
 
 REQUEST = b"REFRESH\n"
 OK = b"ok\n"
@@ -144,12 +152,11 @@ class Refresher:
         held for the whole refresh keeps the service and `fetch-now` from running at once, and
         the attempt is recorded before any network work, so neither a second process nor a
         restart mid-refresh gets round the floor (Codex's review of f772122)."""
-        # The folder is opened first, without following a symlink, and the lock made inside
-        # it: O_NOFOLLOW on a full path guards only its last part.
-        folder_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        # The folder is opened first, following no symlink anywhere on its path (open_folder),
+        # and the lock made inside it.
         flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
         try:
-            folder = os.open(self.cfg.snapshot_dir, folder_flags)
+            folder = open_folder(self.cfg.snapshot_dir)
             try:
                 lock = os.open(LOCK, flags, 0o600, dir_fd=folder)
             finally:

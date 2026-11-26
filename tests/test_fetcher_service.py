@@ -37,6 +37,7 @@ from tests.fetcher_fixtures import (
     FakeGitHub,
     client,
     config_data,
+    make_cfg,
 )
 
 # ---------------------------------------------------------------- config
@@ -337,6 +338,16 @@ class RefresherFiles(Base):
         os.symlink(elsewhere, self.cfg.snapshot_dir)
         self.assertEqual(self.make(lambda: NOW.timestamp()).run(), b"failed:write\n")
         self.assertEqual(os.listdir(elsewhere), [])
+
+    def test_a_symlink_higher_up_the_snapshot_folders_path_is_never_followed(self):
+        # Codex's review of 64a78bd: O_NOFOLLOW on a full path guards only its last part.
+        real = self.base / "real"
+        real.mkdir()
+        os.rename(self.cfg.snapshot_dir, real / "snapshot")
+        os.symlink(real, self.base / "via")
+        self.cfg = make_cfg(self.base, snapshot_dir=str(self.base / "via" / "snapshot"))
+        self.assertEqual(self.make(lambda: NOW.timestamp()).run(), b"failed:write\n")
+        self.assertEqual(os.listdir(real / "snapshot"), [])
 
     def test_a_surprise_fails_the_refresh_not_the_service(self):
         def broken(cfg):
