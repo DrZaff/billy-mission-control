@@ -3817,6 +3817,9 @@ class PreReviewOf07c3480(CodexReviewOf099ef9b):
         )
         flags = tasks.derive(dict(item["task"], paused=False)).flags
         self.assertNotIn(tasks.Flag.CLINICIAN_APPROVED, flags)
+        # Both read, so the answer is the model's, never reviews dropped (Codex, 34ad21c).
+        states = sorted(r["state"] for r in item["task"]["pull_request"]["reviews"])
+        self.assertEqual(states, ["APPROVED", "CHANGES_REQUESTED"])
         for odd in ("20261123T000000Z", "2026-W48-1T00:00:00+00:00", "2026-11-23T00:00:00"):
             with self.subTest(odd=odd), self.assertRaises(gh.FetchError):
                 snapshot._time(odd)
@@ -3932,6 +3935,11 @@ class PreReviewOf07c3480(CodexReviewOf099ef9b):
                 "closed": {"nodes": rows, "pageInfo": {"hasNextPage": True, "endCursor": "c"}},
             }
         }
+        self.assertTrue(snapshot._listing(REPO_A, data, NOW)[1])
+        # Even as the last page, as is one with a time that can't be (Codex, 34ad21c).
+        data["repository"]["closed"]["pageInfo"]["hasNextPage"] = False
+        self.assertTrue(snapshot._listing(REPO_A, data, NOW)[1])
+        rows[:] = [{"number": 2, "closedAt": recent, "updatedAt": old}]
         self.assertTrue(snapshot._listing(REPO_A, data, NOW)[1])
 
     # ---- actors
@@ -4097,6 +4105,8 @@ class PreReviewOf6b7da87(PreReviewOf07c3480):
             "checkSuites": {"totalCount": 0},
         }
         self.checks_partial(node)  # the test merge commit can't be the head
+        node["potentialMergeCommit"]["oid"] = snapshot.VANISHED  # nor "gone" (Codex, 34ad21c)
+        self.checks_partial(node)
         node = pr_node(1, issue=issue_node(10))
         suites = node["commits"]["nodes"][0]["commit"]["checkSuites"]
         other = json.loads(json.dumps(suites["nodes"][0]))

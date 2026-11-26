@@ -771,8 +771,8 @@ def _checks(
     if merge is not None:
         try:
             merge = _obj(merge)
-            if _sha(merge.get("oid")) == head:
-                complete = False  # the test merge commit can't be the head (6b7da87)
+            if _sha(merge.get("oid")) in (head, VANISHED):
+                complete = False  # never the head (6b7da87), nor "gone" (Codex, 34ad21c)
             if "status" not in merge:
                 complete = False  # left out: not known, never "no statuses" (Codex, a34154f)
             merge_status = merge.get("status")
@@ -1405,9 +1405,13 @@ def _closed_page(
     # 6b7da87).
     # GitHub fills a page before it says more follow: a short one is doubtful too (pre-review
     # of 8c4bfec), and so is one with more rows than asked for, whatever it says.
-    doubtful = (has_next and (disordered or impossible or len(nodes) != MAX_CLOSED)) or len(
-        nodes
-    ) > MAX_CLOSED
+    # Out of order or impossible, even the last page is doubtful (Codex's review of 34ad21c).
+    doubtful = (
+        disordered
+        or impossible
+        or (has_next and len(nodes) != MAX_CLOSED)
+        or len(nodes) > MAX_CLOSED
+    )
     if has_next and (last_in_window or doubtful):
         cursor = info.get("endCursor")
         if not isinstance(cursor, str) or not 0 < len(cursor) <= 512:
