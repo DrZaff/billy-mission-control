@@ -3,24 +3,20 @@
 Each item carries the task model's input (`mission_control.tasks`), built only from fields this
 module checks, plus the title and links the screens show. Everything from GitHub is untrusted:
 - only the expected shapes are accepted: a wrongly shaped list or installation answer fails the
-  refresh ("bad-response"); a wrongly shaped detail answer, or one pull request's wrongly shaped
-  data, makes only those items unreadable (task null, shown as UNKNOWN), never calm;
-- text is cleaned (no control characters) and capped; links are built here from the repository
-  and number, never taken from GitHub's answer;
-- where a part of GitHub's answer is incomplete (more files, reviews, checks or label events than
-  one request returns, a partial error, a lite read), that part is written as "not known": null,
-  or a list marked partial (files_complete or checks_complete false). The model never reads it
-  as clean; it shows the part as not verified. Nothing here decides a state: `tasks.derive`
-  does, in the web app.
+  refresh ("bad-response"); wrongly shaped data of one pull request makes only that item
+  unreadable (task null, shown as UNKNOWN), never calm;
+- text is cleaned and capped; links are built here, never taken from GitHub's answer;
+- a part of the answer that is incomplete (more rows than one request returns, a partial error,
+  a lite read) is written as "not known": null, or a list marked partial (files_complete or
+  checks_complete false), which the model shows as not verified. Nothing here decides a
+  state: `tasks.derive` does, in the web app.
 
-One key the model needs is left for the web app (phase A5b): `paused`, which it reads from the
-stop marker itself. `runs` is null, "not read": phase A5 starts with GitHub data only (issue
-#15, 2026-11-24), and an empty list would claim no review ever happened.
+`paused` is left for the web app (A5b), which reads the stop marker itself. `runs` is null, "not
+read" (issue #15, 2026-11-24): an empty list would claim no review ever happened.
 
 Each item's `checks_fresh_until` is when its first counted pass stops being fresh (GitHub needs
-one within seven days). After that time the web app must count none of the item's passes: its
-checks are then not verified, and a failure still fails (A5b; Codex's review of 1e0f9b0). A
-snapshot is read long after it is written, so freshness is judged when it is read.
+one within seven days). After it the web app must count none of the item's passes, and a failure
+still fails (A5b; Codex's review of 1e0f9b0): freshness is judged when the snapshot is read.
 """
 
 from __future__ import annotations
@@ -58,11 +54,10 @@ MAX_EVENTS = 100
 MAX_TITLE = 200
 MAX_TEXT = 255
 MAX_SNAPSHOT = 2 * 1024 * 1024
-# Bytes of file paths kept per pull request, measured as written (JSON escapes, Codex's review
-# of 72607b3); past it the list is cut to one known clinical path, or else "not known" (see
-# `_compact`). If the whole snapshot is still over its limit, the largest lists are cut the
-# same way until it fits (see `_fit`), so pull requests anyone can open never stop every
-# refresh (pre-review of 9537b08).
+# Bytes of file paths kept per pull request, as written (JSON escapes, Codex's review of
+# 72607b3); past it the list is cut to one known clinical path, or else "not known"
+# (`_compact`). A snapshot still over its limit is cut further (`_fit`), so pull requests
+# anyone can open never stop every refresh (pre-review of 9537b08).
 MAX_PATH_BYTES = 16 * 1024
 MAX_KEPT_PATH = 512  # a clinical path kept in a cut list, as written
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -99,11 +94,10 @@ CHECK_CONCLUSIONS = frozenset(
     }
 )
 
-# One small request lists each repository's pull requests; their details come in batches, so no
-# answer, however large the pull requests, can exceed the transport's limit and stop every
-# refresh (Codex's review of 877fd21). A batch that is too large is split in half, down to one
-# pull request, and one still too large is read without its files, reviews and checks, which
-# are then "not known".
+# One small request lists each repository's pull requests; their details come in batches, so
+# no answer can exceed the transport's limit and stop every refresh (Codex's review of
+# 877fd21). A batch too large is split in half, down to one pull request, and one still too
+# large is read without its files, reviews and checks: "not known".
 LIST_QUERY = Template("""
 query($$owner: String!, $$name: String!) {
   repository(owner: $$owner, name: $$name) {
@@ -153,15 +147,13 @@ def _on_time(deadline: float | None) -> None:
 
 
 # Failures that may mean the query was too heavy, not that GitHub is down: the batch is split
-# (Codex's review of 28546f5: GitHub can stop a costly query by time or resources, before the
-# answer reaches the size cap). A lone pull request whose lite read or retry is still too heavy
-# is read with its core only (Codex's review of 099ef9b); if even that fails, or the request
-# budget runs out ("over-budget"), the refresh fails with GitHub's own error.
+# (Codex's review of 28546f5). A lone pull request still too heavy lite or on retry is read by
+# its core only (Codex's review of 099ef9b); if even that fails, or the request budget runs out
+# ("over-budget"), the refresh fails with GitHub's own error.
 HEAVY = {"too-large", "too-heavy", "timeout", "http-502", "http-503", "http-504"}
-# Failures of one pull request's own data: GitHub's error on a field, or an answer of the wrong
-# shape. The batch is split down to that pull request, which is then shown as unreadable
-# (UNKNOWN, an alert) instead of failing the refresh for every repository (Codex's review of
-# de9a6fb).
+# Failures of one pull request's own data: GitHub's error on a field, or a wrongly shaped
+# answer. The batch is split down to that pull request, which is shown as unreadable (UNKNOWN,
+# an alert) instead of failing the refresh for every repository (Codex's review of de9a6fb).
 ITS_OWN = {"graphql-error", "bad-response"}
 
 
@@ -183,9 +175,8 @@ def _its_own(error: FetchError, size: int) -> bool:
 
 
 # The parts of a pull request the model can do without: each is "not known" (null) when it
-# can't be read, and the rest is still judged. Every other field is needed to judge the pull
-# request at all. When GitHub's error is on one of these, only that part is not known (Codex's
-# review of c3ee86b: the whole pull request became unreadable, hiding a known unsafe merge).
+# can't be read, GitHub's error on it included, and the rest is still judged (Codex's review
+# of c3ee86b: the whole pull request became unreadable, hiding a known unsafe merge).
 REVIEW_ALIAS = re.compile(r"rv\d{1,2}")
 
 
@@ -200,8 +191,7 @@ def _piece(field) -> str | None:
 
 class _Errored:
     """Stands where GitHub reported an error: no shape check accepts it, so that part is "not
-    known". GitHub's own value there is null, which would read as none: no files, no result
-    on the test merge commit, no linked issue."""
+    known". GitHub's own null there would read as none: no files, no linked issue."""
 
 
 ERRORED = _Errored()
@@ -210,8 +200,7 @@ ERRORED = _Errored()
 class Retry:
     """A pull request GitHub nulled whole for an error on an optional field (a non-null one,
     such as its title, nulls its parent): asked for again without just those pieces, then with
-    the core fields only, so what is known is still judged (Codex's review of 8152df0; Fable's
-    pre-review of 4945de9: it went straight to the core)."""
+    the core fields only (Codex's review of 8152df0; Fable's pre-review of 4945de9)."""
 
     def __init__(self, pieces: frozenset):
         self.pieces = pieces
@@ -253,9 +242,9 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
     request itself, makes that pull request UNREADABLE. GitHub nulls the nearest field that
     may be null, at or above the error's place, so the whole part is distrusted, never only
     the place named (Codex's review of c3ee86b)."""
-    if not _its_own(error, len(batch)) or error.code != "graphql-error":
+    if not _its_own(error, len(batch)):
         return None
-    data = error.data
+    data = error.data  # none for a wrongly shaped answer
     repository = data.get("repository") if isinstance(data, dict) else None
     if not isinstance(repository, dict):
         return None
@@ -271,9 +260,9 @@ def _partial(error: FetchError, batch: list[int], lite: bool) -> list | None:
         if field in ("files", "commits") and len(path) > 3:
             deep.setdefault(alias, set()).add(field)
         if field == "files" and len(path) > 3:
-            # An error inside one file's entry: GitHub nulled that entry, and the paths it did
-            # give are kept, so a clinical one among them is still found (clinical_known), but
-            # the list is marked partial, never complete (Codex's reviews of c5adbba and 96a9e17).
+            # An error inside one file's entry: GitHub nulled it, and the paths it did give are
+            # kept, so a clinical one is still found (clinical_known); the list is marked
+            # partial, never complete (Codex's reviews of c5adbba and 96a9e17).
             deep_files.add(alias)
             continue
         if field == "commits" and len(path) > 3:
@@ -467,11 +456,10 @@ def _distinct(nodes: list) -> bool:
     """Whether no row repeats another. A repeated row may stand where GitHub omitted one (a
     changes request, a label's removal, a failing check), so a counted list with a repeat is
     never whole (Codex's review of caf31c9). Rows are told apart by GitHub's own node id, so
-    two real rows that look alike are never taken for a repeat (Codex's review of 0dc0f8b)."""
+    two real rows that look alike are no repeat (Codex's review of 0dc0f8b)."""
 
-    # Every row is asked for its id, and GitHub always gives one: a row without one (or with
-    # an odd one) is never compared by its content, which a copy of an id'd row would pass
-    # (Codex's review of 2084eb4).
+    # GitHub always gives a row's id: a row without one (or with an odd one) is never compared
+    # by its content, which a copy of an id'd row would pass (Codex's review of 2084eb4).
     ids = [n.get("id") if isinstance(n, dict) else None for n in nodes]
     if not all(isinstance(i, str) and 0 < len(i) <= 200 for i in ids):
         return False
@@ -495,8 +483,7 @@ def _int(value: Any) -> int:
 
 def _str(value: Any, limit: int = MAX_TEXT) -> str:
     """Untrusted text, cleaned: no control, format (direction-changing, zero-width) or lone
-    surrogate characters, capped (Fable's pre-review of 8152df0: U+200E, zero-width and C1
-    characters, and lone surrogates, which can't be written as UTF-8, got through)."""
+    surrogate characters, capped (Fable's pre-review of 8152df0)."""
     if not isinstance(value, str):
         raise _bad()
     text = CONTROL.sub(" ", value)
@@ -505,11 +492,10 @@ def _str(value: Any, limit: int = MAX_TEXT) -> str:
 
 
 def _exact(value: Any, limit: int = MAX_TEXT) -> str:
-    """A value the model matches (a label, a check, a branch name): kept exactly as GitHub
-    gives it, never cleaned, because cleaning can turn one name into another (Codex's reviews of
-    f772122 and 1cc6cf8: a cleaned label could become the authorisation label, a cleaned check
-    name a required one). Only text that is shown is cleaned (_str). Anything that isn't a
-    plain, bounded string leaves its part out, so the model shows UNKNOWN."""
+    """A value the model matches (a label, a branch name): kept exactly as GitHub gives it,
+    never cleaned, because cleaning can turn one name into another (Codex's reviews of f772122
+    and 1cc6cf8: a cleaned label could become the authorisation label). Only text that is
+    shown is cleaned (_str). Anything but a plain, bounded string leaves its part out."""
     if not isinstance(value, str) or not 0 < len(value) <= limit or "\x00" in value:
         raise _Incomplete()
     try:
@@ -539,8 +525,6 @@ def _time(value: Any) -> str:
         parsed = datetime.fromisoformat(value)
     except ValueError:
         raise _bad() from None
-    if parsed.tzinfo is None:
-        raise _bad()
     try:
         return parsed.astimezone(UTC).replace(microsecond=0).isoformat()
     except OverflowError:
@@ -576,12 +560,11 @@ def _connection(value: Any, limit: int, counted: bool = True) -> list:
 
 def _files(pr: dict, clinical_paths: tuple[str, ...]) -> tuple[list[str] | None, bool]:
     """(the changed paths exactly as GitHub gives them, whether the list is complete). They are
-    only matched against the clinical patterns, never shown, so cleaning them could only make
-    two paths look alike and let a clinical one slip past its rule (Codex's review of f772122).
-    A renamed or copied file is listed by its new path only, so a move out of a clinical folder
-    would hide where it came from (f37d0c7); a list cut off at one request is partial too. Such
-    a list is kept, marked incomplete: its known clinical paths still count (3f7d3c2), and the
-    rest may be clinical. A path that isn't a plain, bounded string makes the list unknown."""
+    only matched against the clinical patterns, never shown, and cleaning them could let a
+    clinical one slip past its rule (Codex's review of f772122). A renamed or copied file is
+    listed by its new path only (f37d0c7), and a list may be cut off: such a list is kept,
+    marked incomplete, its known clinical paths still counting (3f7d3c2). A path that isn't a
+    plain, bounded string makes the list unknown."""
     conn = _obj(pr.get("files"))
     nodes = _list(conn.get("nodes"))
     complete = _int(conn.get("totalCount")) == len(nodes) and not pr.get("__files_partial__")
@@ -671,18 +654,15 @@ def _reviews(
     now: datetime | None = None,
 ) -> list[dict]:
     """The clinicians' reviews, the only ones the model reads, one connection per clinician
-    (`rv<i>`). A part missing or cut off makes the reviews "not known". Each review is first
-    placed in time, and one submitted after a merge is skipped before anything else about it is
-    checked (Codex's reviews of 84df535 and 5d06878). GitHub gives a review's current state with
-    the time it was submitted, so when a review was dismissed isn't known: every review is
-    kept, and the model decides "not known" only when its verdict depends on one (audit of
-    42a3721: dropping them all hid a changes request in force at the merge). A review of a
-    vanished commit is kept as one that is never the head."""
+    (`rv<i>`); one missing or cut off makes the reviews "not known". Each review is first
+    placed in time, and one submitted after a merge is skipped before anything else about it
+    is checked (Codex's reviews of 84df535 and 5d06878). GitHub doesn't say when a review was
+    dismissed: every review is kept, and the model decides (audit of 42a3721: dropping them
+    hid a changes request in force at the merge). A review of a vanished commit is kept as one
+    that is never the head."""
     out = []
     ids: set[str] = set()
     for i, login in enumerate(clinicians):
-        if f"rv{i}" not in pr:
-            raise _Incomplete()
         for node in _connection(pr.get(f"rv{i}"), MAX_REVIEWS):
             n = _obj(node)
             # One review in two clinicians' lists may stand for an omitted one (pre-review of
@@ -695,17 +675,15 @@ def _reviews(
                 # An App never sees another user's draft review: one here is a surprise, and
                 # the reviews are not known (Codex's review of b03ad71; pre-review of 6b7da87).
                 raise _Incomplete()
-            submitted = n.get("submittedAt")
-            if submitted is None:
-                raise _Incomplete()  # a review that can't be placed in time: no guess
+            submitted = n.get("submittedAt")  # none: it can't be placed in time, so not known
             at = _placed(_time(submitted), now)
             if merged_at is not None and at > merged_at:
                 continue  # after the merge: skipped before anything else (audit of 0585599)
             author = n.get("author")
-            # GitHub filtered by author, and logins are case-insensitive: anything else in this
-            # clinician's own connection (no author, a deleted account, a bot, a kind GitHub
-            # didn't say) is a surprise, never "someone else": the reviews are not known
-            # (Codex's reviews of 07c05d4 and 322b659: skipping one could hide a changes request).
+            # GitHub filtered by author, and logins ignore case: anything else in this
+            # clinician's own connection (no author, a deleted account, a bot, another login)
+            # is a surprise, never "someone else": the reviews are not known (Codex's reviews
+            # of 07c05d4 and 322b659: skipping one could hide a changes request).
             if not isinstance(author, dict) or author.get("__typename") != "User":
                 raise _Incomplete()
             seen = author.get("login")
@@ -735,10 +713,9 @@ CHECK_FRESH = timedelta(days=7)
 # A result dated later than this after the refresh is wrongly dated, not fresh: it would pass
 # for longer than seven days (Codex's review of 9650d02). A few minutes allow for clock drift.
 FUTURE_SKEW = timedelta(minutes=5)
-# Freshness changes with time, and a snapshot is read long after it is written: each item says
-# when its counted passes stop being fresh (checks_fresh_until), and a reader counts none of
-# them after that, failures still failing (A5b). The time a snapshot takes to be written then
-# never matters (Codex's reviews of 05062fc to 28d71fe; owner's decision, 2026-11-25).
+# A snapshot is read long after it is written: each item says when its counted passes stop
+# being fresh (checks_fresh_until), and a reader counts none of them after that, failures still
+# failing (A5b; Codex's reviews of 05062fc to 28d71fe; owner's decision, 2026-11-25).
 
 
 def _checks(
@@ -750,13 +727,12 @@ def _checks(
     expiry: list | None = None,
 ) -> tuple[list[dict], bool]:
     """(the head commit's results for the required check names, whether they are complete).
-    Check runs from the configured app only: a same-named run from any other app can never
-    satisfy a required check (Codex's review of bf76866). Whatever can't be read whole makes
-    the list partial, never empty: a failure GitHub did report is kept, since any failure
-    fails a check, and a partial list never passes (Fable's pre-review of 4945de9: a failing
-    check vanished whenever the reading was degraded). Names that aren't required are passed
-    over before anything else about them is read. Each pass counted adds the time it stops
-    being fresh to `expiry`."""
+    Check runs from the configured app only: another app's same-named run never satisfies a
+    required check (Codex's review of bf76866). Whatever can't be read whole makes the list
+    partial, never empty: a failure GitHub did report is kept, and a partial list never passes
+    (Fable's pre-review of 4945de9). Names that aren't required are passed over before
+    anything else about them is read. Each pass counted adds the time it stops being fresh to
+    `expiry`."""
     expiry = [] if expiry is None else expiry
     complete = not pr.get("__checks_partial__")
     out: list[dict] = []
@@ -786,10 +762,8 @@ def _checks(
         if not commits:
             return [], False
         complete = False
-    # The head's own row, wherever it is: with several, a later one may be the head, and its
-    # failures still count (Codex's review of cc29d6e).
-    # Every row naming the head is read, and a malformed sibling only makes the list partial:
-    # it never stops the head's own row being read (Codex's review of 2084eb4).
+    # Every row naming the head is read, wherever it is: its failures still count (Codex's
+    # review of cc29d6e), and a malformed sibling only makes the list partial (2084eb4).
     heads = []
     for row in commits:
         try:
@@ -838,9 +812,9 @@ def _checks(
             suite_app is not None and not (isinstance(slug, str) and APP_SLUG.fullmatch(slug))
         )
         if unknown or (suite_app is None and not _provably_no_required(suite, required)):
-            # Left out, wrongly shaped or not a slug (28009de, 42a3721, 9044492), or null (as a
-            # GraphQL error leaves it) with runs that may be required ones (d99b49a): not
-            # known, yet read as the configured app's, so a failure in it still fails (0f323f6).
+            # Left out, wrongly shaped or not a slug (28009de, 42a3721, 9044492), or null with
+            # runs that may be required ones (d99b49a): not known, yet read as the configured
+            # app's, so a failure in it still fails (0f323f6).
             complete = False
             suite_app, slug = {}, app
         if slug != "github-actions" and suite.get("workflowRun", 0) is not None:
@@ -852,8 +826,8 @@ def _checks(
                 continue
         if suite_app is None or slug != app:
             # Not the configured app: its successes never count, but a failing or unfinished
-            # run with a required name keeps the checks from passing (pre-review of e995f6a).
-            # An Actions suite's own workflow run must still read as one (Fable, ba87dc7).
+            # run with a required name keeps the checks from passing (e995f6a). An Actions
+            # suite's own workflow run must still read as one (Fable, ba87dc7).
             if not _provably_harmless_runs(suite, required) or (
                 slug == "github-actions" and _run_event(suite.get("workflowRun", 0)) is False
             ):
@@ -867,9 +841,8 @@ def _checks(
             workflow_run = suite.get("workflowRun")
             event = workflow_run.get("event") if isinstance(workflow_run, dict) else None
             # Left out, wrongly shaped, or null with runs that may hold a required check: its
-            # event can't be told, so not known (audits of 0585599, 42a3721 and 28009de). Its
-            # runs are still read, so a failure in them still fails (pre-review of b8b1ca7);
-            # being partial, the list never passes on them.
+            # event isn't known (audits of 0585599, 42a3721 and 28009de). Its runs are still
+            # read, so a failure in them still fails (pre-review of b8b1ca7).
             unknown_event = "workflowRun" not in suite or (
                 workflow_run is not None and not _run_event(workflow_run)
             )
@@ -883,9 +856,8 @@ def _checks(
                 complete = False
             elif event not in CHECK_EVENTS:
                 # GitHub leaves such a run out of a PR's required checks (Codex's review of
-                # f37d0c7), so its success never counts. But a failing or unfinished run with a
-                # required name may still bear on the merge box: not known, never dropped
-                # silently, and never passed (audit of 80e8fb3).
+                # f37d0c7): its success never counts. A failing or unfinished run with a
+                # required name is not known, never dropped silently (audit of 80e8fb3).
                 if not _provably_harmless_runs(suite, required):
                     complete = False
                 continue
@@ -940,13 +912,12 @@ def _checks(
                 complete = False
                 continue
             status = CHECK_STATUS.get(raw_status, "queued")  # waiting, pending: not done
-            if status == "completed" and conclusion in ("SKIPPED", "NEUTRAL"):
+            if conclusion in ("SKIPPED", "NEUTRAL"):  # completed: checked above
                 conclusion = "SUCCESS"  # GitHub counts both as satisfying a required check
-            if status == "completed" and conclusion == "SUCCESS":
-                # A success counts only while fresh: GitHub needs one within the past seven
-                # days (5d06878). An old one, or one with no time, is no pass, and leaves the
-                # list not known, so a fresh one of the same name can never mask it (Codex's
-                # review of 2736aee).
+            if conclusion == "SUCCESS":
+                # A success counts only while fresh: GitHub needs one within seven days
+                # (5d06878). An old one, or one with no time, is no pass, and leaves the list
+                # not known, so a fresh one of the same name never masks it (Codex, 2736aee).
                 done = run.get("completedAt")
                 if done is None or now is None:
                     complete = False
@@ -1149,13 +1120,11 @@ def _issue(
     try:
         for event in events:
             e = _event(event, repo, now)
-            # Only the agent:ready label's events, and closings and reopenings: the model reads
-            # no others, and keeping them all, once per pull request, could fill the snapshot
-            # (Codex's review of dc1eb14). A closing ends the authorisation as an unlabel does,
-            # so leaving them out would show a closed-and-reopened issue as still authorised.
-            # GitHub's label names ignore case: an event on the label in another case is a
-            # surprise, never another label (pre-review of 6b7da87); so is its removal under
-            # the name with spaces round it, which GitHub never keeps.
+            # Only the agent:ready label's events, closings and reopenings: the model reads no
+            # others, and all of them could fill the snapshot (Codex's review of dc1eb14). A
+            # closing ends the authorisation as an unlabel does. GitHub's label names ignore
+            # case: the label in another case is a surprise, never another label (pre-review
+            # of 6b7da87); so is its removal under the name with spaces round it.
             label = e["label"]
             if label not in (None, READY_LABEL) and (
                 label.casefold() == READY_LABEL.casefold()
@@ -1274,8 +1243,6 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
     # Parts that can't be read whole are null ("not known"): the model never reads them as
     # clean, and still judges everything that is known.
     try:
-        if "files" not in pr:
-            raise _Incomplete()
         patterns = tuple(settings.clinical_paths)
         if _clinical(_all_paths(pr), patterns):
             pull["clinical_known"] = True  # survives any later cut (9dbb868)
@@ -1287,10 +1254,9 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
         pull.pop("files_complete", None)
     merged_at = datetime.fromisoformat(pull["merged_at"]) if merged else None
     try:
-        # The head the reviews are matched against must not be contradicted by GitHub's own
-        # commit rows (pre-review of 6b7da87), for an open or a closed PR alike. A row that
-        # can't be read says nothing, as in a lite read: only readable rows that name other
-        # commits, and never the head, leave the reviews not known (pre-review of 8c4bfec).
+        # GitHub's own commit rows must not contradict the head the reviews are matched against
+        # (pre-review of 6b7da87). Only readable rows that name other commits, never the head,
+        # leave the reviews not known; an unreadable row says nothing (pre-review of 8c4bfec).
         if _head_contradicted(pr, head):
             raise _Incomplete()
         pull["reviews"] = _reviews(pr, cfg.clinicians, merged_at, now)
@@ -1298,10 +1264,9 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
         # null: "not known", so the model still judges what is known (Codex's review of
         # 198a66e: leaving the key out made the whole PR unreadable and hid its warnings).
         pull["reviews"] = None
-    # Checks only for an open pull request. Once it is merged or closed, GitHub no longer shows
-    # the test merge commit it judged, so no reading of the checks can match its verdict; the
-    # merge box enforced them at the time (owner's decision, 2026-11-25, after Codex's review
-    # of a1e05e5).
+    # Checks only for an open pull request. Once merged or closed, GitHub no longer shows the
+    # test merge commit it judged, so no reading can match its verdict; the merge box enforced
+    # them at the time (owner's decision, 2026-11-25, after Codex's review of a1e05e5).
     pull["checks"] = None
     expiry: list[datetime] = []
     if state == "OPEN" and "commits" in pr:
@@ -1335,12 +1300,10 @@ def _item(repo: str, cfg: FetcherConfig, node: Any, now: datetime | None = None)
     except (_Incomplete, *_SHAPE):
         task["branch"] = None  # not known; the pull request's head is still known
     # null when no readable, authorised issue is linked: the model shows an open PR as
-    # NOT_LINKED and still judges a merged one (Codex's review of 3f7d3c2: leaving the key out
-    # made the whole PR unreadable).
-    # A merged PR's issue link is GitHub's current one, not the link at the merge: it is no
-    # evidence of which issue authorised the merge (Codex's review of 28546f5). The model then
-    # makes no authorisation claim either way; the merger is still checked. The link is still
-    # shown (issue_screen).
+    # NOT_LINKED and still judges a merged one (Codex's review of 3f7d3c2). A merged PR's link
+    # is GitHub's current one, no evidence of which issue authorised the merge (Codex's review
+    # of 28546f5): the model makes no authorisation claim, the merger is still checked, and
+    # the link is still shown (issue_screen).
     task["issue"] = None if merged else issue
     try:
         title = _str(pr.get("title"), MAX_TITLE) or NO_TITLE  # nothing left once cleaned
@@ -1399,9 +1362,9 @@ def _closed_page(
     # That order is checked, never trusted: a page out of order says nothing about the next, so
     # it is read too, or the list marked cut off (pre-review of 07c3480).
     disordered = any(a < b for a, b in zip(updated, updated[1:], strict=False))
-    # A page that can't support stopping is doubtful, and remembered whatever later pages look
-    # like (6b7da87): out of order or impossible, even when it is the last (Codex, 34ad21c);
-    # short or empty though it says more follow (9cc8f43, 8c4bfec); or more rows than asked for.
+    # A page that can't support stopping is doubtful, whatever later pages look like (6b7da87):
+    # out of order or impossible, even when it is the last (Codex, 34ad21c); short or empty
+    # though it says more follow (9cc8f43, 8c4bfec); or more rows than asked for.
     doubtful = (
         disordered
         or impossible
@@ -1448,9 +1411,8 @@ def _listing(
         numbers += closed
         rows += page_rows
         pages += 1
-    # Any repeat among every row read, within a page, across pages or between the lists, older
-    # ones included, means the list changed while it was read, or GitHub's answer is odd: one
-    # may be missing (Codex's reviews of 07c05d4 and 96cb8a9).
+    # Any repeat among every row read, within a page, across pages or between the lists, means
+    # the list changed while it was read: one may be missing (Codex, 07c05d4 and 96cb8a9).
     repeated = len(set(rows)) != len(rows)
     cut_off = more_open or repeated or disordered or doubt or cursor is not None
     return list(dict.fromkeys(numbers)), cut_off
@@ -1504,10 +1466,9 @@ def _details(
         # unreadable; one deleted since the list is gone from the next refresh's list.
         return [(n, repository.get(f"p{i}") or UNREADABLE, lite) for i, n in enumerate(batch)]
 
-    # A sound bound (Codex's review of 05062fc): a batch of b pull requests is split only when
-    # its own read fails, so at most 2b - 1 reads in all; a lone one is then read once more,
-    # lite, and with its core only (3 more); and each pull request's Retry is resolved once,
-    # where its answer came, with one retry and then its core (2 more). At most 7 each.
+    # A sound bound (Codex's review of 05062fc): a batch of b is split only when its own read
+    # fails (2b - 1 reads at most); a lone one is read once more, lite, then by its core (3
+    # more); each Retry is resolved once, by one retry and then its core (2 more): 7 each.
     budget = [7 * len(numbers) + 2]
 
     def fetch_raw(batch: list[int], omit: frozenset, lite) -> list:
@@ -1585,8 +1546,6 @@ UNREADABLE = object()  # a pull request whose own data GitHub couldn't give whol
 def _model_reads(task: dict | None) -> bool:
     """Whether the task model accepts this task: only then is the pull request readable
     (Codex's review of 8152df0: a built task the model rejects is UNKNOWN all the same)."""
-    if task is None:
-        return False
     try:
         parse(dict(task, paused=False))  # paused comes from the stop marker (A5b)
     except (InvalidInput, TypeError, ValueError, KeyError, AttributeError, OverflowError):
@@ -1640,9 +1599,7 @@ def repo_items(
     readable = False
     for number, node, _lite in details:
         try:
-            if node is UNREADABLE:
-                raise _bad()
-            item = _item(repo, cfg, node, now)
+            item = _item(repo, cfg, node, now)  # UNREADABLE is no object: a bad answer
             if item["number"] != number:
                 raise _bad()
         except (FetchError, TypeError, ValueError, AttributeError, KeyError, OverflowError):
@@ -1651,23 +1608,19 @@ def repo_items(
             # TypeError and failed the refresh for every repository).
             item = _unreadable(repo, number)
         readable = readable or _model_reads(item["task"])
-        # A pull request closed between the list and its details still belongs here. One the
-        # details place before the window contradicts the list: it is kept, never dropped (it
-        # may be an unsafe merge), and the repository marked cut off (pre-review of 07c3480).
+        # One closed between the list and its details still belongs here. One the details
+        # place before the window contradicts the list: kept (it may be an unsafe merge), and
+        # the repository marked cut off (pre-review of 07c3480).
         if item["closed_at"] is not None and datetime.fromisoformat(item["closed_at"]) < since:
             more = True
         items.append(item)
-    # No guard on reads cut short (lite): a lite read keeps reviews, and leaves files and checks
-    # "not known", which raises an alert, so it is never greener than GitHub. Rejecting such a
-    # refresh let two huge pull requests from anyone stall every repository (audit of 28009de).
+    # No guard on lite reads: one leaves files and checks "not known", an alert, never greener
+    # than GitHub; rejecting them let two huge pull requests stall every refresh (28009de).
     if len(details) > 1 and not readable:
         # Every pull request unreadable is no per-PR problem: fail, keeping the last good
-        # snapshot, rather than replace it with nothing but unreadable entries (7faf35a).
-        # Judged on the items as built, not on GitHub's answer: pull requests that were all
-        # there but all failed their checks here passed the guard (Codex's review of c3ee86b).
-        # Only with more than one: a lone pull request with bad data of its own is shown as
-        # unreadable, never a reason to leave every repository stale (Fable's pre-review of
-        # a21bd27).
+        # snapshot (7faf35a). Judged on the items as built, not on GitHub's answer (Codex's
+        # review of c3ee86b). Only with more than one: a lone pull request with bad data of
+        # its own is shown as unreadable (Fable's pre-review of a21bd27).
         raise _bad()
     return items, more
 
@@ -1777,14 +1730,11 @@ def _essential_checks(checks: list[dict], head: str) -> list[dict]:
 
 def _fit(snapshot: dict) -> None:
     """Keep the snapshot under MAX_SNAPSHOT as written. File lists are the one large part
-    anyone can make (Codex's review of 72607b3: several repositories of long, escaped paths
-    stopped every refresh), so the largest are cut down until it fits: to one known clinical
-    path, so a known clinical change stays known (69ed8e3), or else to "not known" (null);
-    either way the model treats the rest as possibly clinical. What remains is bounded
-    and comes from trusted accounts: titles are capped, and labels and statuses need write or
-    triage access. Then reviews and checks are cut to exactly what the verdict reads, and last,
-    whole items are left out, their repository marked truncated. Only if nothing is left does
-    the refresh fail ("too-large")."""
+    anyone can make (Codex's review of 72607b3), so the largest are cut until it fits: to one
+    known clinical path, so a known clinical change stays known (69ed8e3), or else to "not
+    known" (null). The rest is bounded and from trusted accounts. Then reviews and checks are
+    cut to exactly what the verdict reads, and last, whole items are left out, their
+    repository marked truncated. Only if nothing is left does the refresh fail ("too-large")."""
 
     def size() -> int:
         return len(encode(dict(snapshot, token_revoked=False)))
@@ -1826,11 +1776,9 @@ def _fit(snapshot: dict) -> None:
             _cut(item["task"]["pull_request"], tuple(item["task"]["clinical_paths"]), False)
     if size() <= MAX_SNAPSHOT:
         return
-    # Then reviews and checks are cut down to exactly what the verdict reads, never to "not
-    # known" (Codex's review of d75f891: nulling a complete review list turned a confirmed
-    # clinical merge without a clinician into "reviews not verified"; nulling failing checks
-    # would do the same to CHECKS_FAILING). The model reaches the same verdict from the short
-    # lists as from the full ones.
+    # Then reviews and checks, cut to exactly what the verdict reads, never to "not known"
+    # (Codex's review of d75f891: nulling a complete review list hid a confirmed clinical merge
+    # without a clinician). The model reaches the same verdict from the short lists.
     for pull in [i["task"]["pull_request"] for i in snapshot["items"] if i["task"]]:
         if pull.get("reviews"):
             pull["reviews"] = _essential_reviews(pull["reviews"], pull["head_sha"], pull)
@@ -1838,12 +1786,10 @@ def _fit(snapshot: dict) -> None:
             pull["checks"] = _essential_checks(pull["checks"], pull["head_sha"])
     if size() <= MAX_SNAPSHOT:
         return
-    # Last, whole items, each repository so cut listed in "truncated", as when GitHub's list is
-    # cut off. A stale snapshot for every repository would be worse (Codex's review of
-    # dc1eb14). The order is by how much an item matters: unreadable first, then calm ones
-    # (oldest closed, then least recently updated open), then those needing attention, and
-    # UNSAFE ones last, so a known unsafe merge is the last thing cut, after any number of
-    # strangers' fork PRs (Fable's pre-reviews of 8152df0 and a21bd27).
+    # Last, whole items, their repository listed in "truncated"; a stale snapshot for every
+    # repository would be worse (Codex's review of dc1eb14). By how much an item matters:
+    # unreadable first, then calm ones (oldest closed, then least recently updated open), then
+    # those needing attention, and UNSAFE last (Fable's pre-reviews of 8152df0 and a21bd27).
     items = snapshot["items"]
 
     def rank(item: dict) -> int:
@@ -1916,10 +1862,8 @@ def write_json(folder: Path, name: str, data: dict, durable: bool = False) -> No
             except OSError:
                 pass
             raise
-        # The new file is already in place and readable: a failed sync of the folder must not
-        # report the write as failed (Codex's review of 198a66e). It only makes the rename's
-        # survival of a sudden power cut less certain.
-        # With `durable`, the write counts only once the folder is synced too: the attempt
+        # The new file is already in place: a failed sync of the folder must not report the
+        # write as failed (Codex's review of 198a66e). With `durable` it does: the attempt
         # recorded before any network work must survive a power cut, or a refresh could repeat
         # within the minute after a restart (Codex's review of c5ccf49).
         try:

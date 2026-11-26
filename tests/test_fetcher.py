@@ -39,6 +39,7 @@ from tests.fetcher_fixtures import (
     TOKEN,
     Base,
     FakeGitHub,
+    answer_for,
     client,
     config_data,
     issue_node,
@@ -2169,10 +2170,11 @@ class RefresherFiles(Base):
             def accept(self):
                 raise OSError(24, "Too many open files")
 
-        lines = []
-        with mock.patch.object(server.time, "sleep"):
-            server.serve(Broken(), object(), os.getuid(), log=lines.append, once=True)
-        self.assertEqual(lines, ["fetcher: error: accept"])
+        # The second pause ends the test, which passed `once` and never saw the service go on.
+        lines, pauses = [], mock.patch.object(server.time, "sleep", side_effect=[None, EOFError])
+        with pauses, self.assertRaises(EOFError):
+            server.serve(Broken(), object(), os.getuid(), log=lines.append)
+        self.assertEqual(lines, ["fetcher: error: accept"] * 2)
 
     def test_a_wall_clock_change_never_moves_the_floor_within_a_boot(self):
         wall, since_boot = [NOW.timestamp()], [1000.0]
@@ -2231,6 +2233,21 @@ class RefresherFiles(Base):
             self.make(lambda: wall[0], boot=lambda: ("boot-2", 61.0)).run(), server.OK
         )  # a minute since boot proves a minute since the attempt
 
+    def test_which_boot_an_attempt_was_in_is_never_guessed(self):
+        # 160cc5a's mutation sweep: each of these guards could go and every test passed.
+        for boot in (
+            ("boot-1", 100.0, server.OK),
+            ("boot-2", 130.0, server.OK),  # another boot, up over a minute
+            (None, 135.0, server.TOO_SOON),  # its id unreadable now: 5 s on
+            (None, 190.0, server.OK),  # exactly a minute
+            ("boot-2", 195.0, server.TOO_SOON),  # the id unreadable then
+            (None, 190.0, server.TOO_SOON),  # no time at all
+            (None, 70.0, server.OK),  # no ids, a new boot: no wait for 190 s
+            ("boot-3", 60.0, server.OK),  # a minute into another boot
+        ):
+            reply = self.make(NOW.timestamp, boot=lambda boot=boot: boot[:2]).run()
+            self.assertEqual(reply, boot[2])
+
     def test_an_unreadable_status_file_is_not_no_earlier_attempt(self):
         self.assertEqual(self.make(lambda: NOW.timestamp()).run(), server.OK)
         real_open = os.open
@@ -2272,6 +2289,7 @@ class RefresherFiles(Base):
             b'{"attempt_epoch": Infinity, "attempt_since_boot": 5}',
             b'{"attempt_epoch": 1, "attempt_since_boot": NaN}',
             b'{"attempt_epoch": 1, "attempt_since_boot": -5}',
+            b'{"attempt_epoch": 1, "attempt_since_boot": true}',
             b'{"attempt_epoch": 1, "attempt_since_boot": 5, "boot_id": 7}',
             # Too large for a float (Codex's review of 9fb21c8: OverflowError escaped).
             b'{"attempt_epoch": 1' + b"0" * 400 + b', "attempt_since_boot": 5}',
@@ -2302,7 +2320,6 @@ class RefresherFiles(Base):
         self.assertEqual(server._snapshot_at(NOW.isoformat()), NOW.isoformat())
 
     def test_a_failed_write_still_says_when_the_token_outlived_it(self):
-        # Pre-review of 9537b08: a failed revoke was lost when the snapshot write then failed.
         self.fake.fail["/installation/token"] = (500, {}, b"")
         real_replace = os.replace
 
@@ -2316,8 +2333,6 @@ class RefresherFiles(Base):
         self.assertEqual(reply, b"failed:write+token-not-revoked\n")
 
     def test_a_leftover_temp_file_never_blocks_writes(self):
-        # Pre-review of 9537b08: a process killed mid-write left a temp file a later process
-        # with the same pid couldn't get past.
         leftover = self.cfg.snapshot_dir / f".{snapshot.SNAPSHOT}.{os.getpid()}.tmp"
         leftover.write_text("half")
         self.assertEqual(self.make(lambda: NOW.timestamp()).run(), server.OK)
@@ -2341,7 +2356,6 @@ class RefresherFiles(Base):
         self.assertEqual(os.listdir(elsewhere), [])
 
     def test_a_surprise_fails_the_refresh_not_the_service(self):
-        # Codex's review of 23bfb61: an unexpected exception escaped and stopped the fetcher.
         def broken(cfg):
             raise TypeError("a surprise")
 
@@ -2352,7 +2366,6 @@ class RefresherFiles(Base):
         self.assertEqual((status["result"], status["reason"]), ("failed", "internal"))
 
     def test_a_short_write_never_leaves_a_truncated_file(self):
-        # Codex's review of bf76866: os.write may write less than asked.
         real_write = os.write
 
         def dribble(fd, data):
@@ -2364,10 +2377,6 @@ class RefresherFiles(Base):
         self.assertEqual(len(written["items"]), 3)
 
     def test_a_failed_folder_sync_after_the_rename_is_not_a_failed_write(self):
-        # Codex's review of 198a66e: the new snapshot was in place, but the refresh said it
-        # failed and the status kept the old time.
-        # (The attempt recorded before any network work is synced first; only later syncs
-        # fail here.)
         real = os.fsync
         folder_syncs = []
 
@@ -2384,9 +2393,6 @@ class RefresherFiles(Base):
         self.assertEqual(status["snapshot_at"], NOW.isoformat())
 
     def test_no_network_work_without_a_durably_recorded_attempt(self):
-        # Codex's review of c5ccf49 (blocking): a failed folder sync of the attempt record was
-        # ignored, so after a power cut the attempt could vanish and a refresh repeat within
-        # the minute.
         real = os.fsync
 
         def fsync(fd):
@@ -2399,7 +2405,6 @@ class RefresherFiles(Base):
         self.assertEqual(self.fake.calls, [])  # nothing sent to GitHub
 
     def test_a_token_that_could_not_be_revoked_is_reported(self):
-        # Codex's review of 1cc6cf8: a good refresh said "ok" while the token stayed valid.
         self.fake.fail["/installation/token"] = (500, {}, b"")
         self.assertEqual(self.make(lambda: NOW.timestamp()).run(), b"ok:token-not-revoked\n")
         status = snapshot.read_json(self.cfg.snapshot_dir, snapshot.STATUS)
@@ -2407,8 +2412,6 @@ class RefresherFiles(Base):
         self.assertTrue((self.cfg.snapshot_dir / snapshot.SNAPSHOT).exists())
 
     def test_a_file_that_misses_the_folders_group_is_refused(self):
-        # Codex's review of f772122 (blocking): without setgid, files took the fetcher's own
-        # group and the web app couldn't read them. Needs root to give the folder another group.
         if os.getuid() != 0:
             self.skipTest("needs root to set the folder's group")
         os.chown(self.cfg.snapshot_dir, -1, 1)  # another group, no setgid
@@ -2417,8 +2420,6 @@ class RefresherFiles(Base):
         self.assertFalse((self.cfg.snapshot_dir / snapshot.SNAPSHOT).exists())
 
     def test_one_refresh_at_a_time_across_processes(self):
-        # Codex's review of f772122: the floor was per process and recorded after the network
-        # work, so fetch-now and the service could both start.
         seen = {}
         refresher = self.make(lambda: NOW.timestamp())
         real = self.fake.__call__
@@ -2445,7 +2446,7 @@ class RefresherFiles(Base):
 
 
 class Socket(Base):
-    def serve_once(self, client_uid, request):
+    def serve_once(self, client_uid, request, once=True):
         path = self.base / "fetch.sock"
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(str(path))
@@ -2455,27 +2456,40 @@ class Socket(Base):
 
         class Fixed:
             def run(self):
+                if len(lines) == 1:
+                    gh.STOPPING.set()  # the second request is the last
                 return server.OK
 
+        self.addCleanup(gh.STOPPING.clear)
         thread = threading.Thread(
             target=server.serve,
             args=(listener, Fixed(), client_uid),
-            kwargs={"log": lines.append, "once": True},
+            kwargs={"log": lines.append, "once": once},
             daemon=True,
         )
         thread.start()
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-            conn.settimeout(5)
-            conn.connect(str(path))
-            conn.sendall(request)
-            reply = conn.recv(64)
+        for _ in range(1 if once else 2):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+                conn.settimeout(5)
+                conn.connect(str(path))
+                try:
+                    conn.sendall(request)
+                except BrokenPipeError:
+                    pass  # refused and closed before it was sent: it failed under load
+                reply = conn.recv(64)
         thread.join(5)
+        self.assertFalse(thread.is_alive())
         return reply, lines
 
     def test_the_web_apps_account_gets_a_refresh(self):
         reply, lines = self.serve_once(os.getuid(), server.REQUEST)
         self.assertEqual(reply, server.OK)
         self.assertEqual(lines, ["fetcher: refresh: ok"])
+
+    def test_one_request_after_another_is_answered(self):
+        # 160cc5a's sweep: a service that ended after its first request passed every test.
+        _, lines = self.serve_once(os.getuid(), server.REQUEST, once=False)
+        self.assertEqual(lines, ["fetcher: refresh: ok"] * 2)
 
     def test_any_other_account_is_refused(self):
         reply, lines = self.serve_once(os.getuid() + 1, server.REQUEST)
@@ -2517,13 +2531,18 @@ class AuditOfE58b933(Base):
         for command in (["serve", "--config", "x"], ["fetch-now", "--config", "x"]):
             with self.subTest(command[0]):
                 code, _, refresher, _ = self.main_with(command, failing)
-                self.assertNotEqual(code, 0)
+                self.assertEqual(code, 2)
                 refresher.assert_not_called()
         code, github_checks, refresher, _ = self.main_with(
             ["selfcheck", "--github", "--config", "x"], failing
         )
         self.assertNotEqual(code, 0)
         github_checks.assert_not_called()
+        refresher.assert_not_called()
+        # A plain selfcheck asks GitHub nothing (160cc5a's sweep).
+        passing = [Check("all", True, "yes")]
+        code, _, refresher, _ = self.main_with(["selfcheck", "--config", "x"], passing)
+        self.assertEqual(code, 0)
         refresher.assert_not_called()
 
     def test_fetch_now_writes_privately_and_reports_failure(self):
@@ -2713,6 +2732,9 @@ class AuditOfB69faa7(Base):
         reply = refresher.run(lambda: github_checks(self.cfg, client(fake)))
         self.assertEqual(reply, b"failed:selfcheck-failed+token-not-revoked\n")
         self.assertEqual(self.status()["reason"], "selfcheck-failed+token-not-revoked")
+        fake.token_permissions = gh.EXPECTED_PERMISSIONS  # every check passes but the revoke
+        reply = self.refresher(1).run(lambda: github_checks(self.cfg, client(fake)))
+        self.assertEqual(reply, b"failed:selfcheck-failed+token-not-revoked\n")
 
 
 class AuditOf80e8fb3(Base):
@@ -2806,7 +2828,6 @@ class AuditOf80e8fb3(Base):
                 self.assertIsNone(item["task"]["pull_request"]["reviews"])
 
     def test_more_runs_than_returned_never_pass(self):
-        # Audit of 8c62413: a matrix of more than the runs GitHub returned.
         node = pr_node(1, issue=issue_node(10))
         suite = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
         suite["checkRuns"]["totalCount"] = len(suite["checkRuns"]["nodes"]) + 1
@@ -2817,7 +2838,6 @@ class AuditOf80e8fb3(Base):
         self.assertIn(tasks.Flag.CHECKS_UNVERIFIED, tasks.derive(self.reviewed(item)).flags)
 
     def test_results_for_another_commit_are_never_read(self):
-        # Audit of 8c62413: every required name passed, but on a commit that isn't the head.
         node = pr_node(1, issue=issue_node(10))
         node["commits"]["nodes"][0]["commit"]["oid"] = "c" * 40
         self.fake.prs[REPO_A]["open"][0] = node
@@ -3301,8 +3321,6 @@ class ChecksFreshUntil(CodexReviewOf099ef9b):
         self.assertEqual(item["checks_fresh_until"], expected)
 
     def test_a_time_too_late_to_date_never_discards_a_known_failure(self):
-        # Codex's review of 1e0f9b0 (blocking): adding a week overflowed, and the whole check
-        # list, a failure GitHub reported among it, became "not known".
         node = pr_node(1, issue=issue_node(10))
         runs = node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["checkRuns"]
         runs["nodes"][0]["completedAt"] = "9999-12-31T23:00:00Z"
@@ -4235,6 +4253,14 @@ class PreReviewOf8c4bfec(PreReviewOf07c3480):
         data = {"repository": {"open": {"totalCount": 0, "nodes": []}, "closed": first}}
         last = {"repository": {"closed": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}
         self.assertTrue(snapshot._listing(REPO_A, data, NOW, lambda c: last)[1])
+        # Nor is a later page with a time that can't be (160cc5a's sweep).
+        odd = {"number": 99, "closedAt": rows[0]["closedAt"], "updatedAt": "2026-01-01T00:00:00Z"}
+        fine = dict(odd, number=98, closedAt=odd["updatedAt"])
+        last["repository"]["closed"]["nodes"] = [odd, fine]
+        self.assertTrue(snapshot._listing(REPO_A, data, NOW, lambda c: last)[1])
+        del first["pageInfo"]["hasNextPage"]  # left out: a bad answer, never "no more"
+        with self.assertRaises(gh.FetchError):
+            snapshot._listing(REPO_A, data, NOW)
 
     def test_a_review_whose_commit_is_left_out_is_not_known(self):
         review = review_node(OWNER, "APPROVED")
@@ -4503,7 +4529,6 @@ class AuditOf7712dec(Base):
 
 class AuditOf8c62413(unittest.TestCase):
     def test_the_floor_is_measured_on_the_boot_clock(self):
-        # Audit of 8c62413: every test injects its own clock, so the real one wasn't held.
         asked = []
 
         def clock_gettime(which):
@@ -4694,6 +4719,109 @@ class CodexReviewOfB7d0915(Base):
         server.serve(
             Listener(), self.make(lambda: NOW.timestamp()), os.getuid(), log=lambda _: None
         )
+
+
+class SweepOf160cc5a(Base):
+    """A mutation sweep of 160cc5a: guards that could be deleted with every test passing."""
+
+    def test_each_guard_alone_keeps_a_pull_request_from_reading_calmer(self):
+        node = pr_node(
+            1,
+            issue=issue_node(10),
+            files=("evidence/a.json",),
+            checks=("lint", "test", "docs"),
+            reviews=(review_node(),),
+            statuses=(("lint", "SUCCESS"),),
+            merge_commit={"oid": SHA2, "status": None, "checkSuites": {"totalCount": 0}},
+        )
+        mine = node["commits"]["nodes"][0]["commit"]["checkSuites"]
+        failed = dict(mine["nodes"][0]["checkRuns"]["nodes"][2], conclusion="FAILURE")
+        mine["nodes"][0]["checkRuns"]["nodes"][2] = failed  # not a required check
+        runs = {"totalCount": 1, "nodes": [dict(failed, name="d")]}
+        mine["nodes"].append({"app": {"slug": "other-ci"}, "workflowRun": None, "checkRuns": runs})
+        mine["totalCount"] = 2
+        base = answer_for(node, snapshot.detail_query([1], frozenset(), self.cfg.clinicians))
+
+        def flags(path="", value=None):
+            answer = at = json.loads(json.dumps(base))
+            *keys, last = (int(k) if k.isdigit() else k for k in path.split("."))
+            for key in keys:
+                at = at[key]
+            at[last] = value
+            item = snapshot._item(REPO_A, self.cfg, answer, NOW)
+            return {f.value for f in tasks.derive(dict(item["task"], paused=False)).flags}
+
+        # Failures that aren't required checks, its own app's and another's: still calm.
+        self.assertLessEqual({"checks_passed", "clinician_approved"}, flags())
+        events = "closingIssuesReferences.nodes.0.timelineItems"
+        commit = "commits.nodes.0.commit"
+        run = {"id": "R", "name": "lint", "status": "QUEUED", "completedAt": None}
+        rows = [*base["commits"]["nodes"], {"commit": {"oid": SHA2}}]  # the head's, and another
+        for path, value, expected in (
+            ("rv0.nodes.0.author.login", "someone", "reviews_unverified"),
+            ("rv0.nodes.0.submittedAt", "2026-02-30T00:00:00Z", "reviews_unverified"),
+            ("rv0.totalCount", 2, "reviews_unverified"),
+            (events + ".totalCount", 2, "issue_not_linked"),
+            (events + ".nodes.0.__typename", "labeledEvent", "issue_not_linked"),
+            ("potentialMergeCommit.status", {}, "checks_unverified"),
+            ("commits.nodes", rows, "checks_unverified"),
+            (commit + ".checkSuites.nodes.1.checkRuns.nodes.0.id", None, "checks_unverified"),
+            (commit + ".checkSuites.nodes.1.checkRuns.totalCount", 2, "checks_unverified"),
+            (commit + ".status", {}, "checks_unverified"),
+            (commit + ".status.contexts.0", 5, "checks_unverified"),
+            (commit + ".status.contexts.0", {}, "checks_unverified"),
+            (commit + ".checkSuites", None, "checks_unverified"),
+            (commit + ".checkSuites.nodes.0.checkRuns.nodes.0", run, "checks_unverified"),
+            # And what is known stays known: a run not done is pending, no suite is no result.
+            (
+                commit + ".checkSuites.nodes.0.checkRuns.nodes.0",
+                {**run, "conclusion": None},
+                "checks_pending",
+            ),
+            (commit + ".checkSuites", {"totalCount": 0, "nodes": []}, "checks_missing"),
+        ):
+            self.assertIn(expected, flags(path, value), path)
+        with self.assertRaises(gh.FetchError):  # open, with a merge time: a contradiction
+            flags("mergedAt", "2026-11-23T00:00:00Z")
+
+    def test_a_snapshot_over_its_limit_is_cut_step_by_step(self):
+        reviews = (review_node(), review_node(state="COMMENTED"))
+        node = pr_node(1, files=("evidence/a.json",), reviews=reviews, statuses=[("lint", "ERROR")])
+        self.fake.prs[REPO_A]["open"] = [node]
+        snap = snapshot.refresh(self.cfg, client(self.fake), NOW)
+        snap["items"].insert(0, snapshot._unreadable(REPO_A, 9))
+        nulled = json.loads(json.dumps(snap))
+        for item in nulled["items"][1:]:
+            snapshot._cut(item["task"]["pull_request"], ("evidence/*",), False)
+
+        def fit(under):
+            limit = len(snapshot.encode(dict(snap, token_revoked=False))) - under
+            with mock.patch.object(snapshot, "MAX_SNAPSHOT", limit):
+                snapshot._fit(snap)
+            return snap["items"][-2]["task"]["pull_request"]
+
+        fit(len(snapshot.encode(snap)) - len(snapshot.encode(nulled)))
+        self.assertEqual(snap, nulled)  # every file list null, a known clinical one known: enough
+        pull = fit(1)  # then reviews and checks, down to what the verdict reads
+        self.assertEqual((len(pull["reviews"]), len(pull["checks"]), len(snap["items"])), (1, 2, 3))
+        fit(1)  # then whole items, an unreadable one first
+        self.assertEqual(
+            ([i["number"] for i in snap["items"]], snap["truncated"]), ([1, 3], [REPO_A])
+        )
+
+    def test_small_guards_no_test_held(self):
+        for numbers, logins in (([], ()), ([True], ()), ([0], ()), ([2**31], ()), ([1], ('a"b',))):
+            with self.assertRaises(gh.FetchError):  # nothing odd is written into a query
+                snapshot.detail_query(numbers, frozenset(), logins)
+        # An error on the pull request itself, or on a core field and then an optional one.
+        core = [("repository", "p0", "state"), ("repository", "p0", "files")]
+        for places in ([("repository", "p0")], core):
+            error = gh.FetchError("graphql-error", tuple(places), {"repository": {"p0": {}}})
+            self.assertEqual(
+                snapshot._partial(error, [1], False), [(1, snapshot.UNREADABLE, False)]
+            )
+        with self.assertRaises(fconfig.ConfigError):
+            make_cfg(self.base, clinicians=[5])
 
 
 if __name__ == "__main__":

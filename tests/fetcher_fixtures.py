@@ -334,7 +334,10 @@ class FakeGitHub:
                     {
                         "total_count": len(self.installed),
                         "repository_selection": "selected",
-                        "repositories": [{"full_name": r} for r in self.installed],
+                        "repositories": [
+                            {"full_name": r, "permissions": {"admin": False, "push": False}}
+                            for r in self.installed
+                        ],
                     }
                 ).encode(),
             )

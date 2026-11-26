@@ -10,7 +10,6 @@ the status file records the time and a short reason code, never a token or a res
 from __future__ import annotations
 
 import fcntl
-import math
 import os
 import re
 import socket
@@ -76,13 +75,9 @@ def _check_status(status: dict) -> None:
     malformed: ValueError, handled like unreadable JSON."""
 
     def finite(value) -> bool:
-        # A JSON integer can be too large for a float: compared, never converted (Codex's
-        # review of 9fb21c8: math.isfinite raised OverflowError).
-        if isinstance(value, bool):
-            return False
-        if isinstance(value, int):
-            return 0 <= value <= 2**53
-        return isinstance(value, float) and math.isfinite(value) and 0 <= value <= 2**53
+        # Never true or false. A JSON integer can be too large for a float: compared, never
+        # converted (Codex's review of 9fb21c8); NaN and infinity fail the comparison.
+        return type(value) in (int, float) and 0 <= value <= 2**53
 
     boot = status.get("boot_id")
     if not finite(status.get("attempt_epoch")) or not finite(status.get("attempt_since_boot")):
@@ -175,31 +170,23 @@ class Refresher:
             os.close(lock)  # releases the lock
 
     @staticmethod
-    def _too_soon(previous: dict, now: float, boot_id: str | None, since_boot: float) -> bool:
-        """Within the same boot, by time since boot, which a wall-clock change can't move.
-        Otherwise (a restart of the machine, or an older status file) by the wall clock: a
-        recorded time in the future then means the clock went back, and only a jump of more
-        than the floor lets a refresh through, rather than waiting hours for it to catch up
-        (Codex's reviews of a1e05e5 and b24ac2d)."""
-
-        def number(value) -> bool:
-            return isinstance(value, (int, float)) and not isinstance(value, bool)
-
+    def _too_soon(previous: dict, boot_id: str | None, since_boot: float) -> bool:
+        """`previous` is a checked status, or empty. Judged by time since boot, which a change
+        of the wall clock can't move (Codex's reviews of a1e05e5 and b24ac2d)."""
         last_boot = previous.get("attempt_since_boot")
+        if last_boot is None:
+            return False  # no earlier attempt
         same_boot = boot_id is not None and previous.get("boot_id") == boot_id
         # With a boot id missing on either side, time since boot still tells: it only goes
-        # forward within a boot, so a value no smaller than the last one is taken as the same
-        # boot (Codex's review of 198a66e: an unreadable boot id fell back to the wall clock).
+        # forward within a boot, so one no smaller than the last is taken as the same boot
+        # (Codex's review of 198a66e).
         unknown_boot = boot_id is None or previous.get("boot_id") is None
-        if number(last_boot) and (same_boot or (unknown_boot and since_boot >= last_boot)):
+        if same_boot or (unknown_boot and since_boot >= last_boot):
             return since_boot - last_boot < MIN_INTERVAL
-        if number(last_boot) or number(previous.get("attempt_epoch")):
-            # Another boot. It began after the last attempt, so time since this boot is a
-            # lower bound on the time since that attempt; the wall clock may be wrong after a
-            # reboot (before it syncs), so it is not trusted (pre-review of 9537b08). At most
-            # one minute's wait after a restart.
-            return since_boot < MIN_INTERVAL
-        return False
+        # Another boot. It began after the last attempt, so time since this boot is a lower
+        # bound on the time since that attempt; the wall clock may be wrong before it syncs
+        # (pre-review of 9537b08). At most one minute's wait after a restart.
+        return since_boot < MIN_INTERVAL
 
     def _locked(self, work: Callable[[], list] | None = None) -> bytes:
         now = self.clock()
@@ -220,7 +207,7 @@ class Refresher:
         except ValueError:
             # Malformed (Codex's review of 9aeff19): not "no earlier attempt" either. This
             # attempt is recorded in a fresh status file, with no network work, so the next
-            # one, a minute later, goes ahead: the floor holds and nobody has to repair it.
+            # one, a minute later, goes ahead: the floor holds and nobody repairs anything.
             try:
                 write_json(
                     self.cfg.snapshot_dir,
@@ -239,7 +226,7 @@ class Refresher:
             except OSError:
                 pass
             return b"failed:status\n"
-        if self._too_soon(previous, now, boot_id, since_boot):
+        if self._too_soon(previous, boot_id, since_boot):
             return TOO_SOON
         stamp = datetime.fromtimestamp(now, UTC)
         status = {
@@ -265,11 +252,10 @@ class Refresher:
                 self.results = work()
                 failed = [c for c in self.results if not c.ok]
                 if failed:
-                    # A failing selfcheck is a failure on record, never a neutral "selfcheck"
-                    # (audit of 24973b8: it overwrote "not-read-only").
+                    # A failure on record, never a neutral "selfcheck" (audit of 24973b8).
                     reason = "selfcheck-failed"
-                    # However it was found: the revoke check, or a refused token whose own
-                    # revoke failed (audit of b69faa7).
+                    # However found: the revoke check, or a refused token's own failed revoke
+                    # (audit of b69faa7).
                     if any(
                         c.name == "token revoked" or "token-not-revoked" in str(c.detail)
                         for c in failed
@@ -369,12 +355,9 @@ def serve(
             conn, _ = listener.accept()
         except OSError:
             # A failed accept (an aborted connection, too many open files) fails that one
-            # request, never the service (pre-review of 9537b08). A short pause keeps a
-            # persistent error from spinning.
+            # request, never the service (pre-review of 9537b08); the pause stops a spin.
             log("fetcher: error: accept")
             time.sleep(1)
-            if once:
-                return
             continue
         with conn:
             result = handle(conn, refresher, client_uid)
