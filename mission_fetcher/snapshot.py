@@ -718,6 +718,8 @@ def _reviews(
                 raise _Incomplete()
             if not isinstance(state, str) or state not in REVIEW_STATES:
                 raise _bad()
+            if "commit" not in n:
+                raise _Incomplete()  # left out: not known, never "gone" (Codex, 7ac622f)
             commit = n.get("commit")
             commit_id = VANISHED if commit is None else _sha(_obj(commit).get("oid"))
             if commit is not None and commit_id == VANISHED:
@@ -1444,7 +1446,8 @@ def _listing(
     while cursor is not None and more_pages is not None and pages < CLOSED_PAGES:
         page = _obj(_obj(more_pages(cursor)).get("repository")).get("closed")
         closed, cursor, page_rows, page_times, page_doubt = _closed_page(page, since)
-        doubt = doubt or page_doubt
+        # Promised more, an empty page is no end: the list changed (Codex's review of 7ac622f).
+        doubt = doubt or page_doubt or not page_rows
         if times and page_times and page_times[0] > times[-1]:
             disordered = True
         times += page_times

@@ -4288,6 +4288,23 @@ class PreReviewOf8c4bfec(PreReviewOf07c3480):
         }
         self.assertTrue(snapshot._listing(REPO_A, data, NOW)[1])
 
+    def test_an_empty_page_after_a_promise_of_more_is_never_the_end(self):
+        rows = [
+            {"number": n, "closedAt": t, "updatedAt": t}
+            for n in range(1, snapshot.MAX_CLOSED + 1)
+            for t in [(NOW - timedelta(hours=n)).isoformat()]
+        ]
+        first = {"nodes": rows, "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}
+        data = {"repository": {"open": {"totalCount": 0, "nodes": []}, "closed": first}}
+        last = {"repository": {"closed": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}
+        self.assertTrue(snapshot._listing(REPO_A, data, NOW, lambda c: last)[1])
+
+    def test_a_review_whose_commit_is_left_out_is_not_known(self):
+        review = review_node(OWNER, "APPROVED")
+        del review["commit"]
+        node = pr_node(1, issue=issue_node(10), files=("evidence/a.json",), reviews=(review,))
+        self.assertIsNone(self.item_for(node)["task"]["pull_request"]["reviews"])
+
     def test_an_empty_check_name_is_not_known(self):
         node = pr_node(1, issue=issue_node(10))
         node["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]["checkRuns"]["nodes"][0][
