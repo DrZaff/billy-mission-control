@@ -408,8 +408,6 @@ class Refresh(Base):
     # ------------------------------------------------ Fable's pre-review of 8152df0
 
     def test_cutting_the_snapshot_never_drops_an_unsafe_merge_for_strangers_lists(self):
-        # Finding 1: long clinical-looking paths kept strangers' lists while a known unsafe
-        # merge was cut as an old closed item.
         recent = (NOW - timedelta(days=12)).isoformat()
         merge = pr_node(5, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
         merge["mergedBy"] = {"__typename": "User", "login": "someone-else"}
@@ -547,7 +545,6 @@ class Refresh(Base):
     # ------------------------------------------------ Fable's pre-review of a21bd27
 
     def test_an_unsafe_merge_is_cut_last_after_any_number_of_fork_prs(self):
-        # Finding 2: fork PRs (attention) outranked a known unsafe merge when items were cut.
         recent = (NOW - timedelta(days=3)).isoformat()
         merge = pr_node(900, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
         merge["mergedBy"] = {"__typename": "User", "login": "someone-else"}
@@ -570,7 +567,6 @@ class Refresh(Base):
         self.assertEqual(tasks.derive(self.task_of(kept)).state, tasks.State.UNSAFE)
 
     def test_a_lone_unreadable_pr_never_stalls_every_repository(self):
-        # Finding 3.
         node = pr_node(3, issue=issue_node(11, repo=REPO_B))
         node["isDraft"] = "no"  # wrongly shaped: this PR's own data
         self.fake.prs[REPO_B]["open"] = [node]
@@ -580,7 +576,6 @@ class Refresh(Base):
         self.assertTrue(any(i["task"] for i in snap["items"] if i["repo"] == REPO_A))
 
     def test_an_open_pr_with_a_closing_time_is_never_dropped(self):
-        # Finding 4: state OPEN with an old closedAt fell out of the window silently.
         node = pr_node(1, issue=issue_node(10))
         node["closedAt"] = (NOW - timedelta(days=60)).isoformat()
         self.fake.prs[REPO_A]["open"][0] = node
@@ -589,7 +584,6 @@ class Refresh(Base):
         self.assertIsNone(bad["task"])  # unreadable: UNKNOWN
 
     def test_fitting_measures_the_snapshot_a_handful_of_times(self):
-        # Finding 5: re-measuring after every cut took up to 38 s at worst case.
         paths = tuple(f"d/{i:02d}" + "x" * 100 for i in range(100))
         self.fake.prs[REPO_A]["open"] = [
             pr_node(n, issue=issue_node(10), files=paths) for n in range(1, 41)
@@ -679,7 +673,6 @@ class Refresh(Base):
         self.assertTrue(github.revoke(TOKEN))  # revocation always runs
 
     def test_a_contradictory_merge_state_is_never_read_as_the_calmer_half(self):
-        # Finding 3: state MERGED with merged false read as closed without merging.
         recent = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(1, state="MERGED", merged=True, closed_at=recent, issue=issue_node(10))
         node["merged"] = False
@@ -689,7 +682,6 @@ class Refresh(Base):
         self.assertIsNone(item["linked_issues"])  # finding 5: not known, never 0
 
     def test_a_pr_from_a_fork_always_needs_attention(self):
-        # Finding 4: a stranger's fork PR claiming an authorised issue looked like Billy's work.
         node = pr_node(1, issue=issue_node(10))
         node["isCrossRepository"] = True
         self.fake.prs[REPO_A]["open"][0] = node
@@ -700,10 +692,6 @@ class Refresh(Base):
         self.assertTrue(state.needs_attention)
 
     def test_every_pr_read_only_lite_is_shown_never_clean(self):
-        # Finding 6 asked that an all-lite reading not say "ok" with everything not known;
-        # the audit of 28009de showed that rejecting it let two huge PRs from anyone stall
-        # every repository. A lite read is now shown: reviews read, files and checks "not
-        # known" and alerting, never greener.
         real = self.fake.__call__
 
         def call(method, path, headers, body):
@@ -718,7 +706,6 @@ class Refresh(Base):
             self.assertTrue(state.needs_attention)
 
     def test_hidden_characters_and_lone_surrogates_are_cleaned_or_refused(self):
-        # Finding 7.
         node = pr_node(1, issue=issue_node(10), title="\u202e\u202e\u200e\u200b")
         node["headRefName"] = "claude/x\ud800"
         self.fake.prs[REPO_A]["open"][0] = node
@@ -1341,7 +1328,6 @@ class Refresh(Base):
         self.assertTrue(state.needs_attention)
 
     def test_a_reported_failure_survives_any_degraded_checks_reading(self):
-        # Finding 1 (blocking): the failure GitHub supplied was thrown away.
         node, commit = self.failing_lint()
         commit["checkSuites"]["totalCount"] = 21  # more suites than read
         self.assert_failing(node)
@@ -1405,7 +1391,6 @@ class Refresh(Base):
         return item, tasks.derive(self.task_of(item))
 
     def test_strangers_reviews_never_hide_a_clinical_merge_without_a_clinician(self):
-        # Finding 2 (blocking): 100 strangers' comments pushed the list over its limit.
         later = (NOW - timedelta(hours=1)).isoformat()
         crowd = [review_node(f"user{i}", "COMMENTED", at=later) for i in range(101)]
         crowd.append(review_node("odd_login", "WEIRD"))  # a stranger's odd review
@@ -1415,8 +1400,6 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
 
     def test_a_stale_dismissed_approval_never_hides_a_merge_without_approval(self):
-        # Finding 3 (blocking): an approval of an older commit, dismissed as stale, nulled the
-        # reviews; so did a review whose commit was force-pushed away.
         before = (NOW - timedelta(days=2)).isoformat()
         stale = review_node(state="DISMISSED", at=before, commit="b" * 40)
         gone = review_node(state="COMMENTED", at=before)
@@ -1434,7 +1417,6 @@ class Refresh(Base):
         self.assertNotIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
 
     def test_a_lone_pr_is_asked_for_again_after_a_transient_error(self):
-        # Finding 4: one 502 read a lone PR lite at once, under "ok".
         merged_at = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(
             3,
@@ -1476,8 +1458,6 @@ class Refresh(Base):
         self.assertIsNone(item["task"]["pull_request"]["files"])
 
     def test_a_retry_leaves_out_only_the_pieces_in_error(self):
-        # Finding 5: an error on the title nulled the PR, and the retry went straight to the
-        # core, dropping files and reviews that were readable.
         merged_at = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(
             1,
@@ -1729,7 +1709,6 @@ class Refresh(Base):
                 self.assert_failing(node)
 
     def test_a_clinical_path_of_any_length_is_clinical(self):
-        # Finding 6.
         item, state = self.merged_clinical(
             [],
             files={
@@ -1843,8 +1822,6 @@ class Refresh(Base):
         self.assertNotIn(REPO_A, snap["truncated"])
 
     def test_a_query_github_stops_for_its_cost_is_split_too(self):
-        # Codex's review of 28546f5 (blocking): GitHub can stop a costly query by time or
-        # resources, before the answer reaches the size cap.
         heavy = json.dumps(
             {"data": None, "errors": [{"type": "RESOURCE_LIMITS_EXCEEDED", "message": "x"}]}
         ).encode()
@@ -1881,8 +1858,6 @@ class Refresh(Base):
         self.assertLessEqual(detail_calls, 3 * 20 + 2)
 
     def test_a_merged_prs_current_issue_link_is_no_evidence_of_authorisation(self):
-        # Codex's review of 28546f5 (blocking): GitHub shows a PR's closing issue as it is
-        # now, not as it was at the merge.
         recent = (NOW - timedelta(days=1)).isoformat()
         self.fake.prs[REPO_A]["open"] = []
         self.fake.prs[REPO_A]["closed"] = [
@@ -1920,8 +1895,6 @@ class Refresh(Base):
         self.assertEqual(fine["task"]["pull_request"]["files"], ["site/a.html"])
 
     def test_an_approved_open_clinical_pr_shows_the_approval(self):
-        # Codex's review of 877fd21: with Billy's records unread, the view showed approval as
-        # still needed, guessing from the state.
         node = pr_node(1, issue=issue_node(10), files=("evidence/a.json",), reviews=[review_node()])
         self.fake.prs[REPO_A]["open"][0] = node
         state = tasks.derive(self.task_of(self.run_refresh()["items"][0]))
@@ -1930,8 +1903,6 @@ class Refresh(Base):
         self.assertTrue(views.clinician_approved(state))
 
     def test_a_renamed_file_makes_the_file_list_incomplete(self):
-        # Codex's review of f37d0c7 (blocking): a rename lists only the new path, so a move out
-        # of a clinical folder would hide where it came from.
         self.fake.prs[REPO_A]["open"][0] = pr_node(
             1, issue=issue_node(10), files=("site/moved.md",), renamed=("site/moved.md",)
         )
@@ -1941,8 +1912,6 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.FILES_UNVERIFIED, tasks.derive(self.task_of(item)).flags)
 
     def test_a_merged_pr_with_unknown_files_keeps_its_known_warnings(self):
-        # Codex's review of 198a66e (blocking): a rename made a merged PR unreadable, hiding
-        # that someone other than the owner merged it.
         recent = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(
             1,
@@ -1969,8 +1938,6 @@ class Refresh(Base):
         self.assertNotIn(tasks.Flag.MERGED_WITHOUT_CLINICIAN, state.flags)
 
     def test_a_merged_pr_with_no_issue_and_an_unknown_merger_is_still_judged(self):
-        # Codex's review of 3f7d3c2 (blocking): a missing issue, or a merger GitHub can't name
-        # (a deleted account), made the merged PR unreadable and hid its warnings.
         recent = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(1, state="MERGED", merged=True, closed_at=recent)  # no linked issue
         node["mergedBy"] = None
@@ -1984,7 +1951,6 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.AUTHORIZATION_UNVERIFIED, state.flags)
 
     def test_a_known_clinical_path_in_a_renamed_list_still_counts(self):
-        # Codex's review of 3f7d3c2: a rename threw away paths that showed clinical content.
         recent = (NOW - timedelta(days=1)).isoformat()
         node = pr_node(
             1,
@@ -2014,8 +1980,6 @@ class Refresh(Base):
         self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, state.flags)
 
     def test_a_manually_dispatched_run_never_counts(self):
-        # Codex's review of f37d0c7 (blocking): GitHub leaves runs from workflow_dispatch out of
-        # a PR's required checks.
         for event, flag in (
             ("pull_request", tasks.Flag.CHECKS_PASSED),
             ("push", tasks.Flag.CHECKS_PASSED),
@@ -2035,9 +1999,6 @@ class Refresh(Base):
                 self.assertIn(flag, tasks.derive(self.reviewed(item)).flags)
 
     def test_closed_pages_are_read_while_they_reach_into_the_window(self):
-        # Codex's review of f37d0c7: more closed pull requests could lie past the first page.
-        # Fable's pre-review of 8152df0: so pages are read while the last one is in the window,
-        # and only past CLOSED_PAGES is the repository marked truncated.
         recent = (NOW - timedelta(days=2)).isoformat()
         total = snapshot.CLOSED_PAGES * self.fake.closed_page + 1
         self.fake.prs[REPO_B]["closed"] = [
@@ -2048,8 +2009,6 @@ class Refresh(Base):
         self.assertNotIn(REPO_B, self.run_refresh()["truncated"])
 
     def test_bumped_old_prs_never_push_a_recent_unsafe_merge_off_the_list(self):
-        # Fable's pre-review of 8152df0: a comment on 30 old closed pull requests put a recent
-        # merge by someone else 31st, past the only page read.
         old = (NOW - timedelta(days=60)).isoformat()
         bumped = (NOW - timedelta(hours=1)).isoformat()
         recent = (NOW - timedelta(days=4)).isoformat()
@@ -2065,7 +2024,6 @@ class Refresh(Base):
         self.assertNotIn(REPO_A, snap["truncated"])
 
     def test_a_failed_refresh_says_when_the_token_outlived_it(self):
-        # Codex's review of bf76866: a failed revoke was reported only on success.
         self.fake.fail["/graphql"] = (502, {}, b"")
         self.fake.fail["/installation/token"] = (500, {}, b"")
         with self.assertRaises(gh.FetchError) as caught:
@@ -2073,7 +2031,6 @@ class Refresh(Base):
         self.assertEqual(caught.exception.code, "http-502+token-not-revoked")
 
     def test_the_size_limit_is_measured_as_written(self):
-        # Codex's review of 1cc6cf8: it measured compact JSON, but the file is indented.
         written = len(snapshot.encode(self.run_refresh()))
         compact = len(json.dumps(self.run_refresh()))
         self.assertGreater(written, compact)
@@ -2088,7 +2045,6 @@ class Refresh(Base):
         self.assertLessEqual(len(snapshot.encode(snap)), limit)
 
     def test_a_removal_by_a_deleted_account_still_withdraws(self):
-        # Codex's review of f772122 (blocking): skipping it left the authorisation in force.
         issue = issue_node(10)
         issue["timelineItems"]["totalCount"] = 2
         issue["timelineItems"]["nodes"].append(
@@ -2109,7 +2065,6 @@ class Refresh(Base):
         self.assertNotEqual(tasks.derive(self.task_of(item)).state, tasks.derive(authorised).state)
 
     def test_an_issue_in_another_repository_gives_no_issue(self):
-        # Codex's review of f772122: its number would point at the wrong issue here.
         self.fake.prs[REPO_A]["open"][0] = pr_node(1, issue=issue_node(10, repo=REPO_B))
         item = self.run_refresh()["items"][0]
         self.assertEqual(item["linked_issues"], 1)
@@ -2210,7 +2165,6 @@ class RefresherFiles(Base):
         self.assertEqual(self.make(lambda: now[0]).run(), server.OK)
 
     def test_an_accept_error_never_stops_the_service(self):
-        # Pre-review of 9537b08: accept() errors escaped serve().
         class Broken:
             def accept(self):
                 raise OSError(24, "Too many open files")
@@ -2221,9 +2175,6 @@ class RefresherFiles(Base):
         self.assertEqual(lines, ["fetcher: error: accept"])
 
     def test_a_wall_clock_change_never_moves_the_floor_within_a_boot(self):
-        # Codex's reviews of a1e05e5 and b24ac2d: a recorded future time held refreshes until
-        # the clock caught up, and then a clock moved back let a refresh skip the floor. Within
-        # one boot the floor follows time since boot, which a wall-clock change can't move.
         wall, since_boot = [NOW.timestamp()], [1000.0]
 
         def make():
@@ -2239,7 +2190,6 @@ class RefresherFiles(Base):
         self.assertEqual(make().run(), server.OK)
 
     def test_an_unreadable_boot_id_still_uses_time_since_boot(self):
-        # Codex's review of 198a66e: without a boot id it fell back to the wall clock.
         wall, since_boot = [NOW.timestamp()], [1000.0]
 
         def make():
@@ -2253,11 +2203,6 @@ class RefresherFiles(Base):
         self.assertEqual(make().run(), server.OK)
 
     def test_without_boot_ids_a_new_boot_can_only_wait_longer(self):
-        # Codex's review of 3f7d3c2 suggested a quick reboot could skip the floor when the boot
-        # ids are missing. It can't: a new boot starts after the last attempt, so the real time
-        # since it is at least the new time since boot, and taking that boot for the old one
-        # (since_boot - last) only ever measures less, never more. Here: an attempt at 5 s of
-        # the old boot, then a new boot now at 40 s, at least 40 s later in fact, is held.
         since_boot = [5.0]
         wall = [NOW.timestamp()]
 
@@ -2271,10 +2216,6 @@ class RefresherFiles(Base):
         self.assertEqual(make().run(), server.OK)  # and in fact at least 66 s have passed
 
     def test_after_a_restart_only_time_since_boot_counts(self):
-        # Pre-review of 9537b08: after a reboot the wall clock may be wrong (before it syncs),
-        # so a refresh 35 s after the last one, with the clock a few minutes off, got through.
-        # A new boot began after the last attempt, so time since boot is a lower bound on the
-        # real time since it: under a minute since boot always waits.
         wall = [NOW.timestamp()]
         self.assertEqual(
             self.make(lambda: wall[0], boot=lambda: ("boot-1", 5000.0)).run(), server.OK
@@ -2291,7 +2232,6 @@ class RefresherFiles(Base):
         )  # a minute since boot proves a minute since the attempt
 
     def test_an_unreadable_status_file_is_not_no_earlier_attempt(self):
-        # Pre-review of 9537b08: any failure to read the status file skipped the floor.
         self.assertEqual(self.make(lambda: NOW.timestamp()).run(), server.OK)
         real_open = os.open
 
@@ -2305,7 +2245,6 @@ class RefresherFiles(Base):
         self.assertEqual(reply, b"failed:status\n")
 
     def test_a_malformed_status_file_keeps_the_floor_and_heals_itself(self):
-        # Codex's review of 9aeff19: a malformed status file was read as "no earlier attempt".
         wall = [NOW.timestamp()]
         self.assertEqual(self.make(lambda: wall[0]).run(), server.OK)
         # Deeply nested JSON raised RecursionError past the handler (Codex's review of de9a6fb).
@@ -2325,8 +2264,6 @@ class RefresherFiles(Base):
                 self.assertEqual(self.make(lambda: wall[0]).run(), server.OK)
 
     def test_a_status_file_with_bad_times_keeps_the_floor(self):
-        # Codex's review of 69ed8e3: a status object with missing or non-finite times let a
-        # refresh skip the floor.
         wall = [NOW.timestamp()]
         self.assertEqual(self.make(lambda: wall[0]).run(), server.OK)
         for bad in (
@@ -2350,8 +2287,6 @@ class RefresherFiles(Base):
                 self.assertEqual(self.make(lambda: wall[0]).run(), server.OK)
 
     def test_an_attempt_recorded_in_the_future_never_freezes_refreshes(self):
-        # Fable's pre-review of 8152df0, finding 9: in the same boot, a recorded time since
-        # boot later than now made every request "too-soon" until the uptime caught up.
         wall = [NOW.timestamp()]
         boot = lambda: ("boot-1", 100.0)  # noqa: E731
         status = {"boot_id": "boot-1", "attempt_since_boot": 2**53, "attempt_epoch": 1}
