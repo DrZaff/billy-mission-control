@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -152,6 +153,10 @@ class RefresherFiles(Base):
             server.serve(Broken(), object(), os.getuid(), log=lines.append)
         self.assertEqual(lines, ["fetcher: error: accept"] * 2)
 
+    @staticmethod
+    def hour_after(wall):
+        return datetime.fromtimestamp(wall + 3600, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     def test_a_wall_clock_change_never_moves_the_floor_within_a_boot(self):
         wall, since_boot = [NOW.timestamp()], [1000.0]
 
@@ -165,6 +170,7 @@ class RefresherFiles(Base):
         wall[0] += 5 * 3600  # and forward five hours: still five seconds since boot
         self.assertEqual(make().run(), server.TOO_SOON)
         since_boot[0] += 60  # a real minute later, whatever the wall clock says
+        self.fake.expires_at = self.hour_after(wall[0])  # GitHub's token, by the moved clock
         self.assertEqual(make().run(), server.OK)
 
     def test_an_unreadable_boot_id_still_uses_time_since_boot(self):
@@ -178,6 +184,7 @@ class RefresherFiles(Base):
         since_boot[0] += 5  # ...five seconds after the last refresh
         self.assertEqual(make().run(), server.TOO_SOON)
         since_boot[0] += 60
+        self.fake.expires_at = self.hour_after(wall[0])
         self.assertEqual(make().run(), server.OK)
 
     def test_without_boot_ids_a_new_boot_can_only_wait_longer(self):
