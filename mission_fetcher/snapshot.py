@@ -65,8 +65,12 @@ HIDDEN = {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"}
 CONTROL = re.compile(r"[\x00-\x1f\x7f  ‪-‮⁦-⁩]")
 REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"}
 STATUS_STATES = ("ERROR", "EXPECTED", "FAILURE", "PENDING", "SUCCESS")
-# Events GitHub documents as able to supply a pull request's required checks (Codex's review
-# of a1e05e5 added the review and deployment ones).
+# Events whose runs can supply a pull request's required checks (Codex's review of a1e05e5
+# added the review and deployment ones). workflow_dispatch too: GitHub counts a run started on
+# the pull request's branch by hand, from that branch's own workflow file as a pull_request run
+# would use, and pull requests opened with the default token get their checks only that way
+# (found on real data at install: every such draft read as "checks missing"). A scheduled run
+# still never counts.
 CHECK_EVENTS = (
     "pull_request",
     "pull_request_target",
@@ -75,6 +79,7 @@ CHECK_EVENTS = (
     "merge_group",
     "deployment",
     "deployment_status",
+    "workflow_dispatch",
 )
 CHECK_STATUS = {"QUEUED": "queued", "IN_PROGRESS": "in_progress", "COMPLETED": "completed"}
 # GitHub's CheckStatusState values, exactly: the rest (waiting, pending, requested) aren't done.

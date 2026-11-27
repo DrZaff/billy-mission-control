@@ -2156,12 +2156,15 @@ class Refresh(Base):
         self.assertEqual(state.state, tasks.State.CLINICAL_REVIEW)
         self.assertIn(tasks.Flag.REVIEWS_UNVERIFIED, state.flags)
 
-    def test_a_manually_dispatched_run_never_counts(self):
+    def test_a_run_started_by_hand_counts_and_a_scheduled_one_never_does(self):
+        # Pull requests opened with the default token get their checks only from a run started
+        # by hand on their branch, which GitHub counts (found on real data at install).
         for event, flag in (
             ("pull_request", tasks.Flag.CHECKS_PASSED),
             ("push", tasks.Flag.CHECKS_PASSED),
-            ("workflow_dispatch", tasks.Flag.CHECKS_MISSING),
+            ("workflow_dispatch", tasks.Flag.CHECKS_PASSED),
             ("schedule", tasks.Flag.CHECKS_MISSING),
+            ("workflow_run", tasks.Flag.CHECKS_MISSING),
         ):
             with self.subTest(event=event):
                 self.fake.prs[REPO_A]["closed"] = []
@@ -2314,7 +2317,7 @@ class AuditOf80e8fb3(Base):
         commit["checkSuites"]["nodes"].append(
             {
                 "app": {"slug": "github-actions"},
-                "workflowRun": {"event": "workflow_dispatch"},
+                "workflowRun": {"event": "schedule"},
                 "checkRuns": {
                     "totalCount": 1,
                     "nodes": [{"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"}],
@@ -2674,9 +2677,9 @@ class CodexReviewOf0f79663(CodexReviewOf099ef9b):
         self.assertNotIn(tasks.Flag.CHECKS_PASSED, tasks.derive(self.reviewed(item)).flags)
 
     def test_another_case_counts_in_suites_whose_event_cant_count(self):
-        # A failing run under another case, in a suite started by hand or with no workflow
+        # A failing run under another case, in a scheduled suite or one with no workflow
         # run, still keeps the checks from passing.
-        for workflow_run in ({"event": "workflow_dispatch"}, None):
+        for workflow_run in ({"event": "schedule"}, None):
             with self.subTest(workflow_run=workflow_run):
                 node = pr_node(1, issue=issue_node(10))
                 commit = node["commits"]["nodes"][0]["commit"]
@@ -3260,7 +3263,7 @@ class CodexReviewOf0dc0f8b(CodexReviewOf099ef9b):
         lint = {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"}
         other = {"name": "other", "status": "COMPLETED", "conclusion": "SUCCESS"}
         for workflow_run, runs in (
-            ({"event": "workflow_dispatch"}, [lint, lint]),
+            ({"event": "schedule"}, [lint, lint]),
             (None, [other, other]),
         ):
             with self.subTest(workflow_run=workflow_run):
